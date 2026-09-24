@@ -88,6 +88,8 @@ describe("MCP tools over Streamable HTTP", () => {
       "git_status",
       "list_directory",
       "read_file",
+      "read_repo_file",
+      "search_repo",
       "search_workspace",
       "start_orchestration",
       "start_test_job",
@@ -104,6 +106,8 @@ describe("MCP tools over Streamable HTTP", () => {
     expectToolOutputSchema(tools, "list_directory", ["path", "entries", "total", "hasMore"]);
     expectToolOutputSchema(tools, "read_file", ["path", "content", "startLine", "endLine", "nextStartLine"]);
     expectToolOutputSchema(tools, "search_workspace", ["matches", "matchCount", "truncated", "engine"]);
+    expectToolOutputSchema(tools, "search_repo", ["repo", "matches", "totalFiles", "truncated"]);
+    expectToolOutputSchema(tools, "read_repo_file", ["repo", "path", "startLine", "endLine", "content"]);
     expectToolOutputSchema(tools, "git_status", ["isRepo", "branch", "staged", "unstaged", "untracked", "hidden"]);
     expectToolOutputSchema(tools, "git_diff", ["isRepo", "mode", "diff", "hasMore", "nextOffset"]);
     expectToolOutputSchema(tools, "test_status", ["available", "tests", "outputAvailable", "outputId"]);
@@ -135,6 +139,20 @@ describe("MCP tools over Streamable HTTP", () => {
       const result = await client.callTool({ ...base, arguments: arguments_ });
       expect(result.isError).toBe(true);
     }
+  });
+
+  it("searches and reads an allowlisted repo over MCP without accepting caller paths", async () => {
+    const search = await client.callTool({ name: "search_repo", arguments: { repo: "pve-doc", query: "AI-Workspace", max_results: 2 } });
+    const found = structuredJsonOf<{ matches: { path: string; line: number }[] }>(search);
+    expect(found.matches.length).toBeGreaterThan(0);
+    const first = found.matches[0];
+    const read = await client.callTool({ name: "read_repo_file", arguments: { repo: "pve-doc", path: first.path,
+      start_line: first.line, end_line: first.line } });
+    expect(structuredJsonOf<{ content: string }>(read).content.toLowerCase()).toContain("ai-workspace");
+    for (const request of [
+      { name: "search_repo", arguments: { repo: "unknown", query: "AI-Workspace" } },
+      { name: "read_repo_file", arguments: { repo: "pve-doc", path: "../outside" } },
+    ]) expect((await client.callTool(request)).isError).toBe(true);
   });
 
   it("workspace_info returns identity and project detection", async () => {
