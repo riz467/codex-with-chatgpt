@@ -1,5 +1,7 @@
 # Codex with ChatGPT
 
+> **AI-Workspace gateway extension (local deployment):** This checkout also includes two narrowly scoped action tools (`start_test_job`, `start_orchestration`) and three review/status readers. The V1 read-only descriptions below apply to the original nine tools only. See [AI-Workspace gateway setup and security boundary](docs/ai-workspace-gateway.md). Enabling the action scope on a public connector is an explicit operator decision.
+
 > ChatGPT thinks. Codex works.
 > ChatGPT 负责思考，Codex 负责干活。
 

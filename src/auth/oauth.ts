@@ -76,6 +76,8 @@ function pairingPage(opts: {
     "workspace.search": "Search this workspace",
     "git.read": "Read git status and diffs",
     "execution.read": "Read Codex execution summaries",
+    "review.read": "Read local orchestration task evidence and review bundles",
+    "orchestration.start": "Start bounded local AI tasks and fixed test markers",
     offline_access: "Stay connected between sessions",
   };
   const scopeList = opts.scopes

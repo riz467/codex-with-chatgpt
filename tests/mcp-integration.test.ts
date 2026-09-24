@@ -58,7 +58,7 @@ beforeAll(async () => {
   });
   const tokens = bridge.authStore.issueTokens({
     clientId: "it-client",
-    scopes: ["workspace.read", "workspace.search", "git.read", "execution.read"],
+    scopes: ["workspace.read", "workspace.search", "git.read", "execution.read", "review.read", "orchestration.start"],
   });
   accessToken = tokens.accessToken;
 
@@ -76,18 +76,23 @@ afterAll(async () => {
 });
 
 describe("MCP tools over Streamable HTTP", () => {
-  it("lists all nine read-only tools", async () => {
+  it("lists read-only and bounded local gateway tools", async () => {
     const { tools } = await client.listTools();
     const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
       "execution_output",
       "execution_summary",
+      "get_orchestration_result",
+      "get_orchestration_status",
       "git_diff",
       "git_status",
       "list_directory",
       "read_file",
       "search_workspace",
+      "start_orchestration",
+      "start_test_job",
       "test_status",
+      "verify_bundle_integrity",
       "workspace_info",
     ]);
     // no write tools in V1
@@ -104,6 +109,11 @@ describe("MCP tools over Streamable HTTP", () => {
     expectToolOutputSchema(tools, "test_status", ["available", "tests", "outputAvailable", "outputId"]);
     expectToolOutputSchema(tools, "execution_summary", ["records"]);
     expectToolOutputSchema(tools, "execution_output", ["action", "items", "text"]);
+    const start = tools.find((tool) => tool.name === "start_orchestration")?.inputSchema as { required?: string[]; properties?: Record<string, { enum?: string[] }> };
+    expect(start.required).toEqual(expect.arrayContaining(["repo", "mode", "goal"]));
+    expect(start.properties?.mode?.enum).toEqual(["read_only", "change"]);
+    expect(start.properties).toHaveProperty("edit_paths");
+    expect(start.required).not.toContain("edit_paths");
   });
 
   it("documents git_diff pagination with its output field names", async () => {
@@ -113,6 +123,18 @@ describe("MCP tools over Streamable HTTP", () => {
     expect(description).toContain("nextOffset");
     expect(description).not.toContain("has_more");
     expect(description).not.toContain("next_offset");
+  });
+
+  it("rejects edit_paths for read_only and unsafe paths for change before launch", async () => {
+    const base = { name: "start_orchestration" };
+    for (const arguments_ of [
+      { repo: "ai-orchestration-config", mode: "read_only", goal: "inspect", edit_paths: ["README.md"] },
+      { repo: "ai-orchestration-config", mode: "change", goal: "edit", edit_paths: ["../outside"] },
+      { repo: "unknown", mode: "change", goal: "edit", edit_paths: ["README.md"] },
+    ]) {
+      const result = await client.callTool({ ...base, arguments: arguments_ });
+      expect(result.isError).toBe(true);
+    }
   });
 
   it("workspace_info returns identity and project detection", async () => {
@@ -313,6 +335,17 @@ describe("MCP tools over Streamable HTTP", () => {
     });
     expect(outputDenied.isError).toBe(true);
     expect(textOf(outputDenied)).toContain("INSUFFICIENT_SCOPE");
+    for (const [name, args] of [
+      ["start_test_job", {}],
+      ["start_orchestration", { repo: "pve-doc", mode: "read_only", goal: "inspect" }],
+      ["get_orchestration_status", { id: "unissued" }],
+      ["get_orchestration_result", { id: "unissued" }],
+      ["verify_bundle_integrity", {}],
+    ] as const) {
+      const gatewayDenied = await limitedClient.callTool({ name, arguments: args });
+      expect(gatewayDenied.isError).toBe(true);
+      expect(textOf(gatewayDenied)).toContain("INSUFFICIENT_SCOPE");
+    }
     const allowed = await limitedClient.callTool({ name: "read_file", arguments: { path: "hello.txt" } });
     expect(allowed.isError ?? false).toBe(false);
     await limitedClient.close();
