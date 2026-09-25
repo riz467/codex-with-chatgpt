@@ -13,6 +13,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-runtime.mjs",
     "dev": "tsx src/cli/index.ts",
+    "dashboard": "node dist/dashboard/server.js",
+    "dashboard:dev": "tsx src/dashboard/server.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

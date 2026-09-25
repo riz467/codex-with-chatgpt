@@ -25,7 +25,7 @@ export class GatewayError extends Error {
 }
 
 // Reject all reparse points (including Windows junctions) at every existing component.
-function safePath(root: string, relative = ""): string {
+export function safePath(root: string, relative = ""): string {
   if (relative && (path.isAbsolute(relative) || /[\\:]|(^|\/)\.{1,2}(\/|$)|\/\//.test(relative) || relative.startsWith("/"))) {
     throw new GatewayError("INVALID_PATH", "Invalid relative path");
   }
@@ -280,11 +280,12 @@ function findJob(id: string, root: string): Job {
 }
 // Registry IDs take precedence. Only a syntactically valid task ID can fall back
 // to the two fixed engine ledgers; no repository or directory is caller-selected.
-function ledgerTask(id: string): { repo: keyof typeof REPOS; status: Record<string, unknown> } {
+export function ledgerTask(id: string, roots: Readonly<Record<keyof typeof REPOS, string>> = REPOS): { repo: keyof typeof REPOS; status: Record<string, unknown> } {
   if (!idPattern.test(id)) throw new GatewayError("INVALID_ID", "Invalid task id");
   const matches: { repo: keyof typeof REPOS; status: Record<string, unknown> }[] = [];
   for (const key of Object.keys(REPOS) as (keyof typeof REPOS)[]) {
-    const file = safePath(repoRoot(key), `.ai/tasks/${id}/status.json`);
+    const root = roots === REPOS ? repoRoot(key) : roots[key];
+    const file = safePath(root, `.ai/tasks/${id}/status.json`);
     if (!fs.existsSync(file)) continue;
     const status = jsonFile(file);
     if (status.task_id !== id || typeof status.state !== "string") throw new GatewayError("INVALID_EVIDENCE", "Task ledger identity mismatch");
