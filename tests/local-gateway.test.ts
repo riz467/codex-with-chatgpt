@@ -5,7 +5,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { spawn, spawnSync } from "node:child_process";
-import { verifyBundleIntegrity, startTestJob, startOrchestration, getOrchestrationStatus, getOrchestrationResult, validateEditPaths } from "../src/mcp/local-gateway.js";
+import { REVIEW_ROOT, verifyBundleIntegrity, startTestJob, startOrchestration, getOrchestrationStatus, getOrchestrationResult, getOrchestrationApproval, getOrchestrationRetryPlan, retryOrchestration, validateEditPaths, completeOrchestration, completeIntegratedOrchestration } from "../src/mcp/local-gateway.js";
 import { runReadOnlyJob } from "../src/mcp/read-only-worker.js";
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -29,6 +29,15 @@ function bundle(root: string) {
   return dir;
 }
 describe("local review integrity", () => {
+  it("never invokes the engine without an explicit PASS and approval or with an unsafe task ID", () => {
+    expect(() => completeOrchestration("task-1", "NEEDS_WORK", true)).toThrow();
+    expect(() => completeOrchestration("task-1", "PASS", false)).toThrow();
+    expect(() => completeOrchestration("../task-1", "PASS", true)).toThrow();
+    expect(() => completeIntegratedOrchestration("task-1", "NEEDS_WORK", true)).toThrow();
+    expect(() => completeIntegratedOrchestration("task-1", "PASS", false)).toThrow();
+    expect(() => completeIntegratedOrchestration("../task-1", "PASS", true)).toThrow();
+    expect(vi.mocked(spawnSync)).not.toHaveBeenCalled();
+  });
   it("reports an absent current pointer without creating review state", () => {
     const root = temp();
     expect(verifyBundleIntegrity(undefined, root)).toEqual({ bundle: null, valid: false, issues: [{ kind: "missing", path: "CURRENT_REVIEW.json" }] });
@@ -58,6 +67,64 @@ describe("local review integrity", () => {
   });
 });
 describe("bounded actions", () => {
+  it("reads the existing integrated CPU task without a registry job or any writes", () => {
+    const id = "rpc-e2e-cpu-20260925-02";
+    const registry = path.join(REVIEW_ROOT, "rpc-jobs");
+    expect(fs.readdirSync(registry).some((entry) => {
+      const file = path.join(registry, entry, "job.json");
+      return fs.existsSync(file) && JSON.parse(fs.readFileSync(file, "utf8")).task_id === id;
+    })).toBe(false);
+    const write = vi.spyOn(fs, "writeFileSync");
+    try {
+      expect(getOrchestrationStatus(id)).toMatchObject({ task_id: id, repo: "pve-doc", job_id: null,
+        state: "DONE", process: "not_running", result_category: "DONE", next_action: "None" });
+      expect(getOrchestrationResult(id)).toMatchObject({ task_id: id, repo: "pve-doc", mode: "change", state: "DONE",
+        result_category: "DONE", review_result: "PASS", done_approved: true, completion_mode: "post_integration",
+        integrated_commit: "97920b6bf6cdd86e9f89b3f416f5f9ed2977a98e", published: true,
+        changed_paths: ["03_services/ai-workspace.md"], verification: { completed: true, exit_code: 0 } });
+      expect(write).not.toHaveBeenCalled();
+    } finally { write.mockRestore(); }
+  });
+  it("reads normal review DONE and READY_FOR_REVIEW from a fixed ledger, failing closed on ambiguity and traversal", () => {
+    const root = temp(), id = "rpc-fallback-test", repo = "C:\\work\\pve-doc", other = "C:\\work\\ai-orchestration-config";
+    const ledger = path.join(repo, ".ai", "tasks", id, "status.json");
+    const duplicate = path.join(other, ".ai", "tasks", id, "status.json");
+    const decision = path.join(repo, ".ai", "tasks", id, "review-decision.json");
+    const status = { task_id: id, state: "DONE", message: "Reviewed", edits: [{ path: "README.md" }], verify_completed: true,
+      verify_exit_code: 0, state_transition_history: [{ to: "DONE", timestamp: "2026-09-25T12:00:00Z" }] };
+    const files = new Map([[ledger, JSON.stringify(status)], [decision, JSON.stringify({ task_id: id, new_state: "DONE",
+      review_result: "PASS", done_approved: true, reviewed_at: "2026-09-25T12:00:00Z" })]]);
+    const originalExists = fs.existsSync.bind(fs), originalRead = fs.readFileSync.bind(fs);
+    const exists = vi.spyOn(fs, "existsSync").mockImplementation((file) => files.has(String(file)) || originalExists(file));
+    const read = vi.spyOn(fs, "readFileSync").mockImplementation(((file: string, encoding?: string) =>
+      files.has(String(file)) ? files.get(String(file))! : originalRead(file, encoding as BufferEncoding)) as typeof fs.readFileSync);
+    try {
+      expect(getOrchestrationResult(id, root)).toMatchObject({ job_id: null, state: "DONE", result_category: "DONE",
+        review_result: "PASS", done_approved: true, completion_mode: null, integrated_commit: null,
+        completed_at: "2026-09-25T12:00:00Z", published: false });
+      status.state = "READY_FOR_REVIEW";
+      files.set(ledger, JSON.stringify(status));
+      expect(getOrchestrationStatus(id, root)).toMatchObject({ state: "READY_FOR_REVIEW", stop_reason_category: "READY_FOR_REVIEW" });
+      expect(getOrchestrationResult(id, root)).toMatchObject({ state: "READY_FOR_REVIEW", published: false });
+      files.set(duplicate, JSON.stringify(status));
+      expect(() => getOrchestrationStatus(id, root)).toThrow(/multiple allowlisted/);
+      expect(() => getOrchestrationResult(id, root)).toThrow(/multiple allowlisted/);
+      for (const bad of ["../rpc-fallback-test", "rpc-../test", "rpc-foo\\bar", "rpc-%2e%2e", "rpc-"]) {
+        expect(() => getOrchestrationResult(bad, root)).toThrow();
+      }
+      expect(() => getOrchestrationResult("rpc-nonexistent-ledger-task", root)).toThrow(/Unknown/);
+    } finally { exists.mockRestore(); read.mockRestore(); }
+  });
+  it("rejects a reparse-point task directory before reading ledger evidence", () => {
+    const root = temp(), id = "rpc-symlink-escape";
+    const directory = path.join("C:\\work\\pve-doc", ".ai", "tasks", id);
+    const original = fs.lstatSync.bind(fs);
+    const lstat = vi.spyOn(fs, "lstatSync").mockImplementation(((file: string) =>
+      String(file) === directory ? { isSymbolicLink: () => true } as fs.Stats : original(file)) as typeof fs.lstatSync);
+    try {
+      expect(() => getOrchestrationResult(id, root)).toThrow(/Reparse or escaped path/);
+    } finally { lstat.mockRestore(); }
+  });
   it("accepts only existing repo-relative files, normalizes duplicates, and denies traversal, globs and symlink escapes", () => {
     const repo = temp(), outside = temp();
     fs.writeFileSync(path.join(repo, "README.md"), "readme");
@@ -202,8 +269,176 @@ describe("bounded actions", () => {
         expect(getOrchestrationStatus(id, root).state).toBe(state);
         expect(getOrchestrationResult(id, root).state).toBe(state);
       }
-      expect(getOrchestrationResult(id, root).changed_paths).toEqual(["README.md"]);
+      expect(getOrchestrationResult(id, root).changed_paths).toEqual([]);
       expect(getOrchestrationResult(id, root).published).toBe(false);
     } finally { existsMock.mockRestore(); readMock.mockRestore(); }
+  });
+  it("inspects recorded approval without exposing replacement text or changing the ledger", () => {
+    const root = temp(), id = "approval-job", task = "rpc-approval-task";
+    const dir = path.join(root, "rpc-jobs", id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "job.json"), JSON.stringify({ job_id: id, task_id: task, mode: "change", repo_key: "pve-doc", process_id: process.pid, exit_code: 2 }));
+    fs.writeFileSync(path.join(dir, "stdout.log"), "RESULT: HUMAN_APPROVAL_REQUIRED\n");
+    const ledger = path.join("C:\\work\\pve-doc", ".ai", "tasks", task, "status.json");
+    const proposalFile = path.join("C:\\work\\pve-doc", ".ai", "tasks", task, "codex-attempt-1.stdout.txt");
+    const status = { task_id: task, state: "NEEDS_APPROVAL", approval_required: true, message: "Codex structured proposal requests approval", edit_paths: ["README.md"],
+      allowed_paths: ["README.md", `.ai/tasks/${task}/**`], codex_attempts: 1, verify_completed: false, edits: [] };
+    const proposal = { task_id: task, state: "NEEDS_APPROVAL", approval_required: true, message: "Human decision requested", proposed_command: "git push origin main",
+      edits: [{ path: "README.md", old_text: "PRIVATE OLD TEXT", new_text: "PRIVATE NEW TEXT" }] };
+    const originalExists = fs.existsSync.bind(fs), originalRead = fs.readFileSync.bind(fs);
+    const exists = vi.spyOn(fs, "existsSync").mockImplementation((file) => [ledger, proposalFile].includes(String(file)) || originalExists(file));
+    const read = vi.spyOn(fs, "readFileSync").mockImplementation(((file: string, encoding?: string) =>
+      String(file) === ledger ? JSON.stringify(status) : String(file) === proposalFile ? Buffer.from(JSON.stringify(proposal)) : originalRead(file, encoding as BufferEncoding)) as typeof fs.readFileSync);
+    try {
+      const result = getOrchestrationResult(task, root);
+      expect(result).toMatchObject({ task_id: task, state: "NEEDS_APPROVAL", result_category: "HUMAN_APPROVAL_REQUIRED", approval_required: true,
+        approval_type: "structured_proposal", approval_reason: status.message, planned_paths: ["README.md"], push_requested: true,
+        commit_requested: false, changed_paths_so_far: [], verification_status: { completed: false },
+        stop_reason_category: "HUMAN_APPROVAL_REQUIRED", human_action_required: true });
+      expect(getOrchestrationStatus(id, root)).toMatchObject({ state: "NEEDS_APPROVAL", result_category: "HUMAN_APPROVAL_REQUIRED",
+        stop_reason_category: "HUMAN_APPROVAL_REQUIRED", human_action_required: true });
+      expect(result.proposal_hash).toBe(sha(Buffer.from(JSON.stringify(proposal))));
+      expect(result.risky_actions).toContain("git push origin main");
+      expect(getOrchestrationApproval(id, root).structured_proposal?.edits).toHaveLength(1);
+      expect(JSON.stringify(getOrchestrationApproval(id, root))).not.toMatch(/PRIVATE OLD TEXT|PRIVATE NEW TEXT/);
+      expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+      proposal.proposed_command = "";
+      proposal.message = "Repository read timed out; unable to inspect files for evidence";
+      proposal.edits = [] as typeof proposal.edits;
+      expect(getOrchestrationStatus(id, root)).toMatchObject({ state: "NEEDS_APPROVAL", result_category: "HUMAN_APPROVAL_REQUIRED",
+        stop_reason_category: "EVIDENCE_INSUFFICIENT", human_action_required: false });
+      expect(getOrchestrationResult(id, root).recommended_next_action).toMatch(/retry research/i);
+      for (const message of [
+        "読み取りコマンドが実行環境の接続タイムアウトで失敗し、編集案を提示しません。",
+        "作業環境への読取アクセスが失敗したため、対象文書と未コミット差分を確認できませんでした。正確な置換箇所を特定できず、編集案は提示できません。",
+        "Read access failed before inspecting the repository; no edit proposal could be grounded.",
+        "Unable to inspect target files; no edit proposal is available.",
+        "対象文書を確認できず、編集案を提示できません。",
+        "正確な置換箇所を特定できず、編集案は提示できません。",
+      ]) {
+        proposal.message = message;
+        expect(getOrchestrationStatus(id, root)).toMatchObject({ state: "NEEDS_APPROVAL", result_category: "HUMAN_APPROVAL_REQUIRED",
+          stop_reason_category: "EVIDENCE_INSUFFICIENT", human_action_required: false });
+        expect(getOrchestrationResult(id, root)).toMatchObject({ stop_reason_category: "EVIDENCE_INSUFFICIENT", human_action_required: false });
+        expect(getOrchestrationApproval(id, root).stop_reason_category).toBe("EVIDENCE_INSUFFICIENT");
+      }
+      proposal.message = "No edits; human approval required before proceeding";
+      expect(getOrchestrationResult(id, root).stop_reason_category).toBe("HUMAN_APPROVAL_REQUIRED");
+      proposal.message = "Unable to inspect target files; request human approval to proceed";
+      expect(getOrchestrationResult(id, root).stop_reason_category).toBe("HUMAN_APPROVAL_REQUIRED");
+      proposal.message = "Cannot identify replacement; please approve git push";
+      expect(getOrchestrationResult(id, root).stop_reason_category).toBe("HUMAN_APPROVAL_REQUIRED");
+      proposal.message = "Edit scope unclear: target paths unspecified";
+      expect(getOrchestrationResult(id, root)).toMatchObject({ stop_reason_category: "SCOPE_CONFIRMATION_REQUIRED", human_action_required: true });
+      status.state = "READY_FOR_REVIEW";
+      expect(getOrchestrationStatus(id, root).stop_reason_category).toBe("READY_FOR_REVIEW");
+      expect(getOrchestrationResult(id, root).stop_reason_category).toBe("READY_FOR_REVIEW");
+      status.state = "BLOCKED";
+      status.message = "VerifyInternal failed: validation failed";
+      Object.assign(status, { verify_exit_code: 1, state_transition_history: [{ from: "VERIFYING", to: "BLOCKED" }] });
+      expect(getOrchestrationStatus(id, root)).toMatchObject({ stop_reason_category: "VERIFY_BLOCKED", human_action_required: false });
+      expect(getOrchestrationResult(id, root).recommended_next_action).toMatch(/RetryVerify/);
+      status.message = "Codex runtime unavailable";
+      expect(getOrchestrationResult(id, root).stop_reason_category).toBe("EXECUTION_BLOCKED");
+      status.state = "NEEDS_APPROVAL";
+      status.message = "";
+      expect(getOrchestrationApproval(id, root).approval_reason).toBe("approval reason unavailable");
+      status.state = "BLOCKED";
+      expect(() => getOrchestrationApproval(id, root)).toThrow(/not NEEDS_APPROVAL/);
+    } finally { exists.mockRestore(); read.mockRestore(); }
+  });
+  it("classifies pre-ledger scope confirmation without pretending an engine task exists", () => {
+    const root = temp(), id = "scope-job", task = "rpc-scope-task", dir = path.join(root, "rpc-jobs", id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "job.json"), JSON.stringify({ job_id: id, task_id: task, repo_key: "pve-doc", process_id: process.pid, exit_code: 2 }));
+    fs.writeFileSync(path.join(dir, "stdout.log"), "RESULT: HUMAN_SCOPE_CONFIRMATION_REQUIRED\n");
+    expect(getOrchestrationStatus(id, root)).toMatchObject({ state: null, result_category: "HUMAN_SCOPE_CONFIRMATION_REQUIRED",
+      stop_reason_category: "SCOPE_CONFIRMATION_REQUIRED", human_action_required: true });
+    expect(getOrchestrationResult(id, root)).toMatchObject({ state: null, stop_reason_category: "SCOPE_CONFIRMATION_REQUIRED" });
+    expect(() => getOrchestrationApproval(id, root)).toThrow(/not NEEDS_APPROVAL/);
+    expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: false, stop_reason_category: "SCOPE_CONFIRMATION_REQUIRED" });
+  });
+  it("retries only a hash-matched original goal and identical scoped paths as a new job", () => {
+    const root = temp(), id = "retry-parent", task = "rpc-retry-parent", goal = "Read and correct README.md. Do not commit or push.";
+    const dir = path.join(root, "rpc-jobs", id);
+    fs.mkdirSync(dir, { recursive: true });
+    const parent = { job_id: id, task_id: task, mode: "change", repo_key: "ai-orchestration-config", process_id: process.pid,
+      exit_code: 2, goal_sha256: sha(Buffer.from(goal)), goal, edit_paths: ["README.md"] };
+    const parentBytes = JSON.stringify(parent);
+    fs.writeFileSync(path.join(dir, "job.json"), parentBytes);
+    fs.writeFileSync(path.join(dir, "stdout.log"), "RESULT: HUMAN_APPROVAL_REQUIRED\n");
+    const statusFile = path.join("C:\\work\\ai-orchestration-config", ".ai", "tasks", task, "status.json");
+    const proposalFile = path.join("C:\\work\\ai-orchestration-config", ".ai", "tasks", task, "codex-attempt-1.stdout.txt");
+    const status = { task_id: task, state: "NEEDS_APPROVAL", goal, message: "Codex structured proposal requests approval", codex_attempts: 1,
+      edit_paths: ["README.md"], allowed_paths: ["README.md", `.ai/tasks/${task}/**`], edits: [] };
+    const proposal = { task_id: task, state: "EXECUTING", approval_required: true, message: "Repository read timed out; insufficient evidence",
+      proposed_command: "", edits: [] as { path: string }[] };
+    const existsOriginal = fs.existsSync.bind(fs), readOriginal = fs.readFileSync.bind(fs);
+    const exists = vi.spyOn(fs, "existsSync").mockImplementation((file) => [statusFile, proposalFile].includes(String(file)) || existsOriginal(file));
+    const read = vi.spyOn(fs, "readFileSync").mockImplementation(((file: string, encoding?: string) =>
+      String(file) === statusFile ? JSON.stringify(status) : String(file) === proposalFile ? Buffer.from(JSON.stringify(proposal)) : readOriginal(file, encoding as BufferEncoding)) as typeof fs.readFileSync);
+    const child = Object.assign(new EventEmitter(), { pid: process.pid, unref: vi.fn() });
+    vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
+    try {
+      expect(() => retryOrchestration("unknown", undefined, root)).toThrow();
+      expect(getOrchestrationRetryPlan(task, root)).toMatchObject({ eligible: true, stop_reason_category: "EVIDENCE_INSUFFICIENT",
+        inherited_goal: goal, inherited_edit_paths: ["README.md"], attempt: 1 });
+      expect(fs.readFileSync(path.join(dir, "job.json"), "utf8")).toBe(parentBytes);
+      expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+      const retried = retryOrchestration(id, "Research timed out", root);
+      expect(retried).toMatchObject({ parent_task_id: task, retry_of: task, retry_reason: "Research timed out", attempt: 2 });
+      expect(retried.task_id).not.toBe(task);
+      const childJob = JSON.parse(fs.readFileSync(path.join(root, "rpc-jobs", retried.job_id, "job.json"), "utf8"));
+      expect(childJob).toMatchObject({ goal, goal_sha256: parent.goal_sha256, edit_paths: ["README.md"],
+        repo_key: parent.repo_key, mode: parent.mode, parent_task_id: task, retry_of: task, retry_reason: "Research timed out", attempt: 2 });
+      expect(getOrchestrationStatus(retried.job_id, root)).toMatchObject({ task_id: retried.task_id, parent_task_id: task, retry_of: task, attempt: 2 });
+      expect(getOrchestrationResult(retried.task_id, root)).toMatchObject({ parent_task_id: task, retry_of: task, attempt: 2 });
+      const [, args, opts] = vi.mocked(spawn).mock.calls[0];
+      expect(opts).toMatchObject({ shell: false });
+      expect(args?.slice(4, 10)).toEqual(["-Repo", "C:\\work\\ai-orchestration-config", "-TaskId", retried.task_id, "-Goal", goal]);
+      expect(JSON.parse(Buffer.from(args?.[11] ?? "", "base64").toString("utf8"))).toEqual(["README.md"]);
+      expect(fs.readFileSync(path.join(dir, "job.json"), "utf8")).toBe(parentBytes);
+      expect(getOrchestrationRetryPlan(id, root).eligible).toBe(false);
+      expect(() => retryOrchestration(id, undefined, root)).toThrow(/reserved/);
+      child.emit("exit", 2);
+    } finally { exists.mockRestore(); read.mockRestore(); }
+  });
+  it("denies risky, review, verify and scope-drift retries without spawning", () => {
+    const root = temp(), id = "retry-denied", task = "rpc-retry-denied", goal = "Edit README.md";
+    const dir = path.join(root, "rpc-jobs", id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "job.json"), JSON.stringify({ job_id: id, task_id: task, mode: "change", repo_key: "ai-orchestration-config",
+      process_id: process.pid, exit_code: 2, goal_sha256: sha(Buffer.from(goal)), goal, edit_paths: ["README.md"] }));
+    const statusFile = path.join("C:\\work\\ai-orchestration-config", ".ai", "tasks", task, "status.json");
+    const proposalFile = path.join("C:\\work\\ai-orchestration-config", ".ai", "tasks", task, "codex-attempt-1.stdout.txt");
+    const status = { task_id: task, state: "NEEDS_APPROVAL", goal, message: "Approval needed", codex_attempts: 1,
+      edit_paths: ["README.md"], allowed_paths: ["README.md", `.ai/tasks/${task}/**`], edits: [] };
+    const proposal = { task_id: task, message: "Approval required", proposed_command: "git push origin main", edits: [] };
+    const existsOriginal = fs.existsSync.bind(fs), readOriginal = fs.readFileSync.bind(fs);
+    const exists = vi.spyOn(fs, "existsSync").mockImplementation((file) => [statusFile, proposalFile].includes(String(file)) || existsOriginal(file));
+    const read = vi.spyOn(fs, "readFileSync").mockImplementation(((file: string, encoding?: string) =>
+      String(file) === statusFile ? JSON.stringify(status) : String(file) === proposalFile ? Buffer.from(JSON.stringify(proposal)) : readOriginal(file, encoding as BufferEncoding)) as typeof fs.readFileSync);
+    try {
+      expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: false, stop_reason_category: "HUMAN_APPROVAL_REQUIRED" });
+      expect(() => retryOrchestration(id, undefined, root)).toThrow(/Human approval/);
+      status.state = "READY_FOR_REVIEW";
+      expect(() => retryOrchestration(id, undefined, root)).toThrow(/not eligible/);
+      status.state = "BLOCKED";
+      status.message = "VerifyInternal failed: check";
+      Object.assign(status, { verify_exit_code: 1, state_transition_history: [{ from: "VERIFYING", to: "BLOCKED" }] });
+      expect(() => retryOrchestration(id, undefined, root)).toThrow(/RetryVerify/);
+      status.message = "Runtime unavailable";
+      expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: true, stop_reason_category: "EXECUTION_BLOCKED" });
+      status.edit_paths = ["README.md", "docs/other.md"];
+      expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: false });
+      status.edit_paths = ["README.md"];
+      status.state = "NEEDS_APPROVAL";
+      proposal.proposed_command = "";
+      proposal.message = "Edit scope unclear: paths unspecified";
+      expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: true, stop_reason_category: "SCOPE_CONFIRMATION_REQUIRED" });
+      status.goal = "Different goal";
+      expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: false });
+      expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+    } finally { exists.mockRestore(); read.mockRestore(); }
   });
 });

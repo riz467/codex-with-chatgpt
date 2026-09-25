@@ -36,6 +36,8 @@ describe("fixed review workspace", () => {
       await client.connect(new StreamableHTTPClientTransport(new URL(`${bridge.localBaseUrl()}/mcp`), {
         requestInit: { headers: { authorization: `Bearer ${token.accessToken}` } },
       }));
+      expect((await client.listTools()).tools.map((tool) => tool.name)).not.toContain("complete_orchestration");
+      expect((await client.listTools()).tools.map((tool) => tool.name)).not.toContain("complete_integrated_orchestration");
       const info = await client.callTool({ name: "workspace_info", arguments: {} });
       expect(info.isError).not.toBe(true);
       expect(info.structuredContent).toMatchObject({ workspaceRoot: REVIEW_ROOT, readOnly: true, directoryExists: true,

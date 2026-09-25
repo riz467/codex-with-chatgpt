@@ -80,15 +80,20 @@ describe("MCP tools over Streamable HTTP", () => {
     const { tools } = await client.listTools();
     const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
+      "complete_integrated_orchestration",
+      "complete_orchestration",
       "execution_output",
       "execution_summary",
+      "get_orchestration_approval",
       "get_orchestration_result",
+      "get_orchestration_retry_plan",
       "get_orchestration_status",
       "git_diff",
       "git_status",
       "list_directory",
       "read_file",
       "read_repo_file",
+      "retry_orchestration",
       "search_repo",
       "search_workspace",
       "start_orchestration",
@@ -108,6 +113,14 @@ describe("MCP tools over Streamable HTTP", () => {
     expectToolOutputSchema(tools, "search_workspace", ["matches", "matchCount", "truncated", "engine"]);
     expectToolOutputSchema(tools, "search_repo", ["repo", "matches", "totalFiles", "truncated"]);
     expectToolOutputSchema(tools, "read_repo_file", ["repo", "path", "startLine", "endLine", "content"]);
+    expectToolOutputSchema(tools, "get_orchestration_status", ["state", "result_category", "stop_reason_category", "stop_reason_summary", "human_action_required", "recommended_next_action"]);
+    expectToolOutputSchema(tools, "get_orchestration_result", ["state", "stop_reason_category", "stop_reason_summary", "human_action_required", "recommended_next_action"]);
+    const retrySchema = tools.find((tool) => tool.name === "retry_orchestration")?.inputSchema as
+      { properties?: Record<string, unknown>; additionalProperties?: boolean } | undefined;
+    expect(Object.keys(retrySchema?.properties ?? {})).toEqual(["id", "retry_reason"]);
+    expect(retrySchema?.additionalProperties).toBe(false);
+    const injected = await client.callTool({ name: "retry_orchestration", arguments: { id: "unissued", command: "git push", edit_paths: ["README.md"] } });
+    expect(injected.isError).toBe(true);
     expectToolOutputSchema(tools, "git_status", ["isRepo", "branch", "staged", "unstaged", "untracked", "hidden"]);
     expectToolOutputSchema(tools, "git_diff", ["isRepo", "mode", "diff", "hasMore", "nextOffset"]);
     expectToolOutputSchema(tools, "test_status", ["available", "tests", "outputAvailable", "outputId"]);
@@ -127,6 +140,32 @@ describe("MCP tools over Streamable HTTP", () => {
     expect(description).toContain("nextOffset");
     expect(description).not.toContain("has_more");
     expect(description).not.toContain("next_offset");
+  });
+  it("reads a completed task through the task_id MCP argument", async () => {
+    const task_id = "rpc-e2e-cpu-20260925-02";
+    const status = await client.callTool({ name: "get_orchestration_status", arguments: { task_id } });
+    expect(status.isError ?? false).toBe(false);
+    expect(structuredJsonOf(status)).toMatchObject({ task_id, state: "DONE", process: "not_running", result_category: "DONE" });
+    const result = await client.callTool({ name: "get_orchestration_result", arguments: { task_id } });
+    expect(result.isError ?? false).toBe(false);
+    expect(structuredJsonOf(result)).toMatchObject({ task_id, state: "DONE", review_result: "PASS", done_approved: true,
+      completion_mode: "post_integration", integrated_commit: "97920b6bf6cdd86e9f89b3f416f5f9ed2977a98e" });
+    for (const arguments_ of [{ task_id: "../escape" }, { task_id, repo: "C:\\work\\pve-doc" }, { id: task_id, task_id }]) {
+      expect((await client.callTool({ name: "get_orchestration_result", arguments: arguments_ })).isError).toBe(true);
+    }
+  });
+  it("refuses completion without explicit PASS and human approval", async () => {
+    for (const name of ["complete_orchestration", "complete_integrated_orchestration"]) {
+      for (const args of [
+        { task_id: "test-1", review_result: "NEEDS_WORK", done_approved: true },
+        { task_id: "test-1", review_result: "PASS", done_approved: false },
+        { task_id: "../test-1", review_result: "PASS", done_approved: true },
+        { task_id: "test-1", review_result: "PASS", done_approved: true, repo: "C:\\work\\pve-doc" },
+      ]) {
+        const result = await client.callTool({ name, arguments: args });
+        expect(result.isError).toBe(true);
+      }
+    }
   });
 
   it("rejects edit_paths for read_only and unsafe paths for change before launch", async () => {
@@ -358,6 +397,9 @@ describe("MCP tools over Streamable HTTP", () => {
       ["start_orchestration", { repo: "pve-doc", mode: "read_only", goal: "inspect" }],
       ["get_orchestration_status", { id: "unissued" }],
       ["get_orchestration_result", { id: "unissued" }],
+      ["get_orchestration_approval", { id: "unissued" }],
+      ["get_orchestration_retry_plan", { id: "unissued" }],
+      ["retry_orchestration", { id: "unissued" }],
       ["verify_bundle_integrity", {}],
     ] as const) {
       const gatewayDenied = await limitedClient.callTool({ name, arguments: args });
