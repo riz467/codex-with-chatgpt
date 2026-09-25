@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
+import type { Category, Phase, LifecycleEvent } from "./exit-telemetry.js";
 
 // This is a transport for the existing engine invocation, not a general command queue.
 export const QUEUE = "C:\\work\\ai-workspace-logs\\codex-worker";
@@ -100,7 +101,7 @@ export function readResult(dir: string, r: Request) {
 }
 export async function executeOne(dir: string, r: Request, sessionId: number, run = spawn) {
   const f = files(dir, r.task_id + "-" + r.attempt);
-  if (fs.existsSync(f.result)) return;
+  if (fs.existsSync(f.result)) return null;
   let exit_code = -1, stdout = "", stderr = "";
   try {
     const checked = validate(r);
@@ -115,8 +116,13 @@ export async function executeOne(dir: string, r: Request, sessionId: number, run
     stdout = Buffer.concat(out).toString("utf8"); stderr = Buffer.concat(err).toString("utf8");
   } catch (error) { stderr = String(error); }
   atomicJson(f.result, { task_id: r.task_id, attempt: r.attempt, nonce: r.nonce, request_hash: r.request_hash, exit_code, stdout, stderr, session_id: sessionId, completed_utc: new Date().toISOString() });
+  return exit_code;
 }
-export async function worker(dir = QUEUE, sessionId = Number(process.env.AI_WORKER_SESSION_ID)) {
+export type WorkerTelemetry = { phase: (phase: Phase) => void;
+  record: (event: LifecycleEvent, opts?: { phase?: Phase; reason_category?: Category; task_id?: string; exit_code?: number | null; error?: unknown }) => void };
+export async function worker(dir = QUEUE, sessionId = Number(process.env.AI_WORKER_SESSION_ID), telemetry?: WorkerTelemetry) {
+  let phase: Phase = "init", idle = false, ready = false;
+  const setPhase = (next: Phase) => { phase = next; telemetry?.phase(next); };
   if (!Number.isInteger(sessionId) || sessionId <= 0) throw new Error("Interactive session required");
   prepare(dir);
   const lock = path.join(dir, "worker.lock");
@@ -131,37 +137,56 @@ export async function worker(dir = QUEUE, sessionId = Number(process.env.AI_WORK
   const fd = fs.openSync(lock, "wx");
   fs.writeSync(fd, String(process.pid));
   try {
-    const beat = () => atomicJson(path.join(dir, "heartbeat.json"), { pid: process.pid, session_id: sessionId, observed_utc: new Date().toISOString(), rdp_diagnostic_version: 1 });
+    const beat = () => {
+      const previous = phase; setPhase("heartbeat");
+      atomicJson(path.join(dir, "heartbeat.json"), { pid: process.pid, session_id: sessionId, observed_utc: new Date().toISOString(), rdp_diagnostic_version: 1 });
+      setPhase(previous);
+    };
     const pulse = setInterval(beat, 2000);
     try {
     for (;;) {
        beat();
+       if (!ready) { telemetry?.record("worker_ready", { phase: "idle" }); ready = true; }
+       setPhase("queue");
        // This fixed, one-shot diagnostic has its own queue and cannot consume an engine request.
        const rdpFile = path.join(RDP_QUEUE, "requests", `${RDP_ID}-1.json`);
        const rdpRunning = path.join(RDP_QUEUE, "claims", `${RDP_ID}-1.running`);
        if (fs.existsSync(rdpFile) && fs.existsSync(path.join(RDP_QUEUE, "claims", `${RDP_ID}-1`)) &&
            !fs.existsSync(rdpRunning) && !fs.existsSync(path.join(RDP_QUEUE, "results", `${RDP_ID}-1.json`))) {
          fs.writeFileSync(rdpRunning, rSafeHash(rdpFile), { flag: "wx" });
-         const request: Request = JSON.parse(fs.readFileSync(rdpFile, "utf8"));
-         // Keep the production queue responsive while the diagnostic holds Codex open.
-         const { runRdpDiagnostic } = await import("./rdp-disconnect-diagnostic.js");
-         void runRdpDiagnostic(request, sessionId).catch(error => console.error("RDP diagnostic failed closed:", error));
+          const request: Request = JSON.parse(fs.readFileSync(rdpFile, "utf8"));
+          // Keep the production queue responsive while the diagnostic holds Codex open.
+          const { runRdpDiagnostic } = await import("./rdp-disconnect-diagnostic.js");
+          telemetry?.record("worker_job_start", { phase: "job", task_id: RDP_ID });
+          void runRdpDiagnostic(request, sessionId).then(
+            () => telemetry?.record("worker_job_end", { phase: "job", task_id: RDP_ID }),
+            error => telemetry?.record("worker_job_end", { phase: "job", task_id: RDP_ID, reason_category: "JOB_ERROR", error })
+          );
        }
       for (const name of fs.readdirSync(path.join(dir, "requests")).filter(x => /^[A-Za-z0-9_-]+-[12]\.json$/.test(x))) {
         const id = name.slice(0, -5), f = files(dir, id);
         if (!fs.existsSync(f.claim) || fs.existsSync(f.running) || fs.existsSync(f.result)) continue;
         fs.writeFileSync(f.running, rSafeHash(f.request), { flag: "wx" });
+        let jobStarted = false;
         try {
           const request: Request = JSON.parse(fs.readFileSync(f.request, "utf8"));
           if (`${request.task_id}-${request.attempt}` !== id) continue;
-          await executeOne(dir, request, sessionId);
+          jobStarted = true;
+          idle = false; setPhase("job");
+          telemetry?.record("worker_job_start", { phase: "job", task_id: request.task_id });
+          const code = await executeOne(dir, request, sessionId);
+          telemetry?.record("worker_job_end", { phase: "job", task_id: request.task_id, exit_code: code,
+            reason_category: code !== 0 ? "JOB_ERROR" : "NORMAL_EXIT" });
         }
-        catch { /* Malformed request cannot dispatch; the caller times out closed. */ }
+        catch (error) { telemetry?.record("worker_job_end", { phase: jobStarted ? "job" : "queue", reason_category: jobStarted ? "JOB_ERROR" : "QUEUE_ERROR", error }); /* Malformed request cannot dispatch; the caller times out closed. */ }
+        finally { setPhase("queue"); }
       }
+      setPhase("idle");
+      if (!idle) { telemetry?.record("worker_idle", { phase: "idle" }); idle = true; }
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
     } finally { clearInterval(pulse); }
-  } finally { fs.closeSync(fd); fs.unlinkSync(lock); }
+  } finally { setPhase("shutdown"); fs.closeSync(fd); fs.unlinkSync(lock); }
 }
 function rSafeHash(file: string) { return hash(fs.readFileSync(file, "utf8")); }
 export function diagnosticPromptHash() { return hash(DIAGNOSTIC); }
