@@ -13,6 +13,7 @@ export function createDashboard(collector = new Collector()) {
   app.get("/", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
   app.get("/app.js", (_req, res) => res.sendFile(path.join(publicDir, "app.js")));
   app.get("/style.css", (_req, res) => res.sendFile(path.join(publicDir, "style.css")));
+  app.get("/health", (_req, res) => res.json({ ok: true, service: "ai-workspace-dashboard" }));
   app.get("/api/status", async (_req, res) => res.json(await collector.snapshot()));
   app.get("/api/tasks", (_req, res) => res.json(collector.list()));
   const handle = (fn: (id: string) => unknown) => (req: express.Request, res: express.Response) => {
