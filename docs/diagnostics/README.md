@@ -1,0 +1,12 @@
+# Interactive Codex diagnostic assets
+
+These are evidence-collection tools, **not** production Gateway or task installers. They have fixed prompts/paths and may create temporary diagnostic tasks and evidence outside this repository. Never rerun a reserved one-shot attempt or remove evidence to force a retry. No production Gateway, review bundle or engine state change is part of these procedures.
+
+| Diagnostic | Entry point / guide | Relationship to production worker |
+| --- | --- | --- |
+| S4U runner / Session 0 comparison | [`run-codex-s4u-diagnostic.ps1`](../../scripts/run-codex-s4u-diagnostic.ps1) / [guide](../codex-s4u-diagnostic.md) | Historical one-shot; uses `codex-s4u-diagnostic-worker.ps1`; not imported by the production worker. Keep as troubleshooting evidence only. |
+| S4U profile/hive observation | [`run-codex-s4u-profile-diagnostic.ps1`](../../scripts/run-codex-s4u-profile-diagnostic.ps1) / [guide](../codex-s4u-profile-diagnostic.md) | Historical one-shot; uses `codex-s4u-profile-observe.ps1` and the shared S4U diagnostic worker. Not a production dependency. |
+| InteractiveToken comparison | [`run-codex-interactive-token-diagnostic.ps1`](../../scripts/run-codex-interactive-token-diagnostic.ps1) / [guide](../codex-interactive-token-diagnostic.md) | Historical one-shot; `codex-interactive-token-worker.ps1` reuses the S4U diagnostic worker and saved S4U evidence. Not a production dependency. |
+| RDP disconnect continuity | [`run-codex-rdp-disconnect-diagnostic.ps1`](../../scripts/run-codex-rdp-disconnect-diagnostic.ps1) / [guide](../codex-rdp-disconnect-diagnostic.md) | Reusable **read-only evidence reevaluation** via `-Review`; `-Start` is one-shot. `src/worker/rdp-disconnect-diagnostic.ts` and its queue are explicitly referenced by the running interactive worker and CLI. Do not split this module from the worker without refactoring the dependency. |
+
+The production transport is documented in [InteractiveToken Codex worker](../codex-interactive-worker.md) and uses `src/worker/codex-interactive.ts`, `src/worker/cli.ts`, the pinned scheduled task and the engine adapter. Keep diagnostic scripts at their existing paths for now: other scripts and existing operational instructions refer to them. This index separates their purpose without renaming any executable or breaking those references. The S4U/InteractiveToken one-shots have historical value but are candidates for later archival **after** verifying that no investigation still relies on them; do not delete them as part of commit preparation.
