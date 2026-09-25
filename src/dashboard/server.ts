@@ -12,6 +12,7 @@ export function createDashboard(collector = new Collector()) {
   app.use((_req, res, next) => { res.set("Cache-Control", "no-store"); res.set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"); res.set("X-Content-Type-Options", "nosniff"); next(); });
   app.get("/", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
   app.get("/app.js", (_req, res) => res.sendFile(path.join(publicDir, "app.js")));
+  app.get("/labels.js", (_req, res) => res.sendFile(path.join(publicDir, "labels.js")));
   app.get("/style.css", (_req, res) => res.sendFile(path.join(publicDir, "style.css")));
   app.get("/health", (_req, res) => res.json({ ok: true, service: "ai-workspace-dashboard" }));
   app.get("/api/status", async (_req, res) => res.json(await collector.snapshot()));

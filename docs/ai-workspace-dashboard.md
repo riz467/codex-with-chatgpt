@@ -31,6 +31,12 @@ One page shows **System Health**, **Current Task**, **Latest Task** (historical)
 
 Missing evidence stays `unknown`/null. Worker status stays `unknown` because `heartbeat_fresh` is **not** proof of a matching process, configured Scheduled Task or interactive logon. PID and SessionId from a heartbeat are labeled **Last known**, not current; the last heartbeat age and task elapsed time are formatted as durations. Tunnel and interactive session are `unknown` without independent verification. Execution and Review Bridge health uses local HTTP only.
 
+## Japanese UI and future event display
+
+The browser UI prioritizes Japanese labels. Internal state, mode, actor, pipeline values and API responses remain in English; the browser's `labels.js` maps display text without rewriting evidence. Unknown values remain visible rather than being dropped. The top status bar uses only the snapshot's current task and confirmed actor (otherwise it says a task is running without naming an actor). The Dashboard remains **read-only**.
+
+Currently the screen uses a snapshot delivered over SSE, with server-side filesystem watching and polling fallback. Rendering is split by screen section so that a future, separately specified Orchestrator-to-Dashboard direct real-time event stream can update individual sections. This change does not introduce new event types or change SSE, polling, the collector, or task state.
+
 ## API and SSE
 
 All routes are GET only: `/health` (fixed minimal identity), `/api/status` (snapshot), `/api/tasks` (recent list), `/api/tasks/:taskId` (single allowlisted task), `/api/events/:taskId` (sanitized audit and state transitions), `/events` (SSE `snapshot` with snapshot plus sanitized events; `unavailable` on read failure). Non-GET methods return 405. Invalid IDs return 400, missing IDs 404, duplicate IDs across allowlisted repos 409. No caller-supplied repo or filesystem path is accepted. `event: snapshot` is emitted on changes; clients should reconnect using EventSource. `unavailable` does not carry error details.
