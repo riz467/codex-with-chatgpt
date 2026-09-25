@@ -1,6 +1,6 @@
 # Codex with ChatGPT
 
-> **AI-Workspace gateway extension (local deployment):** This checkout also includes two narrowly scoped action tools (`start_test_job`, `start_orchestration`) and three review/status readers. The V1 read-only descriptions below apply to the original nine tools only. See [AI-Workspace gateway setup and security boundary](docs/ai-workspace-gateway.md). Enabling the action scope on a public connector is an explicit operator decision.
+> **AI Workspace Orchestration (Windows VM deployment):** Start with the [5-minute Quick Start](docs/ai-workspace-quickstart.md). For operations see the [Runbook](docs/ai-workspace-runbook.md); for implementation and the [tool/permission catalog](docs/ai-workspace-architecture.md#tool-catalog-and-permissions) see [Architecture](docs/ai-workspace-architecture.md). The V1 read-only descriptions below apply only to the original workspace tools. The deployment adds bounded orchestration, approval/retry inspection, completion and allowlisted repository research. The review-bound Bridge does not register completion write tools; other bounded actions still require an explicit `orchestration.start` grant.
 
 > ChatGPT thinks. Codex works.
 > ChatGPT 负责思考，Codex 负责干活。
@@ -15,7 +15,7 @@
 API 额度做规划和 Review。本项目把"思考"交给你已付费的网页版 ChatGPT，
 Codex 只负责执行。不用 API Key、不搞逆向代理——官方网页 + 只读 MCP 桥接。
 
-**EN** — ChatGPT Plus/Pro web quota sits idle while your coding agent burns
+**EN (original V1 workflow)** — ChatGPT Plus/Pro web quota sits idle while your coding agent burns
 scarce API/Codex tokens on planning and review. This project moves the
 thinking to the subscription you already pay for; Codex only executes.
 No API keys, no reverse proxy — official web UI plus a read-only MCP bridge.
@@ -26,7 +26,7 @@ No API keys, no reverse proxy — official web UI plus a read-only MCP bridge.
 完全保留在 Codex 手里。你的仓库永远不会被上传：ChatGPT 通过一条安全的、
 OAuth 保护的**只读** MCP 连接，按需读取当前工作区里它真正需要的那几行代码。
 
-**EN** — Use the ChatGPT web app as the planning and review brain for your
+**EN (original V1 workflow)** — Use the ChatGPT web app as the planning and review brain for your
 Codex coding sessions, while Codex keeps full ownership of execution. Your
 repository is never uploaded: ChatGPT reads exactly the lines it needs through
 a secure, OAuth-protected, **read-only** MCP connection to your current
@@ -146,6 +146,8 @@ Credentials stay in the OS app state directory, not in the project.
 
 ## How it works
 
+The diagram below describes the **original V1 workflow**, not the AI Workspace Orchestration deployment. For the latter, see [its architecture](docs/ai-workspace-architecture.md).
+
 ```
              ┌───────────────────────────┐
              │       ChatGPT Web         │
@@ -182,6 +184,8 @@ Credentials stay in the OS app state directory, not in the project.
 
 ## Security model (short version)
 
+The points below describe the **original nine workspace tools**, not the additional `orchestration.start` actions. See [AI Workspace security boundary](docs/ai-workspace-architecture.md#security-boundary--fail-closed).
+
 - **Read-only by construction**: write/delete/shell/commit tools simply do not
   exist on the server. No prompt injection can enable them.
 - **One workspace = one boundary**: every token is bound to a single workspace;
@@ -214,8 +218,8 @@ Requirements: Node.js >= 20, git. `cloudflared` for the public connection
 (auto-detected; the Skill installs it for you). If QUIC is blocked, set
 `C2C_TUNNEL_PROTOCOL=http2` and restart the bridge.
 
-Docs: [architecture](docs/architecture.md) · [protocol](docs/protocol.md) ·
-[security](docs/security.md) · [troubleshooting](docs/troubleshooting.md)
+Docs: [AI Workspace Quick Start](docs/ai-workspace-quickstart.md) · [Runbook](docs/ai-workspace-runbook.md) · [Architecture](docs/ai-workspace-architecture.md) · [V1 architecture](docs/architecture.md) · [protocol](docs/protocol.md) ·
+[V1 security](docs/security.md) · [V1 troubleshooting](docs/troubleshooting.md)
 
 ## Project layout
 

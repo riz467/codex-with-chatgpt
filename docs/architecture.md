@@ -1,5 +1,7 @@
 # Architecture
 
+> This page describes the original V1 C2C workflow. For the Windows AI Workspace Orchestration deployment (two Bridges with different completion-tool registration), see the [AI Workspace Architecture and tool catalog](ai-workspace-architecture.md#tool-catalog-and-permissions); for use and operations see [Quick Start](ai-workspace-quickstart.md) and [Runbook](ai-workspace-runbook.md).
+
 ```
              ┌───────────────────────────┐
              │    ChatGPT Web / Sol      │

@@ -1,6 +1,8 @@
 # Troubleshooting
 
-First move, always:
+> This page covers the original V1 C2C CLI / Skill workflow. For the Task Scheduler-managed AI Workspace Orchestration VM, use the [AI Workspace Runbook](ai-workspace-runbook.md) and [Bridge-specific tool/permission catalog](ai-workspace-architecture.md#tool-catalog-and-permissions) instead; do not apply `c2c doctor` or `c2c stop` as the first step to its supervised Bridges.
+
+For the original V1 workflow, first move:
 
 ```
 c2c doctor
