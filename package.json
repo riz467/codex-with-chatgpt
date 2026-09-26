@@ -17,6 +17,7 @@
     "dashboard:dev": "tsx src/dashboard/server.ts",
     "human-approver": "node dist/human-approver/server.js",
     "human-approver:dev": "tsx src/human-approver/server.ts",
+    "approver:pack": "pnpm build && node scripts/pack-ai-approver.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

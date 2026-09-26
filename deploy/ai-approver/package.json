@@ -1,0 +1,12 @@
+{
+  "name": "ai-approver-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "dependencies": {
+    "@simplewebauthn/server": "13.3.3",
+    "express": "5.1.0",
+    "zod": "3.25.76"
+  }
+}
