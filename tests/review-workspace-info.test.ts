@@ -38,6 +38,7 @@ describe("fixed review workspace", () => {
       }));
       expect((await client.listTools()).tools.map((tool) => tool.name)).not.toContain("complete_orchestration");
       expect((await client.listTools()).tools.map((tool) => tool.name)).not.toContain("complete_integrated_orchestration");
+      expect((await client.listTools()).tools.map((tool) => tool.name)).not.toContain("complete_autonomous_orchestration");
       const info = await client.callTool({ name: "workspace_info", arguments: {} });
       expect(info.isError).not.toBe(true);
       expect(info.structuredContent).toMatchObject({ workspaceRoot: REVIEW_ROOT, readOnly: true, directoryExists: true,

@@ -4,19 +4,22 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { IgnoreRules } from "../workspace/ignore.js";
+import { reviewWorkspaces } from "./review-profiles.js";
+import { startAutonomous, autonomousObservation } from "./autonomous-gateway.js";
 
 export const REVIEW_ROOT = "C:\\work\\ai-orchestration-review";
 export const REPOS = {
   "pve-doc": "C:\\work\\pve-doc",
   "ai-orchestration-config": "C:\\work\\ai-orchestration-config",
 } as const;
+// Review-only fixture identities. Do not add these to orchestration.start's repo allowlist.
 const AI_RUN = "C:\\Users\\workspace\\.local\\bin\\ai-run.ps1";
 const AI_COMPLETE = "C:\\Users\\workspace\\.local\\bin\\ai-complete.ps1";
 const AI_COMPLETE_INTEGRATED = "C:\\Users\\workspace\\.local\\bin\\ai-complete-integrated.ps1";
 const POWERSHELL = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
 const READ_ONLY_WORKER = fileURLToPath(new URL("./read-only-worker.js", import.meta.url));
 const AI_RUN_SCOPED = fileURLToPath(new URL("./invoke-ai-run.ps1", import.meta.url));
-export type OrchestrationMode = "read_only" | "change";
+export type OrchestrationMode = "read_only" | "change" | "autonomous";
 const idPattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/;
 const hash = (bytes: Buffer | string): string => createHash("sha256").update(bytes).digest("hex");
 
@@ -78,7 +81,7 @@ export function verifyBundleIntegrity(bundle?: string, root = REVIEW_ROOT) {
   catch { return { bundle: pointer, valid: false, issues: [{ kind: "invalid" as const, path: "metadata/manifest" }] }; }
   if (metadata.version !== 1 || manifest.version !== 1 || !Array.isArray(manifest.files)) report("invalid", "metadata/manifest");
   if (typeof metadata.task_id !== "string" || !idPattern.test(metadata.task_id) ||
-    typeof metadata.source_workspace !== "string" || !Object.values(REPOS).some((repo) => repo.toLowerCase() === (metadata.source_workspace as string).toLowerCase())) {
+    typeof metadata.source_workspace !== "string" || ![...Object.values(REPOS), ...reviewWorkspaces].some((repo) => repo.toLowerCase() === (metadata.source_workspace as string).toLowerCase())) {
     report("invalid", "review-bundle.json");
   }
   if (typeof metadata.manifest_sha256 !== "string" || metadata.manifest_sha256 !== hash(fs.readFileSync(manifestPath))) report("mismatch", "manifest.json");
@@ -145,6 +148,11 @@ function completeWithEngine(taskId: string, reviewResult: string, doneApproved: 
   });
   if (candidates.length !== 1) throw new GatewayError("NOT_FOUND", "Task must exist in exactly one allowlisted repository");
   const repo = repoRoot(candidates[0][0] as keyof typeof REPOS);
+  // Legacy completion cannot bypass the authoritative autonomous approval contract.
+  if (/^rpc-[a-f0-9]{32}$/.test(taskId) &&
+      fs.existsSync(safePath(REVIEW_ROOT, `rpc-jobs/auto-${taskId.slice(4)}/autonomous-run.json`))) {
+    throw new GatewayError("AUTONOMOUS_APPROVAL_REQUIRED", "Use the authoritative fixed-schema autonomous approval gate");
+  }
   if (!fs.existsSync(launcher) || !fs.existsSync(POWERSHELL)) throw new GatewayError("RUNTIME_UNAVAILABLE", "Completion CLI is not deployed");
   const result = spawnSync(POWERSHELL, ["-NoProfile", "-NonInteractive", "-File", launcher,
     "-Repo", repo, "-TaskId", taskId, "-ReviewResult", "PASS", "-DoneApproved"],
@@ -210,6 +218,7 @@ export function validateEditPaths(repo: string, paths: string[]): string[] {
 }
 
 export function startOrchestration(repo: string, goal: string, mode: OrchestrationMode, root = REVIEW_ROOT, editPaths?: string[]) {
+  if (mode === "autonomous") return startAutonomous(repo, goal, editPaths, root);
   return launchOrchestration(repo, goal, mode, root, editPaths);
 }
 function launchOrchestration(repo: string, goal: string, mode: OrchestrationMode, root: string, editPaths?: string[], lineage?:
@@ -587,6 +596,8 @@ export function getOrchestrationApproval(id: string, root = REVIEW_ROOT) {
   return { job_id: job.job_id, task_id: job.task_id, repo: job.repo_key, state: "NEEDS_APPROVAL", ...approvalDetails(job, status) };
 }
 export function getOrchestrationStatus(id: string, root = REVIEW_ROOT) {
+  const autonomous = autonomousObservation(id, root);
+  if (autonomous) return autonomous;
   const lookup = lookupForRead(id, root), { job, repo } = lookup;
   if (!job) {
     const status = lookup.status!;
@@ -614,6 +625,8 @@ export function getOrchestrationStatus(id: string, root = REVIEW_ROOT) {
     result_category: state === "DONE" && mode === "change" ? "DONE" : result, ...stop, ...lineage(job) };
 }
 export function getOrchestrationResult(id: string, root = REVIEW_ROOT) {
+  const autonomous = autonomousObservation(id, root);
+  if (autonomous) return autonomous;
   const lookup = lookupForRead(id, root), { job, repo } = lookup;
   const mode = job?.mode ?? "change";
   const status = mode === "change" ? lookup.status : readOnlyEvidence(job!, root);

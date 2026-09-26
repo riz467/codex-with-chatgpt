@@ -80,6 +80,7 @@ describe("MCP tools over Streamable HTTP", () => {
     const { tools } = await client.listTools();
     const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
+      "complete_autonomous_orchestration",
       "complete_integrated_orchestration",
       "complete_orchestration",
       "execution_output",
@@ -128,7 +129,7 @@ describe("MCP tools over Streamable HTTP", () => {
     expectToolOutputSchema(tools, "execution_output", ["action", "items", "text"]);
     const start = tools.find((tool) => tool.name === "start_orchestration")?.inputSchema as { required?: string[]; properties?: Record<string, { enum?: string[] }> };
     expect(start.required).toEqual(expect.arrayContaining(["repo", "mode", "goal"]));
-    expect(start.properties?.mode?.enum).toEqual(["read_only", "change"]);
+    expect(start.properties?.mode?.enum).toEqual(["read_only", "change", "autonomous"]);
     expect(start.properties).toHaveProperty("edit_paths");
     expect(start.required).not.toContain("edit_paths");
   });

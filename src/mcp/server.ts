@@ -10,6 +10,7 @@ import type { Logger } from "../logger/index.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 import { workspaceOverview } from "./workspace-info.js";
 import { GatewayError, verifyBundleIntegrity, startTestJob, startOrchestration, getOrchestrationStatus, getOrchestrationResult, getOrchestrationApproval, getOrchestrationRetryPlan, retryOrchestration, completeOrchestration, completeIntegratedOrchestration, REVIEW_ROOT } from "./local-gateway.js";
+import { completeCurrentAutonomous } from "./autonomous-approval.js";
 import { searchRepo, readRepoFile } from "./repo-research.js";
 
 const UNTRUSTED_NOTE =
@@ -226,8 +227,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
   });
   server.registerTool("start_orchestration", {
     title: "Start local orchestration",
-    description: "Start a bounded local task in an allowlisted repository. read_only forbids edit_paths; change optionally accepts 1-5 existing repo-relative edit_paths and passes them to ai-run's formal EditPaths gate. Without edit_paths, ai-run discovery and human confirmation remain unchanged. Returns immediately.",
-    inputSchema: { repo: z.enum(["pve-doc", "ai-orchestration-config"]), mode: z.enum(["read_only", "change"]), goal: z.string().min(1).max(4000),
+    description: "Start a bounded local task. Autonomous mode accepts only trusted repository profiles and an optional exact fixed edit scope; OpenCode makes the decisions and Codex performs at most one bounded implementation. Legacy read_only/change remain unchanged. Returns immediately.",
+    inputSchema: { repo: z.string().min(1).max(80), mode: z.enum(["read_only", "change", "autonomous"]), goal: z.string().min(1).max(4000),
       edit_paths: z.array(z.string()).min(1).max(5).optional().describe("Change mode only: existing repo-relative files, no globs or traversal") },
     annotations: { readOnlyHint: false, openWorldHint: false },
   }, async (args, extra) => {
@@ -240,7 +241,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     inputSchema: z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/).optional(),
       job_id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/).optional(),
       task_id: z.string().regex(/^rpc-[a-zA-Z0-9_-]{1,75}$/).optional() }).strict(), annotations: { readOnlyHint: true },
-    outputSchema: z.object({ job_id: z.string().nullable(), task_id: z.string(), mode: z.enum(["read_only", "change"]), state: z.string().nullable(),
+    outputSchema: z.object({ job_id: z.string().nullable(), task_id: z.string(), mode: z.enum(["read_only", "change", "autonomous"]), state: z.string().nullable(),
       result_category: z.string().nullable(), ...stopReasonOutputSchema }).passthrough(),
   }, async (args, extra) => {
     const denied = requireScope(extra.authInfo, "review.read"); if (denied) return denied;
@@ -256,7 +257,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     inputSchema: z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/).optional(),
       job_id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/).optional(),
       task_id: z.string().regex(/^rpc-[a-zA-Z0-9_-]{1,75}$/).optional() }).strict(), annotations: { readOnlyHint: true },
-    outputSchema: z.object({ job_id: z.string().nullable(), task_id: z.string(), mode: z.enum(["read_only", "change"]), state: z.string().nullable(),
+    outputSchema: z.object({ job_id: z.string().nullable(), task_id: z.string(), mode: z.enum(["read_only", "change", "autonomous"]), state: z.string().nullable(),
       ...stopReasonOutputSchema }).passthrough(),
   }, async (args, extra) => {
     const denied = requireScope(extra.authInfo, "review.read"); if (denied) return denied;
@@ -314,6 +315,17 @@ export function createMcpServer(ctx: McpContext): McpServer {
   }, async (args, extra) => {
     const denied = requireScope(extra.authInfo, "orchestration.start"); if (denied) return denied;
     try { return okStructured(completeIntegratedOrchestration(args.task_id, args.review_result, args.done_approved)); } catch (error) { return mapError(error); }
+  });
+  if (workspace.root.toLowerCase() !== REVIEW_ROOT.toLowerCase()) server.registerTool("complete_autonomous_orchestration", {
+    title: "Complete current independently reviewed autonomous task",
+    description: "Requires a single-use human approval evidence record created by the local Dashboard's explicit FINAL_DONE_APPROVAL action. Caller-supplied done_approved is never sufficient. Rechecks current Review, goal, manifest, result hashes and consumes the approval before existing engine Complete. Never commits or pushes.",
+    inputSchema: z.object({ task_id: z.string().regex(/^rpc-[a-f0-9]{32}$/), review_result: z.literal("PASS"),
+      review_evidence_hash: z.string().regex(/^[a-f0-9]{64}$/), bundle_manifest_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+      authoritative_review_id: z.string().regex(/^review-[0-9a-f-]{36}$/), done_approved: z.literal(true) }).strict(),
+    annotations: { readOnlyHint: false, openWorldHint: false },
+  }, async (args, extra) => {
+    const denied = requireScope(extra.authInfo, "orchestration.start"); if (denied) return denied;
+    try { return okStructured(completeCurrentAutonomous(args)); } catch (error) { return mapError(error); }
   });
 
   server.registerTool("search_repo", {
