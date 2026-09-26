@@ -15,6 +15,8 @@
     "dev": "tsx src/cli/index.ts",
     "dashboard": "node dist/dashboard/server.js",
     "dashboard:dev": "tsx src/dashboard/server.ts",
+    "human-approver": "node dist/human-approver/server.js",
+    "human-approver:dev": "tsx src/human-approver/server.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
@@ -22,6 +24,7 @@
   "packageManager": "pnpm@11.24.0",
   "dependencies": {
     "@modelcontextprotocol/sdk": "latest",
+    "@simplewebauthn/server": "^13.3.3",
     "commander": "^14.0.0",
     "express": "^5.1.0",
     "ignore": "^7.0.5",

@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Human Approver PoC</title>
+<style>body{font:16px system-ui;max-width:38rem;margin:3rem auto;padding:0 1rem;line-height:1.5}button{padding:.8rem 1rem;margin:.5rem 0;font:inherit}#verified{font-weight:bold;color:#176a35}#error{color:#a02020}</style></head>
+<body><h1>Human Approver PoC</h1><p>WebAuthn ceremony の確認専用です。DONE や既存の最終承認には接続しません。</p>
+<button id="register" type="button" hidden>Windows Helloを登録</button>
+<button id="authenticate" type="button" hidden>Windows Helloで承認テスト</button>
+<p id="verified" role="status" hidden>Human verification: VERIFIED</p><p id="error" role="alert"></p>
+<script type="module" src="/app.js"></script></body></html>
