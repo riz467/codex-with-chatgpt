@@ -6,7 +6,7 @@ const maps = {
   stage: { Research: '調査', Scope: '対象確定', Plan: '計画', Execute: '実行', Verify: '検証', Review: 'レビュー', Done: '完了' },
   pipeline: { complete: '完了', active: '実行中', waiting: '待機中', not_started: '未開始', blocked: '停止', incomplete: '未完了' },
   event: { state_transition: '状態変更', research: '調査', scope: '対象確定', plan: '計画', execute: '実行', verify: '検証', review: 'レビュー', complete: '完了', transition: '状態変更' },
-  health: { healthy: '正常', ready: '準備完了', unavailable: '利用不可', heartbeat_fresh: '受信済み' },
+  health: { verified: '確認済み', healthy: '正常', ready: '準備完了', degraded: '一部未確認', unavailable: '利用不可', heartbeat_fresh: '受信済み' },
   review: { PASS: '合格', FAIL: '不合格' },
   completion: { post_integration: '統合後', direct: '直接' },
   stop: { HUMAN_APPROVAL_REQUIRED: '人による確認が必要', SCOPE_CONFIRMATION_REQUIRED: '対象範囲の確認が必要', EVIDENCE_INSUFFICIENT: '証拠不足', VERIFY_BLOCKED: '検証で停止', EXECUTION_BLOCKED: '実行で停止', READY_FOR_REVIEW: 'レビュー待ち' },

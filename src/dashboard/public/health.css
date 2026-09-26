@@ -1,0 +1,6 @@
+.grid .pair{min-height:86px}
+.grid .pair small:last-child{margin-top:7px;line-height:1.4;letter-spacing:0}
+.health-verified,.health-healthy,.health-ready{border-left:3px solid #238679}
+.health-degraded{border-left:3px solid #c89945}
+.health-unavailable{border-left:3px solid #c46b6b}
+.health-unknown{color:#94a3b8}

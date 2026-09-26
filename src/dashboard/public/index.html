@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="ja">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Workspace 稼働状況</title><link rel="stylesheet" href="/style.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Workspace 稼働状況</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/health.css"></head>
 <body>
 <header><div><small>AI WORKSPACE / 稼働監視</small><h1>AI Workspace 稼働状況 <em>v0.1</em></h1></div><span id="connection">接続中…</span></header>
 <main>
@@ -8,10 +8,12 @@
   <section><h2>システム状態</h2><div id="health" class="grid"></div></section>
   <section><h2>実行中タスク</h2><div id="current"></div></section>
   <section><h2>最新タスク <small>最近更新されたタスク（実行中とは限りません）</small></h2><div id="latest"></div></section>
+  <section><h2>自律実行 <small>証拠からの読み取り専用表示</small></h2><div id="autonomous"></div></section>
+  <section id="final-approval" hidden><h2>人間の最終承認 <small>Review PASS後のみ。DONEへの移行は別のMCP Completeで行われます</small></h2><div id="final-approval-details"></div><button id="approve-done" type="button">DONEを承認</button><p id="final-approval-message" role="status"></p></section>
   <section><h2>処理状況 <small id="pipeline-source"></small></h2><div id="pipeline" class="pipeline"></div></section>
   <section><h2>実行ログ <small id="events-source"></small></h2><div id="events"></div></section>
   <section><h2>最近のタスク</h2><div class="scroll"><table><thead><tr><th>タスクID</th><th>リポジトリ</th><th>状態</th><th>モード</th><th>作成 / 完了</th><th>試行回数</th><th>再試行元</th><th>レビュー</th><th>完了方式</th><th>統合コミット</th></tr></thead><tbody id="tasks"></tbody></table></div></section>
 </main>
-<footer>読み取り専用 · ローカル監視 · 未確認は検証済みの証拠がない状態です</footer>
+<footer>ローカル監視 · 最終承認ボタンのみ書込操作 · 未確認は検証済みの証拠がない状態です</footer>
 <script type="module" src="/app.js"></script>
 </body></html>

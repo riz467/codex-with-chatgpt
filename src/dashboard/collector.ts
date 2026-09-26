@@ -1,9 +1,12 @@
 import fs from "node:fs";
-import { createHash } from "node:crypto";
 import ignore from "ignore";
 import { ledgerTask, safePath, REPOS, REVIEW_ROOT, GatewayError, getOrchestrationStatus } from "../mcp/local-gateway.js";
 import { QUEUE } from "../worker/codex-interactive.js";
 import { SENSITIVE_PATTERNS } from "../workspace/ignore.js";
+import { verifiedHealth, observeOsHealth, normalizeOsHealth, type OsHealth } from "./verified-health.js";
+import { reviewProfiles } from "../mcp/review-profiles.js";
+import { autonomousState } from "../mcp/autonomous-read-model.js";
+import { activeQueueTask, queueDepth } from "../worker/status-projection.js";
 
 export type Roots = Readonly<Record<keyof typeof REPOS, string>>;
 export type Stage = "complete" | "active" | "waiting" | "blocked" | "incomplete" | "not_started" | "unknown";
@@ -69,6 +72,17 @@ export function actor(v: unknown): string {
 }
 export type DashboardEvent = { timestamp: string; event_type: string; actor: string; summary: string };
 const auditActions = new Set(["research", "scope", "plan", "execute", "verify", "review", "complete", "transition"]);
+const autonomousEventTypes = new Set(["autonomous.phase.started", "autonomous.decision.recorded", "codex.started", "codex.completed",
+  "verify.started", "verify.completed", "retry.started", "review_handoff.started", "review.started", "review.completed", "human.final_approval_waiting"]);
+const autonomousPhases = new Set(["RESEARCH", "PLAN", "EXECUTE", "VERIFY", "REVIEW_HANDOFF", "REVIEWING", "HUMAN_FINAL_APPROVAL", "ESCALATE", "DONE_CANDIDATE_NO_CHANGE", "READY_FOR_REVIEW"]);
+const usage = (value: unknown) => {
+  const row = obj(value);
+  const cache = obj(row?.cache);
+  const numeric = (key: string) => Number.isSafeInteger(row?.[key]) && (row?.[key] as number) >= 0 ? row?.[key] as number : null;
+  return row ? { input: numeric("input"), output: numeric("output"), reasoning: numeric("reasoning"),
+    cache_read: numeric("cache_read") ?? numeric("cacheRead") ?? (Number.isSafeInteger(cache?.read) ? cache?.read as number : null),
+    cache_write: numeric("cache_write") ?? numeric("cacheWrite") ?? (Number.isSafeInteger(cache?.write) ? cache?.write as number : null) } : null;
+};
 export function eventsFor(root: string, taskId: string, status: Record<string, unknown> | null): DashboardEvent[] {
   if (!id.test(taskId)) throw new GatewayError("INVALID_ID", "Invalid task id");
   const events: DashboardEvent[] = [];
@@ -91,7 +105,8 @@ export function eventsFor(root: string, taskId: string, status: Record<string, u
   return events.sort((a, b) => a.timestamp.localeCompare(b.timestamp)).slice(-100);
 }
 export class Collector {
-  constructor(public readonly roots: Roots = REPOS, public readonly reviewRoot = REVIEW_ROOT, public readonly queueRoot = QUEUE) {}
+  constructor(public readonly roots: Roots = REPOS, public readonly reviewRoot = REVIEW_ROOT, public readonly queueRoot = QUEUE,
+    private readonly osProbe: () => Promise<OsHealth> = roots === REPOS ? observeOsHealth : async () => normalizeOsHealth(null)) {}
   private jobs(): Map<string, Record<string, unknown>> {
     const map = new Map<string, Record<string, unknown>>();
     const dir = safePath(this.reviewRoot, "rpc-jobs");
@@ -103,6 +118,57 @@ export class Collector {
       }
     } catch (error) { if (error instanceof GatewayError) throw error; }
     return map;
+  }
+  autonomousRuns(limit = 20) {
+    const dir = safePath(this.reviewRoot, "rpc-jobs");
+    const runs = [];
+    try {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !/^auto-[a-f0-9]{32}$/.test(entry.name)) continue;
+        const run = readJson(this.reviewRoot, `rpc-jobs/${entry.name}/autonomous-run.json`);
+        if (!run || run.run_id !== entry.name || run.task_id !== `rpc-${entry.name.slice(5)}` ||
+            typeof run.repo_key !== "string" || !Object.hasOwn(reviewProfiles, run.repo_key)) continue;
+        const profile = reviewProfiles[run.repo_key];
+        const result = readJson(this.reviewRoot, `rpc-jobs/${entry.name}/result.json`);
+        const ledger = readJson(profile.workspace, `.ai/tasks/${run.task_id}/status.json`);
+        const phase = enumValue(run.phase, [...autonomousPhases]);
+        const progress = phase === "REVIEWING" ? readJson(this.reviewRoot, `rpc-jobs/review-progress/${run.task_id}.json`) : null;
+        const projected = autonomousState(run, result, ledger, run.task_id as string);
+        const { done, actor } = projected;
+        const eventFile = safePath(this.reviewRoot, `rpc-jobs/${entry.name}/events.jsonl`);
+        let events: DashboardEvent[] = [];
+        if (fs.existsSync(eventFile) && fs.statSync(eventFile).size <= 65536) {
+          events = fs.readFileSync(eventFile, "utf8").split(/\r?\n/).slice(-100).flatMap(line => {
+            try {
+              const record = obj(JSON.parse(line)), type = text(record?.event_type, 50), timestamp = date(record?.timestamp);
+              return type && autonomousEventTypes.has(type) && timestamp ? [{ timestamp, event_type: type,
+                actor: type.startsWith("codex.") ? "CODEX" : type.startsWith("review") ? "REVIEW" : type.startsWith("human.") ? "HUMAN" : "OPENCODE",
+                summary: `${type} recorded` }] : [];
+            } catch { return []; }
+          });
+        }
+        const live_stage = progress?.task_id === run.task_id && ["STRUCTURAL_REVIEW", "SEMANTIC_REVIEW"].includes(String(progress.phase)) ? progress.phase :
+          phase === "VERIFY" && events.map(e => e.event_type).lastIndexOf("retry.started") > events.map(e => e.event_type).lastIndexOf("verify.completed") ? "RETRY_VERIFY" : phase;
+        const decisionFile = safePath(this.reviewRoot, `rpc-jobs/${entry.name}/decision-history.jsonl`);
+        let decision: string | null = null;
+        if (fs.existsSync(decisionFile) && fs.statSync(decisionFile).size <= 65536) {
+          try {
+            const lines = fs.readFileSync(decisionFile, "utf8").split(/\r?\n/).filter(Boolean);
+            const last = obj(JSON.parse(lines.at(-1) ?? "null"));
+            if (last?.run_id === entry.name) decision = enumValue(last.decision, ["NO_CHANGE_REQUIRED", "CONTINUE_RESEARCH", "PLAN_CHANGE",
+              "EXECUTE_WITH_CODEX", "READY_FOR_REVIEW", "RETRY_VERIFY", "RESEARCH_AGAIN", "VERIFY_BLOCKED", "ESCALATE"]);
+          } catch { /* unknown, not a success inference */ }
+        }
+        runs.push({ run_id: entry.name, task_id: run.task_id, repo: run.repo_key, phase, live_stage, actor,
+          decision,
+          review_phase: enumValue(projected.review_phase.structural, ["PASS", "NEEDS_WORK"]) && enumValue(projected.review_phase.semantic, ["PASS", "NEEDS_WORK", "NOT_RUN"]) ?
+            projected.review_phase : null,
+          human_action_required: projected.waiting, final_result: enumValue(result?.state, [...autonomousPhases]),
+          done, usage: { opencode: usage(run.token_usage_total), codex_invocations: Number.isSafeInteger(run.codex_invocation_count) ? run.codex_invocation_count : null,
+            codex: usage(run.codex_usage), review: usage(run.review_token_usage) }, events, started_at: date(run.started_at) });
+      }
+    } catch (error) { if (error instanceof GatewayError) throw error; }
+    return runs.sort((a, b) => (b.started_at ?? "").localeCompare(a.started_at ?? "")).slice(0, limit);
   }
   list(limit = 20) {
     const jobs = this.jobs();
@@ -162,53 +228,27 @@ export class Collector {
     return eventsFor(this.roots[task.repo], taskId, status);
   }
   async health() {
-    const bridge = async (port: number) => {
-      try { const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1000) }); return response.ok ? "healthy" : "unknown"; }
-      catch { return "unknown"; }
-    };
+    const verified_health = await verifiedHealth(this.osProbe);
     const beat = heartbeat(readJson(this.queueRoot, "heartbeat.json"));
-    let queue_depth: number | null = null;
-    try {
-      const requests = safePath(this.queueRoot, "requests"), results = safePath(this.queueRoot, "results");
-      queue_depth = fs.readdirSync(requests, { withFileTypes: true }).filter(e => e.isFile() && /^[A-Za-z0-9_-]+-[12]\.json$/.test(e.name) && !fs.existsSync(safePath(results, e.name))).length;
-    } catch { /* unknown */ }
-    const [execution_bridge, review_bridge] = await Promise.all([bridge(48765), bridge(54108)]);
-    // A heartbeat cannot verify the executable, process identity, logon session or pinned task.
-    return { execution_bridge, review_bridge, tunnel: "unknown", codex_worker: "unknown", interactive_session: "unknown",
-      worker_pid: null, session_id: null, heartbeat: beat.state,
+    const queue_depth = queueDepth(this.queueRoot);
+    return { execution_bridge: verified_health.execution_bridge.status, review_bridge: verified_health.review_bridge.status,
+      tunnel: verified_health.tunnel.status, codex_worker: verified_health.codex_worker.status, interactive_session: verified_health.interactive_session.status,
+      worker_pid: verified_health.codex_worker.status === "ready" ? verified_health.codex_worker.pid : null,
+      session_id: verified_health.interactive_session.status === "verified" ? verified_health.interactive_session.session_id : null, heartbeat: beat.state,
+      verified_health,
       last_known_pid: beat.pid, last_known_session: beat.session_id, last_heartbeat_age_seconds: beat.age_seconds, queue_depth };
   }
   private activeQueueTask(tasks: ReturnType<Collector["list"]>) {
     const beat = heartbeat(readJson(this.queueRoot, "heartbeat.json"));
-    if (beat.state !== "heartbeat_fresh") return null;
-    const requests = safePath(this.queueRoot, "requests");
-    try {
-      for (const entry of fs.readdirSync(requests, { withFileTypes: true })) {
-        if (!entry.isFile() || !/^([A-Za-z0-9_-]+)-([12])\.json$/.test(entry.name)) continue;
-        const name = entry.name.slice(0, -5);
-        const requestFile = safePath(this.queueRoot, `requests/${entry.name}`);
-        const runningFile = safePath(this.queueRoot, `claims/${name}.running`);
-        const resultFile = safePath(this.queueRoot, `results/${entry.name}`);
-        if (!fs.existsSync(runningFile) || fs.existsSync(resultFile)) continue;
-        if (!fs.lstatSync(requestFile).isFile() || fs.statSync(requestFile).size > 16384 ||
-          !fs.lstatSync(runningFile).isFile() || fs.statSync(runningFile).size !== 64) continue;
-        const bytes = fs.readFileSync(requestFile);
-        if (fs.readFileSync(runningFile, "utf8") !== createHash("sha256").update(bytes).digest("hex")) continue;
-        let request: Record<string, unknown> | null;
-        try { request = obj(JSON.parse(bytes.toString("utf8"))); } catch { continue; }
-        const task = tasks.find(t => t.task_id === request?.task_id && this.roots[t.repo] === request.repo);
-        if (request?.kind !== "orchestration" || `${request.task_id}-${request.attempt}` !== name || task?.state !== "EXECUTING") continue;
-        return task;
-      }
-    } catch (error) { if (error instanceof GatewayError) throw error; /* missing/partial queue: no active evidence */ }
-    return null;
+    return activeQueueTask(this.queueRoot, this.roots, tasks, beat.state === "heartbeat_fresh");
   }
   async snapshot() {
     const tasks = this.list(Infinity);
     const stopped = new Set(["NEEDS_APPROVAL", "READY_FOR_REVIEW", "DONE", "BLOCKED"]);
     const current = tasks.find(t => t.process === "running" && !stopped.has(t.state ?? "")) ?? this.activeQueueTask(tasks);
     const latest = tasks[0] ?? null;
+    const autonomous_runs = this.autonomousRuns();
     return { generated_at: new Date().toISOString(), health: await this.health(), current_task: current ?? null,
-      latest_task: latest, recent_tasks: tasks.slice(0, 20) };
+      latest_task: latest, recent_tasks: tasks.slice(0, 20), autonomous_runs };
   }
 }

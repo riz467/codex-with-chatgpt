@@ -5,7 +5,7 @@ $task = Get-ScheduledTask -TaskName 'AI-Workspace-Codex-InteractiveWorker' -Erro
 Write-Host "Worker task: $(if ($task) { $task.State } else { 'unknown' })"
 $beatFile = Join-Path $root 'heartbeat.json'
 try {
-    $beat = if ((Get-Item -LiteralPath $beatFile -ErrorAction Stop).Length -le 16384) { Get-Content -LiteralPath $beatFile -Raw | ConvertFrom-Json -ErrorAction Stop } else { $null }
+    $beat = if ((Get-Item -LiteralPath $beatFile -ErrorAction Stop).Length -le 16384) { Get-Content -LiteralPath $beatFile -Raw | ConvertFrom-Json -DateKind String -ErrorAction Stop } else { $null }
     if ($beat.pid -isnot [int] -and $beat.pid -isnot [long] -or $beat.pid -le 0) { throw 'Invalid heartbeat' }
     $age = ([DateTimeOffset]::UtcNow - [DateTimeOffset]::Parse([string]$beat.observed_utc)).TotalSeconds
     Write-Host "Last heartbeat: $(if ($age -ge 0) { "{0:N0}s ago (last known PID $($beat.pid))" -f $age } else { 'unknown' })"
@@ -14,7 +14,7 @@ $file = Join-Path $root 'current-exit.json'
 try {
     $item = Get-Item -LiteralPath $file -ErrorAction Stop
     if ($item.Length -gt 4096 -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw 'Invalid evidence file' }
-    $exit = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json -ErrorAction Stop
+    $exit = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json -DateKind String -ErrorAction Stop
     $categories = @('NORMAL_EXIT','UNHANDLED_EXCEPTION','QUEUE_ERROR','HEARTBEAT_ERROR','WORKER_INIT_ERROR','JOB_ERROR','SIGNAL_EXIT','PROCESS_EXIT','UNKNOWN')
     $phases = @('init','heartbeat','idle','queue','job','shutdown','process','wrapper')
     if ($exit.event -ne 'worker_exit' -or $exit.reason_category -notin $categories -or $exit.phase -notin $phases -or

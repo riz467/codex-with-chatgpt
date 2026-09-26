@@ -8,3 +8,12 @@ dist/
 .env.*
 !.env.example
 coverage/
+# Local orchestration evidence is never source control input.
+.ai/
+rpc-jobs/
+reviews/
+CURRENT_REVIEW.json
+*.pem
+*.key
+*.pfx
+*.p12

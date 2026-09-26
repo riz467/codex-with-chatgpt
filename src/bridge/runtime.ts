@@ -52,17 +52,18 @@ export async function probeBridge(
   port: number,
   timeoutMs = 2000
 ): Promise<HealthPayload | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
     const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal });
-    clearTimeout(timer);
-    if (!response.ok) return null;
+    if (response.status !== 200) return null;
     const body = (await response.json()) as HealthPayload;
     if (body.service !== SERVICE_NAME) return null;
     return body;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

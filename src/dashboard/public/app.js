@@ -44,14 +44,72 @@ function renderTask(root, task, fields, empty) {
 }
 function renderSystemHealth(health) {
   const root = $('health'); clear(root);
-  for (const [label, key] of [['実行ブリッジ','execution_bridge'],['レビューブリッジ','review_bridge'],['トンネル','tunnel'],['Codexワーカー','codex_worker'],['対話セッション','interactive_session'],['ハートビート','heartbeat'],['最終確認PID','last_known_pid'],['最終確認セッション','last_known_session'],['最終ハートビート','last_heartbeat_age_seconds'],['キュー','queue_depth']]) {
+  for (const [label, key] of [['実行ブリッジ','execution_bridge'],['レビューブリッジ','review_bridge'],['トンネル','tunnel'],['Codexワーカー','codex_worker'],['対話セッション','interactive_session'],['Dashboard','dashboard'],['ハートビート','heartbeat'],['最終確認PID','last_known_pid'],['最終確認セッション','last_known_session'],['最終ハートビート','last_heartbeat_age_seconds'],['キュー','queue_depth']]) {
     const raw = health?.[key];
-    const value = key === 'last_heartbeat_age_seconds' && raw != null ? `${duration(raw)}前` : typeof raw === 'string' ? healthLabel(raw) : raw;
+    const item = health?.verified_health?.[key];
+    const value = item ? healthLabel(item.status) : key === 'last_heartbeat_age_seconds' && raw != null ? `${duration(raw)}前` : typeof raw === 'string' ? healthLabel(raw) : raw;
     pair(root, label, value);
+    if (item) {
+      const details = [item.summary, item.pid != null ? `PID ${item.pid}` : null, item.session_id != null ? `Session ${item.session_id}` : null,
+        item.observed_at ? `確認 ${duration(Math.max(0, (Date.now() - Date.parse(item.observed_at)) / 1000))}前` : null].filter(Boolean);
+      root.lastElementChild.append(cell('small', details.join(' · ')));
+      root.lastElementChild.classList.add('health-' + (['verified','healthy','ready','degraded','unavailable'].includes(item.status) ? item.status : 'unknown'));
+    }
   }
 }
 function renderCurrentTask(task) { renderTask($('current'), task, taskFields, '実行中のタスクはありません'); }
 function renderLatestTask(task) { renderTask($('latest'), task, taskFields.slice(0, 7), 'タスクの証拠はありません'); }
+function renderAutonomous(runs) {
+  const root = $('autonomous'); clear(root);
+  const run = runs?.[0];
+  if (!run) { root.append(cell('p', '自律実行の証拠はありません')); return; }
+  const labels = { RESEARCH: '調査中', PLAN: '計画中', EXECUTE: 'Codex実行中', VERIFY: '検証中', RETRY_VERIFY: 'RetryVerify中',
+    REVIEW_HANDOFF: '構造レビュー待ち', REVIEWING: 'レビュー中', STRUCTURAL_REVIEW: '構造レビュー中', SEMANTIC_REVIEW: '意味レビュー中',
+    HUMAN_FINAL_APPROVAL: '人間承認待ち', ESCALATE: '停止 / 要確認', READY_FOR_REVIEW: 'レビュー待ち', DONE_CANDIDATE_NO_CHANGE: '変更不要' };
+  for (const [label, value] of [['Run ID', run.run_id], ['Task ID', run.task_id], ['Repo', run.repo],
+    ['段階', run.done ? '完了' : labels[run.live_stage] ?? '未確認'], ['担当', run.actor], ['判断', run.decision],
+    ['構造レビュー', run.review_phase?.structural], ['意味レビュー', run.review_phase?.semantic],
+    ['人間の操作', run.human_action_required ? '承認が必要' : '不要 / 未確認'], ['最終結果', run.final_result],
+    ['OpenCode input / output / reasoning', [run.usage?.opencode?.input, run.usage?.opencode?.output, run.usage?.opencode?.reasoning].map(displayValue).join(' / ')],
+    ['OpenCode cache read / write', [run.usage?.opencode?.cache_read, run.usage?.opencode?.cache_write].map(displayValue).join(' / ')],
+    ['Codex呼出', run.usage?.codex_invocations],
+    ['Review input / output / reasoning', [run.usage?.review?.input, run.usage?.review?.output, run.usage?.review?.reasoning].map(displayValue).join(' / ')],
+    ['Review cache read / write', [run.usage?.review?.cache_read, run.usage?.review?.cache_write].map(displayValue).join(' / ')]]) pair(root, label, value);
+  root.classList.add('task-grid');
+  const events = document.createElement('div'); events.className = 'autonomous-events';
+  for (const event of run.events ?? []) events.append(cell('p', `${event.timestamp} · ${event.event_type}`));
+  root.append(events);
+}
+let approval = null, approvalCheckAt = 0, approving = false;
+async function refreshApproval() {
+  if (approving || Date.now() - approvalCheckAt < 5000) return;
+  approvalCheckAt = Date.now();
+  try {
+    const response = await fetch('/approval/current', { credentials: 'same-origin', cache: 'no-store' });
+    approval = response.ok ? await response.json() : null;
+  } catch { approval = null; }
+  const section = $('final-approval'); section.hidden = !approval;
+  const details = $('final-approval-details'); clear(details);
+  if (approval) {
+    for (const [label, value] of [['Goal', approval.goal], ['Task ID', approval.task_id], ['Run ID', approval.run_id],
+      ['Review ID', approval.authoritative_review_id], ['Review evidence SHA256', approval.review_evidence_hash],
+      ['Manifest SHA256', approval.bundle_manifest_sha256], ['Canonical goal SHA256', approval.canonical_goal_hash]]) pair(details, label, value);
+  }
+}
+$('approve-done').addEventListener('click', async event => {
+  if (!event.isTrusted || !approval || approving || !window.confirm('現在のgoal・Reviewを確認しましたか？ このtaskのDONEを明示的に承認します。')) return;
+  approving = true; $('approve-done').disabled = true;
+  const request = { action: 'FINAL_DONE_APPROVAL', task_id: approval.task_id, run_id: approval.run_id,
+    authoritative_review_id: approval.authoritative_review_id };
+  try {
+    const response = await fetch('/approval/final', { method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Final-Approval-CSRF': approval.csrf }, body: JSON.stringify(request) });
+    if (!response.ok) throw new Error('承認は拒否されました。現在のReviewを再確認してください。');
+    $('final-approval-message').textContent = '明示承認を記録しました。MCP Completeの実行・ledger DONE確認は別途必要です。';
+    approval = null; $('final-approval').hidden = true;
+  } catch (error) { $('final-approval-message').textContent = error.message; }
+  finally { approving = false; $('approve-done').disabled = false; approvalCheckAt = 0; }
+});
 function renderSource(task, current) {
   const source = task ? `（${current ? '実行中タスク' : '最新の履歴タスク'}: ${task.task_id}）` : '（証拠なし）';
   $('pipeline-source').textContent = source;
@@ -105,6 +163,8 @@ function render(snapshot) {
   renderSystemHealth(snapshot.health);
   renderCurrentTask(snapshot.current_task);
   renderLatestTask(snapshot.latest_task);
+  renderAutonomous(snapshot.autonomous_runs);
+  void refreshApproval();
   const observed = snapshot.current_task || snapshot.latest_task;
   renderSource(observed, !!snapshot.current_task);
   renderPipeline(observed);

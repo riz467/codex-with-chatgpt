@@ -131,12 +131,16 @@ describe("dashboard read-only evidence", () => {
     await new Promise<void>(r => server.listen(0, "127.0.0.1", r));
     const addr = server.address(); if (!addr || typeof addr === "string") throw new Error("No port");
     const base = `http://127.0.0.1:${addr.port}`;
+    const status = await (await fetch(base + "/api/status")).json() as { health: { verified_health: { codex_worker: { status: string } } } };
+    expect(status.health.verified_health.codex_worker.status).toBe("unknown");
+    expect(JSON.stringify(status)).not.toMatch(/CommandLine|UserSid|credential/);
+    expect((await (await fetch(base + "/labels.js")).text())).toContain("確認済み");
     expect((await (await fetch(base + "/api/tasks")).json() as unknown[])).toHaveLength(1);
     expect((await fetch(base + "/api/tasks/../secret")).status).not.toBe(200);
     expect((await fetch(base + "/api/tasks/rpc-one", { method: "POST" })).status).toBe(405);
     const abort = new AbortController(); const response = await fetch(base + "/events", { signal: abort.signal });
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     const reader = response.body!.getReader(); const first = new TextDecoder().decode((await reader.read()).value);
-    expect(first).toContain("event: snapshot"); expect(first).toContain('"current_task":null'); expect(first).toContain('"latest_task":'); expect(first).toContain("rpc-one"); abort.abort();
+    expect(first).toContain("event: snapshot"); expect(first).toContain('"current_task":null'); expect(first).toContain('"latest_task":'); expect(first).toContain('"verified_health":'); expect(first).toContain("rpc-one"); abort.abort();
   });
 });
