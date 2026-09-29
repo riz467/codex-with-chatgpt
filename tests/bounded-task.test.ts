@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { BoundedTasks, type Contract, type Worker } from "../src/mcp/bounded-task.js";
+import { BoundedTasks, type Contract, type Verifier, type Worker } from "../src/mcp/bounded-task.js";
 import { getStateDir } from "../src/config/paths.js";
 
 const roots: string[] = [];
@@ -257,5 +257,48 @@ describe("bounded OpenCode contract and review", () => {
     expect(tasks.submitReview(review(started.task_id, 1, started.contract_sha256, done.manifest_sha256, "PASS")).state).toBe("REVIEW_ACCEPTED");
     // The old change remains dirty, so the reservation is gone but a new task still cannot silently absorb it.
     expect(() => tasks.start(f.contract)).toThrow("DIRTY_REPO");
+  });
+  it("binds the codex-with-chatgpt Dashboard TypeScript profile to safe paths and controller verification", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "bounded-v2-ts-")); roots.push(root);
+    const repo = path.join(root, "repo");
+    fs.mkdirSync(path.join(repo, "src", "dashboard"), { recursive: true });
+    fs.mkdirSync(path.join(repo, "src", "mcp"), { recursive: true });
+    fs.mkdirSync(path.join(repo, "tests"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "src", "dashboard", "collector.ts"), "export const value = 1;\n");
+    fs.writeFileSync(path.join(repo, "src", "mcp", "server.ts"), "export const protectedValue = 1;\n");
+    fs.writeFileSync(path.join(repo, "tests", "dashboard-profile.test.ts"), "export const fixture = true;\n");
+    const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+    git("init", "-q"); git("add", "."); git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "initial");
+    const actual = fs.realpathSync.native(repo);
+    const contract: Contract = { repo: "self", goal: "Change the Dashboard projection only",
+      edit_paths: ["src/dashboard/collector.ts", "tests/dashboard-profile.test.ts"], acceptance_criteria: ["Dashboard remains type-safe"],
+      task_kind: "text_change", execution_profile: "tracked_typescript_dashboard", worker: "opencode",
+      codex: { allowed: false, max_calls: 0 }, max_revisions: 1, timeout_ms: 600000 };
+    const worker: Worker = async () => ({ worker: "opencode", session_id: "ses_dashboard", execution_id: "msg_dashboard",
+      provider: "fixture", model: "fixture", usage: null, tools: 0, state: "completed",
+      output: JSON.stringify({ edits: [{ path: "src/dashboard/collector.ts", old_text: "export const value = 1;",
+        new_text: "export const value = 2;" }] }) });
+    const verificationCalls: { profile: string; paths: string[] }[] = [];
+    const verifier: Verifier = (_repo, profile, paths) => {
+      verificationCalls.push({ profile, paths: [...paths] });
+      return { profile, passed: true, paths: [...paths], tests_run: 2, checks: [
+        { name: "typecheck", exit_code: 0, duration_ms: 1, tool_sha256: "0".repeat(64), stdout_sha256: "1".repeat(64), stderr_sha256: "2".repeat(64), stdout_bytes: 0, stderr_bytes: 0 },
+        { name: "full_regression", exit_code: 0, duration_ms: 1, tool_sha256: "3".repeat(64), stdout_sha256: "4".repeat(64), stderr_sha256: "5".repeat(64), stdout_bytes: 0, stderr_bytes: 0 },
+      ] };
+    };
+    const tasks = new BoundedTasks({ self: actual }, path.join(root, "store"), worker,
+      { self: "tracked_typescript_dashboard" }, verifier);
+    expect(() => tasks.start({ ...contract, execution_profile: "tracked_utf8_text" })).toThrow("INVALID_CONTRACT");
+    expect(() => tasks.start({ ...contract, edit_paths: ["src/mcp/server.ts"] })).toThrow("INVALID_CONTRACT");
+    expect(() => tasks.start({ ...contract, edit_paths: ["src/dashboard/passkey-fixture.ts"] })).toThrow("INVALID_CONTRACT");
+    const started = tasks.start(contract);
+    const done = await tasks.execute(started.task_id);
+    expect(done.state).toBe("REVIEW_PENDING");
+    expect(tasks.status(started.task_id).codex_calls).toBe(0);
+    expect(tasks.artifacts(started.task_id, 1).verify).toMatchObject({
+      profile: "tracked_typescript_dashboard", passed: true, tests_run: 2,
+      paths: ["src/dashboard/collector.ts"],
+    });
+    expect(verificationCalls).toEqual([{ profile: "tracked_typescript_dashboard", paths: ["src/dashboard/collector.ts"] }]);
   });
 });

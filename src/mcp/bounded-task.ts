@@ -2,8 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { GatewayError, safePath } from "./local-gateway.js";
 import { getStateDir } from "../config/paths.js";
 
@@ -12,13 +11,19 @@ const json = (value: unknown) => JSON.stringify(value);
 const fail = (code: string): never => { throw new GatewayError(code, code); };
 const idPattern = /^bounded-[a-f0-9]{32}$/;
 const defaultStateRoot = () => path.join(getStateDir(), "bounded-v2");
+export type ExecutionProfile = "tracked_utf8_text" | "tracked_typescript_dashboard";
 export type Contract = { repo: string; goal: string; edit_paths: string[]; acceptance_criteria: string[];
-  task_kind: "text_change"; execution_profile: "tracked_utf8_text"; worker: "opencode";
+  task_kind: "text_change"; execution_profile: ExecutionProfile; worker: "opencode";
   codex: { allowed: false; max_calls: 0 }; max_revisions: number; timeout_ms: number };
 type Edit = { path: string; old_text: string; new_text: string };
 export type WorkerResult = { worker: "opencode"; session_id: string | null; execution_id: string | null;
   provider: string | null; model: string | null; usage: unknown | null; output: string; state: "completed"; tools: number | null };
 export type Worker = (repo: string, prompt: string, timeout: number) => Promise<WorkerResult>;
+export type VerificationCheck = { name: string; exit_code: 0; duration_ms: number; tool_sha256: string;
+  stdout_sha256: string; stderr_sha256: string; stdout_bytes: number; stderr_bytes: number };
+export type VerificationResult = { profile: ExecutionProfile; passed: true; paths: string[]; tests_run: number;
+  checks: VerificationCheck[] };
+export type Verifier = (repo: string, profile: ExecutionProfile, paths: string[], timeout: number) => VerificationResult;
 // Keep the contract digest independent of caller property insertion order.
 const canonicalContract = (c: Contract): Contract => ({ repo: c.repo, goal: c.goal,
   edit_paths: [...c.edit_paths], acceptance_criteria: [...c.acceptance_criteria],
@@ -26,7 +31,7 @@ const canonicalContract = (c: Contract): Contract => ({ repo: c.repo, goal: c.go
   codex: { allowed: c.codex.allowed, max_calls: c.codex.max_calls },
   max_revisions: c.max_revisions, timeout_ms: c.timeout_ms });
 type Revision = { revision: number; execution_id: string; input_sha256: string; proposal_sha256: string;
-  manifest_sha256: string; worker: Omit<WorkerResult, "output">; verify: { profile: string; passed: boolean; tests_run: number };
+  manifest_sha256: string; worker: Omit<WorkerResult, "output">; verify: VerificationResult;
   files: { name: string; sha256: string; size: number }[]; review?: Review };
 export type Review = { review_id: string; task_id: string; revision: number; contract_sha256: string;
   manifest_sha256: string; reviewer: "chatgpt"; verdict: "PASS" | "NEEDS_WORK";
@@ -47,6 +52,11 @@ const pathCheck = (repo: string, name: string) => {
   text(fs.readFileSync(full));
   return full;
 };
+const profilePathAllowed = (profile: ExecutionProfile, name: string) => {
+  if (profile === "tracked_utf8_text") return true;
+  if (name === "src/dashboard/passkey-fixture.ts" || name.startsWith("src/dashboard/public/passkey-fixture.")) return false;
+  return /^(?:src\/dashboard\/.*\.(?:ts|js)|tests\/dashboard[^/]*\.test\.ts)$/.test(name);
+};
 const record = (dir: string, ledger: Ledger) => {
   const file = safePath(dir, "task.json"), temp = `${file}.${randomUUID()}.tmp`;
   fs.writeFileSync(temp, json(ledger), { flag: "wx" }); fs.renameSync(temp, file);
@@ -65,6 +75,45 @@ const parse = (value: string, contract: Contract): Edit[] => {
       !e.old_text || e.old_text === e.new_text || Buffer.byteLength(e.new_text) > 65536) ||
       new Set(edits.map(e => e.path)).size !== edits.length || edits.some(e => !contract.edit_paths.includes(e.path))) fail("INVALID_PROPOSAL");
   return edits;
+};
+
+const resolveRepoTool = (repo: string, relative: string) => {
+  const repoReal = fs.realpathSync.native(repo);
+  let tool: string;
+  try { tool = fs.realpathSync.native(path.resolve(repo, ...relative.split("/"))); } catch { return fail("VERIFY_TOOLCHAIN_INVALID"); }
+  const lowerRepo = repoReal.toLowerCase(), lowerTool = tool.toLowerCase();
+  if (lowerTool !== lowerRepo && !lowerTool.startsWith(lowerRepo + path.sep.toLowerCase())) fail("VERIFY_TOOLCHAIN_INVALID");
+  if (!fs.statSync(tool).isFile()) fail("VERIFY_TOOLCHAIN_INVALID");
+  return tool;
+};
+const runNodeCheck = (repo: string, name: string, relative: string, args: string[], timeout: number): VerificationCheck => {
+  const tool = resolveRepoTool(repo, relative), started = Date.now();
+  const result = spawnSync(process.execPath, [tool, ...args], { cwd: repo, shell: false, windowsHide: true,
+    encoding: "utf8", timeout, maxBuffer: 1024 * 1024, env: { ...process.env, CI: "1" } });
+  if (result.error) {
+    const code = (result.error as NodeJS.ErrnoException).code;
+    fail(code === "ETIMEDOUT" ? "VERIFY_TIMEOUT" : "VERIFY_FAILED");
+  }
+  if (result.status !== 0) fail("VERIFY_FAILED");
+  const stdout = typeof result.stdout === "string" ? result.stdout : "";
+  const stderr = typeof result.stderr === "string" ? result.stderr : "";
+  return { name, exit_code: 0, duration_ms: Date.now() - started, tool_sha256: sha(fs.readFileSync(tool)),
+    stdout_sha256: sha(Buffer.from(stdout, "utf8")), stderr_sha256: sha(Buffer.from(stderr, "utf8")),
+    stdout_bytes: Buffer.byteLength(stdout), stderr_bytes: Buffer.byteLength(stderr) };
+};
+const fixedVerifier: Verifier = (repo, profile, paths, timeout) => {
+  if (profile === "tracked_utf8_text") return { profile, passed: true, paths: [...paths], tests_run: 1, checks: [] };
+  const deadline = Date.now() + Math.max(1000, timeout);
+  const run = (name: string, relative: string, args: string[], cap: number) => {
+    const remaining = deadline - Date.now();
+    if (remaining < 1000) fail("VERIFY_TIMEOUT");
+    return runNodeCheck(repo, name, relative, args, Math.min(cap, remaining));
+  };
+  const checks = [
+    run("typecheck", "node_modules/typescript/bin/tsc", ["--noEmit"], 120000),
+    run("full_regression", "node_modules/vitest/vitest.mjs", ["run"], 300000),
+  ];
+  return { profile, passed: true, paths: [...paths], tests_run: checks.length, checks };
 };
 
 // Only a dedicated read-only agent may propose edits; it is not allowed to write, shell, or invoke Codex.
@@ -101,13 +150,15 @@ export class BoundedTasks {
   private readonly root: string;
   private readonly repoLocks: string;
 
-  constructor(private readonly repos: Record<string, string>, root?: string, private readonly worker: Worker = opencodeWorker) {
+  constructor(private readonly repos: Record<string, string>, root?: string, private readonly worker: Worker = opencodeWorker,
+    private readonly profiles: Readonly<Record<string, ExecutionProfile>> = {}, private readonly verifier: Verifier = fixedVerifier) {
     const stateRoot = defaultStateRoot();
     this.root = root ?? path.join(stateRoot, "tasks");
     this.repoLocks = root ? path.join(path.dirname(root), "bounded-repo-locks-v2") : path.join(stateRoot, "repo-locks");
   }
 
   private dir(id: string) { if (!idPattern.test(id)) fail("INVALID_TASK_ID"); return safePath(this.root, id); }
+  private profileFor(repo: string): ExecutionProfile { return this.profiles[repo] ?? "tracked_utf8_text"; }
   private repoLock(repo: string) { return safePath(this.repoLocks, sha(fs.realpathSync.native(repo).toLowerCase())); }
   private releaseRepo(task: Ledger) {
     const lock = this.repoLock(this.repos[task.contract.repo]);
@@ -118,10 +169,13 @@ export class BoundedTasks {
   private load(id: string): Ledger { const file = safePath(this.dir(id), "task.json"); if (!fs.existsSync(file)) fail("NOT_FOUND");
     const task = JSON.parse(fs.readFileSync(file, "utf8")) as Ledger;
     if (task.version !== 2 || task.task_id !== id || json(task.contract) !== json(canonicalContract(task.contract)) ||
-        sha(json(task.contract)) !== task.contract_sha256 ||
-         this.repos[task.contract.repo] === undefined) fail("CONTRACT_MISMATCH"); return task; }
+        sha(json(task.contract)) !== task.contract_sha256 || this.repos[task.contract.repo] === undefined ||
+        task.contract.execution_profile !== this.profileFor(task.contract.repo) ||
+        task.contract.edit_paths.some(p => !profilePathAllowed(task.contract.execution_profile, p))) fail("CONTRACT_MISMATCH"); return task; }
   start(contract: Contract) {
-    if (!contract || contract.worker !== "opencode" || contract.task_kind !== "text_change" || contract.execution_profile !== "tracked_utf8_text" ||
+    if (!contract || contract.worker !== "opencode" || contract.task_kind !== "text_change" ||
+        !["tracked_utf8_text", "tracked_typescript_dashboard"].includes(contract.execution_profile) ||
+        contract.execution_profile !== this.profileFor(contract.repo) ||
         Object.keys(contract).sort().join() !== "acceptance_criteria,codex,edit_paths,execution_profile,goal,max_revisions,repo,task_kind,timeout_ms,worker" ||
         !contract.codex || Object.keys(contract.codex).sort().join() !== "allowed,max_calls" ||
         contract.codex.allowed !== false || contract.codex.max_calls !== 0 || !Object.hasOwn(this.repos, contract.repo) ||
@@ -130,6 +184,7 @@ export class BoundedTasks {
         contract.acceptance_criteria.some(s => typeof s !== "string" || !s || s.length > 500) ||
         !Array.isArray(contract.edit_paths) || contract.edit_paths.length < 1 || contract.edit_paths.length > 3 ||
         new Set(contract.edit_paths).size !== contract.edit_paths.length ||
+        contract.edit_paths.some(p => !profilePathAllowed(contract.execution_profile, p)) ||
         !Number.isInteger(contract.max_revisions) || contract.max_revisions < 1 || contract.max_revisions > 3 ||
         !Number.isInteger(contract.timeout_ms) || contract.timeout_ms < 1000 || contract.timeout_ms > 600000) fail("INVALID_CONTRACT");
     const repo = this.repos[contract.repo];
@@ -206,13 +261,20 @@ export class BoundedTasks {
       const changed = git(repo, "diff", "HEAD", "--name-only").split("\n").filter(Boolean);
       if (!changed.length || changed.some(p => !task.contract.edit_paths.includes(p)) ||
           updated.some(u => text(fs.readFileSync(u.file)) !== u.after) || git(repo, "rev-parse", "HEAD") !== task.baseline_head) fail("VERIFY_FAILED");
-      files.push(store(dir, `${prefix}-diff.patch`, git(repo, "diff", "HEAD", "--binary") + "\n"));
-      files.push(store(dir, `${prefix}-verification.json`, json({ profile: "tracked_utf8_text", passed: true, paths: changed, tests_run: 1 })));
+      const reviewedDiff = git(repo, "diff", "HEAD", "--binary") + "\n";
+      const verification = this.verifier(repo, task.contract.execution_profile, changed,
+        Math.max(1000, task.contract.timeout_ms - task.worker_time_ms));
+      if (verification.profile !== task.contract.execution_profile || verification.passed !== true ||
+          verification.paths.join("\n") !== changed.join("\n") ||
+          git(repo, "diff", "HEAD", "--binary") + "\n" !== reviewedDiff ||
+          git(repo, "ls-files", "--others", "--exclude-standard").split("\n").filter(Boolean).length ||
+          updated.some(u => text(fs.readFileSync(u.file)) !== u.after)) fail("VERIFY_FAILED");
+      files.push(store(dir, `${prefix}-diff.patch`, reviewedDiff));
+      files.push(store(dir, `${prefix}-verification.json`, json(verification)));
       const manifest_sha256 = sha(json(files));
       const { output: _output, ...workerEvidence } = result;
       task.revisions.push({ revision, execution_id: result.execution_id ?? `unknown-${randomUUID()}`, input_sha256: sha(json(input)),
-        proposal_sha256: sha(result.output), manifest_sha256, worker: workerEvidence,
-        verify: { profile: "tracked_utf8_text", passed: true, tests_run: 1 }, files });
+        proposal_sha256: sha(result.output), manifest_sha256, worker: workerEvidence, verify: verification, files });
       task.state = "REVIEW_PENDING"; task.elapsed_ms = Date.now() - Date.parse(task.started_at); record(dir, task);
       return { task_id: id, revision, manifest_sha256, state: task.state };
     } catch (error) { task.state = "ESCALATE"; task.stop_reason = error instanceof GatewayError ? error.code : "EXECUTION_UNKNOWN";

@@ -1,8 +1,10 @@
-# Bounded OpenCode v2 — fixture-only target, operating Execution Bridge runtime
+# Bounded OpenCode v2 — fixture plus Dashboard TypeScript profiles, operating Execution Bridge runtime
 
 ## Scope and non-goals
 
-The bounded v2 MCP tools are available in the operating Execution Bridge, but their repository allowlist contains only `autonomous-fixture` (`C:\work\bounded-review-live-fixture`), **not** `pve-doc`. The contract fixes `task_kind=text_change`, `execution_profile=tracked_utf8_text`, `worker=opencode`, and `codex.allowed=false/max_calls=0`. It permits 1–3 existing tracked UTF-8 text files, not arbitrary shell commands, tests, profiles, or production operations. The fixed verification checks the tracked diff and permitted paths; a code-test profile would need separately designed isolation. Neither the worker nor any subsequent review or Passkey step commits, pushes, deploys, or completes legacy `DONE`.
+The bounded v2 MCP tools expose two fixed repository/profile pairings in the operating Execution Bridge. `autonomous-fixture` (`C:\work\bounded-review-live-fixture`) uses `tracked_utf8_text`; `codex-with-chatgpt` (`C:\work\codex-with-chatgpt`) uses `tracked_typescript_dashboard`. **`pve-doc` remains excluded.** Both profiles fix `task_kind=text_change`, `worker=opencode`, and `codex.allowed=false/max_calls=0`; callers cannot swap repository/profile pairings or supply commands.
+
+`tracked_typescript_dashboard` is intentionally narrow: it accepts only 1–3 existing tracked files under `src/dashboard/**` with `.ts`/`.js` extensions or `tests/dashboard*.test.ts`; the Passkey fixture files are explicitly denied. The controller applies exact replacements only after the same snapshot/scope checks as the text profile, then runs fixed local toolchain entrypoints for `tsc --noEmit` and the full `vitest run` regression. The caller cannot choose the commands, entrypoints or arguments. Verification records tool/output hashes and exit success in the revision manifest, and rechecks the reviewed Git diff after the tests. Neither profile commits, pushes, deploys, mutates Review/approval state, or completes legacy `DONE`.
 
 ## Bounded task lifecycle and durable evidence
 
