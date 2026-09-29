@@ -228,6 +228,67 @@ describe("bounded OpenCode contract and review", () => {
     await expect(tasks.execute(started.task_id)).rejects.toThrow("INVALID_PROPOSAL");
     expect(fs.readFileSync(path.join(f.repo, "SECOND.md"), "utf8")).toBe("Keep this unchanged.\n");
   });
+  it("applies SHA-bound non-overlapping line edits without whole-file output", async () => {
+    const f = fixture();
+    const worker: Worker = async (_repo, prompt) => {
+      const input = JSON.parse(prompt.slice(prompt.indexOf("Contract: ") + 10)) as {
+        current: { path: string; sha256: string }[];
+      };
+      const current = input.current[0];
+      return {
+        worker: "opencode", session_id: "ses_range", execution_id: "msg_range",
+        provider: "fixture", model: "fixture", usage: null, tools: 0, state: "completed",
+        output: JSON.stringify({ edits: [
+          { path: "README.md", expected_sha256: current.sha256, start_line: 1, delete_count: 1, new_text: "First draft.\n" },
+          { path: "README.md", expected_sha256: current.sha256, start_line: 3, delete_count: 0, new_text: "Appended.\n" },
+        ] }),
+      };
+    };
+    const tasks = new BoundedTasks({ fixture: f.repo }, path.join(f.root, "store"), worker);
+    const started = tasks.start(f.contract);
+    expect((await tasks.execute(started.task_id)).state).toBe("REVIEW_PENDING");
+    expect(fs.readFileSync(path.join(f.repo, "README.md"), "utf8")).toBe(
+      "First draft.\nssh delete publish are words.\nAppended.\n",
+    );
+  });
+
+  it("rejects stale SHA-bound range proposals before writing", async () => {
+    const f = fixture();
+    const worker: Worker = async () => ({
+      worker: "opencode", session_id: "ses_stale", execution_id: "msg_stale",
+      provider: "fixture", model: "fixture", usage: null, tools: 0, state: "completed",
+      output: JSON.stringify({ edits: [{
+        path: "README.md", expected_sha256: "0".repeat(64),
+        start_line: 1, delete_count: 1, new_text: "Wrong.\n",
+      }] }),
+    });
+    const tasks = new BoundedTasks({ fixture: f.repo }, path.join(f.root, "store"), worker);
+    const started = tasks.start(f.contract);
+    await expect(tasks.execute(started.task_id)).rejects.toThrow("SCOPE_CHANGED");
+    expect(fs.readFileSync(path.join(f.repo, "README.md"), "utf8")).toContain("Old text.");
+  });
+
+  it("rejects overlapping SHA-bound line edits", async () => {
+    const f = fixture();
+    const worker: Worker = async (_repo, prompt) => {
+      const input = JSON.parse(prompt.slice(prompt.indexOf("Contract: ") + 10)) as {
+        current: { sha256: string }[];
+      };
+      const expected = input.current[0].sha256;
+      return {
+        worker: "opencode", session_id: "ses_overlap", execution_id: "msg_overlap",
+        provider: "fixture", model: "fixture", usage: null, tools: 0, state: "completed",
+        output: JSON.stringify({ edits: [
+          { path: "README.md", expected_sha256: expected, start_line: 1, delete_count: 2, new_text: "A\n" },
+          { path: "README.md", expected_sha256: expected, start_line: 2, delete_count: 1, new_text: "B\n" },
+        ] }),
+      };
+    };
+    const tasks = new BoundedTasks({ fixture: f.repo }, path.join(f.root, "store"), worker);
+    const started = tasks.start(f.contract);
+    await expect(tasks.execute(started.task_id)).rejects.toThrow("INVALID_PROPOSAL");
+    expect(fs.readFileSync(path.join(f.repo, "README.md"), "utf8")).toContain("Old text.");
+  });
   it("reserves process overhead outside the 120 second OpenCode prompt budget", async () => {
     const f = fixture();
     let observedTimeout = 0;
