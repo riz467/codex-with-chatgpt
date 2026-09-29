@@ -7,6 +7,7 @@ import { createOAuthRouter } from "../auth/oauth.js";
 import { bearerAuth } from "../auth/middleware.js";
 import { PairingManager } from "../pairing/manager.js";
 import { createMcpServer } from "../mcp/server.js";
+import type { BoundedTasks } from "../mcp/bounded-task.js";
 import { createMcpHttpHandler } from "../mcp/http.js";
 import { CloudflaredQuickTunnel } from "../tunnel/cloudflared.js";
 import { CloudflaredNamedTunnel } from "../tunnel/cloudflared-named.js";
@@ -40,6 +41,10 @@ export interface BridgeOptions {
   authStoreFile?: string;
   pairingTtlMs?: number;
   accessTokenTtlMs?: number;
+  /** Server-owned binding; a client cannot claim this identity via tool arguments or OAuth registration name. */
+  boundedReviewerClientId?: string;
+  /** Isolated fixture injection only. */
+  boundedTasks?: BoundedTasks;
 }
 
 export interface Bridge {
@@ -125,7 +130,9 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
 
   // ---- MCP endpoint (bearer-protected) --------------------------------------
 
-  const mcpHandler = createMcpHttpHandler(() => createMcpServer({ workspace, logger }), logger);
+  const mcpHandler = createMcpHttpHandler(() => createMcpServer({ workspace, logger,
+    boundedReviewerClientId: opts.boundedReviewerClientId ?? process.env.C2C_BOUNDED_REVIEW_CLIENT_ID,
+    boundedTasks: opts.boundedTasks }), logger);
   app.all(
     "/mcp",
     express.json({ limit: "8mb" }),

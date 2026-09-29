@@ -77,6 +77,7 @@ function pairingPage(opts: {
     "git.read": "Read git status and diffs",
     "execution.read": "Read Codex execution summaries",
     "review.read": "Read local orchestration task evidence and review bundles",
+    "orchestration.review": "Submit bounded independent task reviews (requires server-side client authorization)",
     "orchestration.start": "Start bounded local AI tasks and fixed test markers",
     offline_access: "Stay connected between sessions",
   };
@@ -89,6 +90,9 @@ function pairingPage(opts: {
   const escapedProductName = escapeHtml(PRODUCT_NAME);
   const escapedWorkspaceName = escapeHtml(opts.workspaceName);
   const escapedRequestId = escapeHtml(opts.requestId);
+  const accessType = opts.scopes.some(scope => scope === "orchestration.start" || scope === "orchestration.review")
+    ? "with the following permissions"
+    : "(read-only)";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -121,7 +125,7 @@ function pairingPage(opts: {
 <body>
 <div class="card">
   <h1>${escapedProductName}</h1>
-  <p class="sub">ChatGPT is requesting access to workspace <strong>${escapedWorkspaceName}</strong> (read-only):</p>
+  <p class="sub">ChatGPT is requesting access to workspace <strong>${escapedWorkspaceName}</strong> ${accessType}:</p>
   <ul>${scopeList}</ul>
   <form method="POST" action="authorize">
     <input type="hidden" name="request_id" value="${escapedRequestId}">

@@ -9,6 +9,7 @@ export const SUPPORTED_SCOPES = [
   "git.read",
   "execution.read",
   "review.read",
+  "orchestration.review",
   "orchestration.start",
   "offline_access",
 ] as const;
@@ -273,8 +274,11 @@ export class AuthStore {
 }
 
 export function filterScopes(requested: string | undefined): string[] {
-  if (!requested || requested.trim() === "") return [...SUPPORTED_SCOPES];
+  // Review-return is opt-in: an omitted/unknown scope must not grant it via
+  // the older default-all pairing behavior.
+  const defaults = SUPPORTED_SCOPES.filter(scope => scope !== "orchestration.review");
+  if (!requested || requested.trim() === "") return defaults;
   const asked = requested.split(/[\s+]+/).filter(Boolean);
   const granted = asked.filter((scope) => (SUPPORTED_SCOPES as readonly string[]).includes(scope));
-  return granted.length > 0 ? granted : [...SUPPORTED_SCOPES];
+  return granted.length > 0 ? granted : defaults;
 }

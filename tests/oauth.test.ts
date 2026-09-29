@@ -42,7 +42,8 @@ async function authorizeWithPairing(
   clientId: string,
   challenge: string,
   pairingCode: string,
-  state = "st-123"
+  state = "st-123",
+  scope: string | undefined = "workspace.read workspace.search git.read execution.read offline_access"
 ): Promise<{ code: string | null; location: string | null; page?: string; status?: number }> {
   const authorizeUrl = new URL(`${base}/oauth/authorize`);
   authorizeUrl.searchParams.set("client_id", clientId);
@@ -51,7 +52,7 @@ async function authorizeWithPairing(
   authorizeUrl.searchParams.set("state", state);
   authorizeUrl.searchParams.set("code_challenge", challenge);
   authorizeUrl.searchParams.set("code_challenge_method", "S256");
-  authorizeUrl.searchParams.set("scope", "workspace.read workspace.search git.read execution.read offline_access");
+  if (scope !== undefined) authorizeUrl.searchParams.set("scope", scope);
 
   const pageResponse = await fetch(authorizeUrl, { redirect: "manual" });
   const html = await pageResponse.text();
@@ -110,6 +111,45 @@ describe("discovery metadata", () => {
 });
 
 describe("authorization + token flow", () => {
+  it("only issues review scope after an explicit paired authorization, not omission, fallback or refresh", async () => {
+    const clientId = await registerClient();
+    for (const requested of [undefined, "unknown.scope", "review.read orchestration.review"]) {
+      const { verifier, challenge } = pkceVerifierAndChallenge();
+      const pairing = bridge.pairing.create();
+      const { code } = await authorizeWithPairing(clientId, challenge, pairing.code, "scopes", requested);
+      expect(code).toBeTruthy();
+      const token = await exchangeToken(clientId, code!, verifier);
+      expect(token.status).toBe(200);
+      const scopes = token.body.scope.split(" ");
+      expect(scopes.includes("orchestration.review")).toBe(requested === "review.read orchestration.review");
+      if (requested !== "review.read orchestration.review") {
+        // Pre-existing tokens cannot acquire a new scope via refresh.
+        const refresh = await fetch(`${base}/oauth/token`, { method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: token.body.refresh_token, client_id: clientId }) });
+        expect(refresh.status).toBe(200);
+        expect(((await refresh.json()) as { scope: string }).scope.split(" ")).not.toContain("orchestration.review");
+      }
+    }
+  });
+  it("does not call write-capable scopes read-only on the consent page", async () => {
+    const clientId = await registerClient();
+    const { challenge } = pkceVerifierAndChallenge();
+    for (const scope of ["review.read", "review.read orchestration.start", "review.read orchestration.review"]) {
+      const url = new URL(`${base}/oauth/authorize`);
+      url.searchParams.set("client_id", clientId);
+      url.searchParams.set("redirect_uri", REDIRECT_URI);
+      url.searchParams.set("response_type", "code");
+      url.searchParams.set("code_challenge", challenge);
+      url.searchParams.set("code_challenge_method", "S256");
+      url.searchParams.set("scope", scope);
+      const page = await (await fetch(url)).text();
+      expect(page).toContain("Read local orchestration task evidence");
+      expect(page.includes("(read-only):")).toBe(scope === "review.read");
+      if (scope.includes("orchestration.review")) expect(page).toContain("Submit bounded independent task reviews");
+    }
+  });
+
   it("completes the full pairing + PKCE flow and calls MCP", async () => {
     const clientId = await registerClient();
     const { verifier, challenge } = pkceVerifierAndChallenge();
