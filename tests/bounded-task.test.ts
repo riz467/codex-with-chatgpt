@@ -237,6 +237,30 @@ describe("bounded OpenCode contract and review", () => {
     expect(next.next_revision).toBe(2);
     expect((await tasks.execute(started.task_id)).state).toBe("REVIEW_PENDING");
   });
+  it("forces a permanently hung worker to timeout and releases execution and repo locks", async () => {
+    const f = fixture(), store = path.join(f.root, "store");
+    const hung: Worker = () => new Promise(() => {});
+    const tasks = new BoundedTasks({ fixture: f.repo }, store, hung);
+    const started = tasks.start({ ...f.contract, timeout_ms: 1000 });
+    const began = Date.now();
+
+    await expect(tasks.execute(started.task_id)).rejects.toMatchObject({
+      code: "WORKER_TIMEOUT",
+      message: "CONTROLLER_TIMEOUT",
+    });
+
+    expect(Date.now() - began).toBeLessThan(7000);
+    expect(tasks.status(started.task_id)).toMatchObject({
+      state: "ESCALATE",
+      stop_reason: "WORKER_TIMEOUT",
+      revisions: [],
+      worker_time_ms: 1000,
+    });
+    expect(fs.existsSync(path.join(store, started.task_id, "execution.lock"))).toBe(false);
+
+    // A timed-out worker must not leave the repo reservation behind.
+    expect(() => tasks.start(f.contract)).not.toThrow();
+  });
   it("rejects changed snapshot even when the worker selected another scoped path", async () => {
     const f = fixture(true);
     const worker: Worker = async (repo) => {
