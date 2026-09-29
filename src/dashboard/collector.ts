@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import ignore from "ignore";
 import { ledgerTask, safePath, REPOS, REVIEW_ROOT, GatewayError, getOrchestrationStatus } from "../mcp/local-gateway.js";
 import { QUEUE } from "../worker/codex-interactive.js";
@@ -104,9 +105,80 @@ export function eventsFor(root: string, taskId: string, status: Record<string, u
   } catch (error) { if (error instanceof GatewayError) throw error; }
   return events.sort((a, b) => a.timestamp.localeCompare(b.timestamp)).slice(-100);
 }
+const boundedId = /^bounded-[a-f0-9]{32}$/;
+const sha256 = /^[a-f0-9]{64}$/;
+const contractKeys = ["repo", "goal", "edit_paths", "acceptance_criteria", "task_kind", "execution_profile", "worker", "codex", "max_revisions", "timeout_ms"] as const;
+const exactKeys = (value: Record<string, unknown>, keys: readonly string[]) =>
+  Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+const cleanString = (value: unknown, max: number) => typeof value === "string" && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value);
+const boundedPath = (value: unknown): value is string => typeof value === "string" && value.length <= 240 &&
+  !/^[./]|[\\:\x00-\x1f\x7f]|\/$/.test(value) && value.split("/").every(part => part !== "" && part !== "." && part !== "..") &&
+  !/(^|\/)(?:\.env(?:\..*)?|\.npmrc|.*(?:secret|credential|token|service.account).*)(?:\/|$)/i.test(value) && !sensitive.ignores(value);
+function boundedProjection(raw: Record<string, unknown> | null, taskId: string) {
+  if (!raw || raw.version !== 2 || raw.task_id !== taskId || !sha256.test(String(raw.contract_sha256)) ||
+      !["RUNNING", "REVIEW_PENDING", "REVIEW_ACCEPTED", "ESCALATE"].includes(String(raw.state))) return null;
+  const contract = obj(raw.contract), revisions = raw.revisions;
+  if (!contract || !exactKeys(contract, contractKeys) || !cleanString(contract.repo, 180) || !cleanString(contract.goal, 2000) ||
+      !Array.isArray(contract.edit_paths) || contract.edit_paths.length < 1 || contract.edit_paths.length > 3 ||
+      !contract.edit_paths.every(boundedPath) || new Set(contract.edit_paths).size !== contract.edit_paths.length ||
+      !Array.isArray(contract.acceptance_criteria) || contract.acceptance_criteria.length === 0 ||
+      !contract.acceptance_criteria.every((entry: unknown) => cleanString(entry, 500)) ||
+      contract.task_kind !== "text_change" || contract.execution_profile !== "tracked_typescript_dashboard" ||
+      contract.worker !== "opencode" || !obj(contract.codex) || !exactKeys(obj(contract.codex)!, ["allowed", "max_calls"]) ||
+      obj(contract.codex)!.allowed !== false || obj(contract.codex)!.max_calls !== 0 ||
+      !Number.isInteger(contract.max_revisions) || (contract.max_revisions as number) < 1 || (contract.max_revisions as number) > 3 ||
+      !Number.isInteger(contract.timeout_ms) || (contract.timeout_ms as number) < 1000 || (contract.timeout_ms as number) > 600000 ||
+      !Array.isArray(revisions) || revisions.length > (contract.max_revisions as number)) return null;
+  const canonical = Object.fromEntries(contractKeys.map(key => [key, contract[key]]));
+  if (createHash("sha256").update(JSON.stringify(canonical)).digest("hex") !== raw.contract_sha256) return null;
+  for (const [index, item] of revisions.entries()) {
+    const revision = obj(item), worker = obj(revision?.worker);
+    if (!revision || revision.revision !== index + 1 || !sha256.test(String(revision.manifest_sha256)) ||
+        !obj(revision.verify) || !Array.isArray(revision.files) || !revision.files.every((file: unknown) => !!obj(file)) ||
+        !worker || worker.worker !== "opencode" || !cleanString(worker.session_id, 500) || !cleanString(worker.execution_id, 500) ||
+        !["provider", "model"].every(key => worker[key] === null || cleanString(worker[key], 500)) ||
+        !(worker.usage === null || !!obj(worker.usage)) || worker.state !== "completed" ||
+        !(worker.tools === null || typeof worker.tools === "number" && Number.isFinite(worker.tools) && worker.tools >= 0)) return null;
+    if (revision.review !== undefined) {
+      const review = obj(revision.review);
+      if (!review || review.task_id !== taskId || review.revision !== revision.revision ||
+          review.contract_sha256 !== raw.contract_sha256 || review.manifest_sha256 !== revision.manifest_sha256 ||
+          review.reviewer !== "chatgpt" || !["PASS", "NEEDS_WORK"].includes(String(review.verdict))) return null;
+    }
+  }
+  const latest = obj(revisions.at(-1)), review = obj(latest?.review);
+  if ((raw.state === "REVIEW_PENDING" || raw.state === "REVIEW_ACCEPTED") && !latest) return null;
+  if (raw.state === "REVIEW_ACCEPTED" && review?.verdict !== "PASS") return null;
+  if (raw.stop_reason !== undefined && raw.stop_reason !== null && !cleanString(raw.stop_reason, 500)) return null;
+  return { task_id: taskId, state: raw.state as string, stop_reason_present: raw.stop_reason !== undefined && raw.stop_reason !== null,
+    contract_sha256: raw.contract_sha256 as string, edit_paths: contract.edit_paths as string[],
+    latest_revision: latest?.revision as number | undefined ?? null, manifest_sha256: latest?.manifest_sha256 as string | undefined ?? null,
+    verification_present: !!latest && Object.hasOwn(latest, "verify"), file_count: Array.isArray(latest?.files) ? latest.files.length : null,
+    worker: "opencode", review_verdict: review?.verdict as string | undefined ?? null };
+}
 export class Collector {
   constructor(public readonly roots: Roots = REPOS, public readonly reviewRoot = REVIEW_ROOT, public readonly queueRoot = QUEUE,
     private readonly osProbe: () => Promise<OsHealth> = roots === REPOS ? observeOsHealth : async () => normalizeOsHealth(null)) {}
+  boundedTask(taskId: string) {
+    if (!boundedId.test(taskId)) return null;
+    const root = process.env.C2C_STATE_DIR;
+    if (!root) return null;
+    try {
+      const dir = safePath(root, `bounded-v2/tasks/${taskId}`);
+      if (!fs.lstatSync(dir).isDirectory()) return null;
+      return boundedProjection(readJson(root, `bounded-v2/tasks/${taskId}/task.json`), taskId);
+    } catch { return null; }
+  }
+  boundedTasks(limit = 20) {
+    const root = process.env.C2C_STATE_DIR;
+    if (!root) return [];
+    try {
+      const dir = safePath(root, "bounded-v2/tasks");
+      return fs.readdirSync(dir, { withFileTypes: true }).filter(entry => entry.isDirectory() && boundedId.test(entry.name))
+        .map(entry => this.boundedTask(entry.name)).filter((task): task is NonNullable<typeof task> => task !== null)
+        .sort((a, b) => a.task_id.localeCompare(b.task_id)).slice(0, Number.isFinite(limit) ? Math.max(0, Math.trunc(limit)) : 0);
+    } catch { return []; }
+  }
   private jobs(): Map<string, Record<string, unknown>> {
     const map = new Map<string, Record<string, unknown>>();
     const dir = safePath(this.reviewRoot, "rpc-jobs");
@@ -249,6 +321,6 @@ export class Collector {
     const latest = tasks[0] ?? null;
     const autonomous_runs = this.autonomousRuns();
     return { generated_at: new Date().toISOString(), health: await this.health(), current_task: current ?? null,
-      latest_task: latest, recent_tasks: tasks.slice(0, 20), autonomous_runs };
+      latest_task: latest, recent_tasks: tasks.slice(0, 20), autonomous_runs, bounded_tasks: this.boundedTasks() };
   }
 }

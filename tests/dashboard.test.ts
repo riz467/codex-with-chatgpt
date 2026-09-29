@@ -10,7 +10,8 @@ import { GatewayError } from "../src/mcp/local-gateway.js";
 
 const dirs: string[] = [];
 const servers: Server[] = [];
-afterEach(async () => { await Promise.all(servers.map(s => new Promise<void>(r => s.close(() => r())))); servers.length = 0; for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true }); dirs.length = 0; });
+const originalStateDir = process.env.C2C_STATE_DIR;
+afterEach(async () => { await Promise.all(servers.map(s => new Promise<void>(r => s.close(() => r())))); servers.length = 0; for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true }); dirs.length = 0; if (originalStateDir === undefined) delete process.env.C2C_STATE_DIR; else process.env.C2C_STATE_DIR = originalStateDir; });
 function fixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dashboard-test-")); dirs.push(dir);
   const roots = { "pve-doc": path.join(dir, "pve"), "ai-orchestration-config": path.join(dir, "config") };
@@ -142,5 +143,38 @@ describe("dashboard read-only evidence", () => {
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     const reader = response.body!.getReader(); const first = new TextDecoder().decode((await reader.read()).value);
     expect(first).toContain("event: snapshot"); expect(first).toContain('"current_task":null'); expect(first).toContain('"latest_task":'); expect(first).toContain('"verified_health":'); expect(first).toContain("rpc-one"); abort.abort();
+  });
+  it("projects only bound bounded-v2 evidence from the fixed state directory", async () => {
+    const f = fixture(), stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bounded-dashboard-"));
+    dirs.push(stateDir); process.env.C2C_STATE_DIR = stateDir;
+    const taskId = `bounded-${"a".repeat(32)}`;
+    const contract = { repo: "codex-with-chatgpt", goal: "Read only", edit_paths: ["src/dashboard/collector.ts"],
+      acceptance_criteria: ["Safe projection"], task_kind: "text_change", execution_profile: "tracked_typescript_dashboard",
+      worker: "opencode", codex: { allowed: false, max_calls: 0 }, max_revisions: 3, timeout_ms: 600000 };
+    const contract_sha256 = createHash("sha256").update(JSON.stringify(contract)).digest("hex");
+    const manifest_sha256 = "b".repeat(64);
+    const revision = { revision: 1, manifest_sha256, verify: { private: "verification secret" }, files: [{ private: "file secret" }],
+      worker: { worker: "opencode", session_id: "session secret", execution_id: "execution secret", provider: null, model: null,
+        usage: null, state: "completed", tools: null }, review: { task_id: taskId, revision: 1, contract_sha256, manifest_sha256, reviewer: "chatgpt", verdict: "PASS" } };
+    const evidence = { version: 2, task_id: taskId, state: "REVIEW_ACCEPTED", contract, contract_sha256, revisions: [revision] };
+    const dir = path.join(stateDir, "bounded-v2", "tasks", taskId); fs.mkdirSync(dir, { recursive: true });
+    const save = (value: unknown) => fs.writeFileSync(path.join(dir, "task.json"), JSON.stringify(value));
+    save(evidence);
+    expect(f.collector.boundedTask(taskId)).toEqual({ task_id: taskId, state: "REVIEW_ACCEPTED", stop_reason_present: false,
+      contract_sha256, edit_paths: contract.edit_paths, latest_revision: 1, manifest_sha256, verification_present: true,
+      file_count: 1, worker: "opencode", review_verdict: "PASS" });
+    expect(f.collector.boundedTasks()).toHaveLength(1);
+    expect((await f.collector.snapshot()).bounded_tasks).toHaveLength(1);
+    expect(JSON.stringify(f.collector.boundedTask(taskId))).not.toMatch(/secret|session_id|execution_id|usage|tools/);
+    save({ ...evidence, contract: { ...contract, goal: "Tampered" } }); expect(f.collector.boundedTasks()).toEqual([]);
+    for (const changed of [{ task_id: `bounded-${"c".repeat(32)}` }, { revision: 2 },
+      { contract_sha256: "c".repeat(64) }, { manifest_sha256: "c".repeat(64) },
+      { reviewer: "opencode" }, { verdict: "FAIL" }]) {
+      save({ ...evidence, revisions: [{ ...revision, review: { ...revision.review, ...changed } }] });
+      expect(f.collector.boundedTask(taskId)).toBeNull();
+    }
+    save({ ...evidence, revisions: [{ ...revision, revision: 2 }] }); expect(f.collector.boundedTask(taskId)).toBeNull();
+    save({ ...evidence, revisions: [{ ...revision, verify: undefined, verification: true, file_count: 1 }] });
+    expect(f.collector.boundedTask(taskId)).toBeNull();
   });
 });
