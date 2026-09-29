@@ -9,7 +9,15 @@ $task = Get-DashboardTaskVerified
 if ($task.State -ne 'Running') { Start-ScheduledTask -TaskName $DashboardTask -ErrorAction Stop }
 for ($i = 0; $i -lt 15; $i++) {
     $status = Get-DashboardObservation
-    if ($status.Ready) { Write-Host "Dashboard ready at http://${DashboardHost}:${DashboardPort}/ (PID $($status.ProcessPID))."; return }
+    if ($status.Serving) {
+        $pidText = if ($null -ne $status.ProcessPID) {
+            "PID $($status.ProcessPID)"
+        } else {
+            "listener PID $($status.ListenerPID); process identity unavailable"
+        }
+        Write-Host "Dashboard serving at http://${DashboardHost}:${DashboardPort}/ ($pidText; strictReady=$($status.Ready))."
+        return
+    }
     Start-Sleep -Seconds 1
 }
-throw "Dashboard is not ready. Run status-ai-workspace-dashboard.ps1; no other task was touched."
+throw "Dashboard is not serving. Run status-ai-workspace-dashboard.ps1; no other task was touched."

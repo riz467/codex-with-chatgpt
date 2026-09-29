@@ -11,4 +11,5 @@ Write-Host "Process PID: $(if ($null -ne $status.ProcessPID) { $status.ProcessPI
 Write-Host "${DashboardHost}:${DashboardPort} listener PID: $(if ($null -ne $status.ListenerPID) { $status.ListenerPID } else { 'NONE' })"
 Write-Host "GET http://${DashboardHost}:${DashboardPort}/health : HTTP $($status.HealthHTTP); identity=$($status.HealthIdentity)"
 Write-Host "GET http://${DashboardHost}:${DashboardPort}/api/status : HTTP $($status.ApiStatusHTTP)"
+Write-Host "Dashboard serving: $($status.Serving)"
 Write-Host "Dashboard readiness: $($status.Ready)"

@@ -116,11 +116,72 @@ function Invoke-WebRequest { param($Uri) [pscustomobject]@{ StatusCode=200; Cont
     expect(valid.stdout).toContain('fixedAction=True');
     expect(valid.stdout).toContain('Process PID: 42');
     expect(valid.stdout).toContain('/api/status : HTTP 200');
+    expect(valid.stdout).toContain('Dashboard serving: True');
     expect(valid.stdout).toContain('Dashboard readiness: True');
     expect(valid.stdout).not.toContain('"service"');
     const malicious = run(42, 'node.exe "C:\\work\\codex-with-chatgpt\\scripts\\run-ai-workspace-dashboard.mjs" --port 80');
     expect(malicious.status, malicious.stderr).toBe(0);
     expect(malicious.stdout).toContain('Dashboard readiness: False');
+  });
+  it('accepts fixed S4U service as Serving when process metadata is unavailable without weakening Ready', () => {
+    const statusScript = fileURLToPath(new URL('../scripts/status-ai-workspace-dashboard.ps1', import.meta.url));
+    const result = ps(`
+function Get-ScheduledTask { $task = New-ScheduledTask -Action (New-ScheduledTaskAction -Execute 'C:\\Users\\workspace\\AppData\\Local\\Author Software\\nvm\\installs\\v24.16.0\\node.exe' -Argument '"C:\\work\\codex-with-chatgpt\\scripts\\run-ai-workspace-dashboard.mjs"' -WorkingDirectory 'C:\\work\\codex-with-chatgpt') -Trigger (New-ScheduledTaskTrigger -AtStartup) -Principal (New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\\workspace" -LogonType S4U -RunLevel Highest) -Settings (New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries); [pscustomobject]@{ TaskName='AI-Workspace-Dashboard'; State='Running'; Actions=$task.Actions; Triggers=$task.Triggers; Principal=$task.Principal; Settings=$task.Settings } }
+function Get-ScheduledTaskInfo { [pscustomobject]@{ LastTaskResult=267009 } }
+function Get-CimInstance { [pscustomobject]@{ ProcessId=42; ExecutablePath=$null; CommandLine=$null } }
+function Get-NetTCPConnection { [pscustomobject]@{ LocalAddress='127.0.0.1'; OwningProcess=42 } }
+function Invoke-WebRequest { param($Uri) [pscustomobject]@{ StatusCode=200; Content='{"ok":true,"service":"ai-workspace-dashboard"}' } }
+& '${statusScript.replaceAll("'", "''")}'`);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('Config valid: YES');
+    expect(result.stdout).toContain('fixedAction=True');
+    expect(result.stdout).toContain('Process PID: unknown');
+    expect(result.stdout).toContain('listener PID: 42');
+    expect(result.stdout).toContain('/health : HTTP 200; identity=True');
+    expect(result.stdout).toContain('/api/status : HTTP 200');
+    expect(result.stdout).toContain('Dashboard serving: True');
+    expect(result.stdout).toContain('Dashboard readiness: False');
+  });
+
+  it.each([
+    [
+      'missing listener',
+      `function Get-NetTCPConnection { $null }`,
+    ],
+    [
+      'wrong health identity',
+      `function Invoke-WebRequest {
+        param($Uri)
+        if ($Uri -like '*/health') {
+          [pscustomobject]@{ StatusCode=200; Content='{"ok":true,"service":"not-the-dashboard"}' }
+        } else {
+          [pscustomobject]@{ StatusCode=200; Content='{}' }
+        }
+      }`,
+    ],
+    [
+      'unavailable API',
+      `function Invoke-WebRequest {
+        param($Uri)
+        if ($Uri -like '*/api/status') { throw 'unavailable' }
+        [pscustomobject]@{ StatusCode=200; Content='{"ok":true,"service":"ai-workspace-dashboard"}' }
+      }`,
+    ],
+  ])('fails Serving closed when %s', (_name, override) => {
+    const statusScript = fileURLToPath(new URL('../scripts/status-ai-workspace-dashboard.ps1', import.meta.url));
+    const result = ps(`
+function Get-ScheduledTask { $task = New-ScheduledTask -Action (New-ScheduledTaskAction -Execute 'C:\\Users\\workspace\\AppData\\Local\\Author Software\\nvm\\installs\\v24.16.0\\node.exe' -Argument '"C:\\work\\codex-with-chatgpt\\scripts\\run-ai-workspace-dashboard.mjs"' -WorkingDirectory 'C:\\work\\codex-with-chatgpt') -Trigger (New-ScheduledTaskTrigger -AtStartup) -Principal (New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\\workspace" -LogonType S4U -RunLevel Highest) -Settings (New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries); [pscustomobject]@{ TaskName='AI-Workspace-Dashboard'; State='Running'; Actions=$task.Actions; Triggers=$task.Triggers; Principal=$task.Principal; Settings=$task.Settings } }
+function Get-ScheduledTaskInfo { [pscustomobject]@{ LastTaskResult=0 } }
+function Get-CimInstance { [pscustomobject]@{ ProcessId=42; ExecutablePath=$null; CommandLine=$null } }
+function Get-NetTCPConnection { [pscustomobject]@{ LocalAddress='127.0.0.1'; OwningProcess=42 } }
+function Invoke-WebRequest { param($Uri) [pscustomobject]@{ StatusCode=200; Content='{"ok":true,"service":"ai-workspace-dashboard"}' } }
+${override}
+& '${statusScript.replaceAll("'", "''")}'`);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('Dashboard serving: False');
+    expect(result.stdout).toContain('Dashboard readiness: False');
   });
   it('reports a mismatch reason without hiding task state, listener and health', () => {
     const statusScript = fileURLToPath(new URL('../scripts/status-ai-workspace-dashboard.ps1', import.meta.url));
@@ -138,6 +199,7 @@ function Invoke-WebRequest { throw 'unavailable' }
     expect(result.stdout).toMatch(/Ready; LastTaskResult=(?:unknown|\d+)/);
     expect(result.stdout).toContain('listener PID: NONE');
     expect(result.stdout).toContain('/health : HTTP unavailable');
+    expect(result.stdout).toContain('Dashboard serving: False');
   });
 });
 

@@ -112,6 +112,7 @@ function Get-DashboardObservation {
     $listeners = @($allListeners | Where-Object {
         $_.LocalAddress -eq $DashboardHost
     })
+    $listenerNodeProcesses = @($allProcesses | Where-Object { $listeners.OwningProcess -contains $_.ProcessId })
     $verified = @($processes | Where-Object { $listeners.OwningProcess -contains $_.ProcessId })
     $healthStatus = 'unavailable'; $healthIdentity = $false; $apiStatus = 'unavailable'
     try {
@@ -138,6 +139,9 @@ function Get-DashboardObservation {
         HealthHTTP = $healthStatus
         HealthIdentity = $healthIdentity
         ApiStatusHTTP = $apiStatus
+        Serving = [bool]($configured -and $task.State -eq 'Running' -and $actionFixed -and
+            $listeners.Count -eq 1 -and $listenerNodeProcesses.Count -eq 1 -and
+            $healthStatus -eq 200 -and $healthIdentity -and $apiStatus -eq 200)
         Ready = [bool]($configured -and $task.State -eq 'Running' -and $verified.Count -eq 1 -and
             $listeners.Count -eq 1 -and $healthStatus -eq 200 -and $healthIdentity -and $apiStatus -eq 200)
     }
