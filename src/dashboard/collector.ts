@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import ignore from "ignore";
 import { ledgerTask, safePath, REPOS, REVIEW_ROOT, GatewayError, getOrchestrationStatus } from "../mcp/local-gateway.js";
 import { QUEUE } from "../worker/codex-interactive.js";
+import { getStateDir } from "../config/paths.js";
 import { SENSITIVE_PATTERNS } from "../workspace/ignore.js";
 import { verifiedHealth, observeOsHealth, normalizeOsHealth, type OsHealth } from "./verified-health.js";
 import { reviewProfiles } from "../mcp/review-profiles.js";
@@ -161,18 +162,16 @@ export class Collector {
     private readonly osProbe: () => Promise<OsHealth> = roots === REPOS ? observeOsHealth : async () => normalizeOsHealth(null)) {}
   boundedTask(taskId: string) {
     if (!boundedId.test(taskId)) return null;
-    const root = process.env.C2C_STATE_DIR;
-    if (!root) return null;
     try {
+      const root = getStateDir();
       const dir = safePath(root, `bounded-v2/tasks/${taskId}`);
       if (!fs.lstatSync(dir).isDirectory()) return null;
       return boundedProjection(readJson(root, `bounded-v2/tasks/${taskId}/task.json`), taskId);
     } catch { return null; }
   }
   boundedTasks(limit = 20) {
-    const root = process.env.C2C_STATE_DIR;
-    if (!root) return [];
     try {
+      const root = getStateDir();
       const dir = safePath(root, "bounded-v2/tasks");
       return fs.readdirSync(dir, { withFileTypes: true }).filter(entry => entry.isDirectory() && boundedId.test(entry.name))
         .map(entry => this.boundedTask(entry.name)).filter((task): task is NonNullable<typeof task> => task !== null)

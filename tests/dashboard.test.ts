@@ -7,11 +7,13 @@ import { createServer, type Server } from "node:http";
 import { Collector, eventsFor, heartbeat, pipeline, readJson } from "../src/dashboard/collector.js";
 import { createDashboard } from "../src/dashboard/server.js";
 import { GatewayError } from "../src/mcp/local-gateway.js";
+import { getStateDir } from "../src/config/paths.js";
 
 const dirs: string[] = [];
 const servers: Server[] = [];
 const originalStateDir = process.env.C2C_STATE_DIR;
-afterEach(async () => { await Promise.all(servers.map(s => new Promise<void>(r => s.close(() => r())))); servers.length = 0; for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true }); dirs.length = 0; if (originalStateDir === undefined) delete process.env.C2C_STATE_DIR; else process.env.C2C_STATE_DIR = originalStateDir; });
+const originalLocalAppData = process.env.LOCALAPPDATA;
+afterEach(async () => { await Promise.all(servers.map(s => new Promise<void>(r => s.close(() => r())))); servers.length = 0; for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true }); dirs.length = 0; if (originalStateDir === undefined) delete process.env.C2C_STATE_DIR; else process.env.C2C_STATE_DIR = originalStateDir; if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA; else process.env.LOCALAPPDATA = originalLocalAppData; });
 function fixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dashboard-test-")); dirs.push(dir);
   const roots = { "pve-doc": path.join(dir, "pve"), "ai-orchestration-config": path.join(dir, "config") };
@@ -144,9 +146,22 @@ describe("dashboard read-only evidence", () => {
     const reader = response.body!.getReader(); const first = new TextDecoder().decode((await reader.read()).value);
     expect(first).toContain("event: snapshot"); expect(first).toContain('"current_task":null'); expect(first).toContain('"latest_task":'); expect(first).toContain('"verified_health":'); expect(first).toContain("rpc-one"); abort.abort();
   });
-  it("projects only bound bounded-v2 evidence from the fixed state directory", async () => {
-    const f = fixture(), stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bounded-dashboard-"));
-    dirs.push(stateDir); process.env.C2C_STATE_DIR = stateDir;
+  it.each(["override", "default"])("projects only bound bounded-v2 evidence from the fixed state directory (%s)", async mode => {
+    const f = fixture(), isolated = fs.mkdtempSync(path.join(os.tmpdir(), "bounded-dashboard-"));
+    dirs.push(isolated);
+    let stateDir: string;
+    if (mode === "override") {
+      process.env.C2C_STATE_DIR = isolated;
+      stateDir = getStateDir();
+      expect(stateDir).toBe(isolated);
+    } else {
+      delete process.env.C2C_STATE_DIR;
+      process.env.LOCALAPPDATA = isolated;
+      stateDir = getStateDir();
+      const relative = path.relative(isolated, stateDir);
+      expect(relative).not.toMatch(/^\.\.(?:[\\/]|$)/);
+      expect(path.isAbsolute(relative)).toBe(false);
+    }
     const taskId = `bounded-${"a".repeat(32)}`;
     const contract = { repo: "codex-with-chatgpt", goal: "Read only", edit_paths: ["src/dashboard/collector.ts"],
       acceptance_criteria: ["Safe projection"], task_kind: "text_change", execution_profile: "tracked_typescript_dashboard",
