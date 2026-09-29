@@ -227,6 +227,18 @@ describe("bounded OpenCode contract and review", () => {
     await expect(tasks.execute(started.task_id)).rejects.toThrow("INVALID_PROPOSAL");
     expect(fs.readFileSync(path.join(f.repo, "SECOND.md"), "utf8")).toBe("Keep this unchanged.\n");
   });
+  it("reserves process overhead outside the 120 second OpenCode prompt budget", async () => {
+    const f = fixture();
+    let observedTimeout = 0;
+    const worker: Worker = async (repo, prompt, timeout) => {
+      observedTimeout = timeout;
+      return mock(repo, prompt, timeout);
+    };
+    const tasks = new BoundedTasks({ fixture: f.repo }, path.join(f.root, "store"), worker);
+    const started = tasks.start(f.contract);
+    expect((await tasks.execute(started.task_id)).state).toBe("REVIEW_PENDING");
+    expect(observedTimeout).toBe(150000);
+  });
   it("does not charge review wait against worker time budget", async () => {
     const f = fixture(), store = path.join(f.root, "store"), tasks = new BoundedTasks({ fixture: f.repo }, store, mock);
     const started = tasks.start({ ...f.contract, timeout_ms: 1000 }), first = await tasks.execute(started.task_id);
