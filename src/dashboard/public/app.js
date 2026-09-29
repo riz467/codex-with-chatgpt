@@ -1,4 +1,4 @@
-import { stateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, reviewLabel, completionLabel, stopLabel, stopSummaryLabel, actionLabel, displayValue, shortId, shortCommit } from './labels.js';
+import { stateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, reviewLabel, completionLabel, stopLabel, stopSummaryLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask } from './labels.js';
 
 const $ = id => document.getElementById(id);
 const cell = (tag, content) => { const e = document.createElement(tag); e.textContent = displayValue(content); return e; };
@@ -79,6 +79,35 @@ function renderAutonomous(runs) {
   const events = document.createElement('div'); events.className = 'autonomous-events';
   for (const event of run.events ?? []) events.append(cell('p', `${event.timestamp} · ${event.event_type}`));
   root.append(events);
+}
+const boundedFields = [
+  ['task_id', 'Task ID'], ['state', '\u72b6\u614b'], ['stop_reason_present', '\u505c\u6b62\u7406\u7531'],
+  ['contract_sha256', 'Contract SHA256'], ['edit_paths_count', '\u5909\u66f4\u5bfe\u8c61\u6570'],
+  ['latest_revision', '\u6700\u65b0\u30ea\u30d3\u30b8\u30e7\u30f3'], ['manifest_sha256', 'Manifest SHA256'],
+  ['verification_present', '\u691c\u8a3c'], ['file_count', '\u30d5\u30a1\u30a4\u30eb\u6570'],
+  ['worker', 'Worker'], ['review_verdict', '\u30ec\u30d3\u30e5\u30fc\u7d50\u679c']
+];
+function renderBoundedTasks(tasks) {
+  const autonomous = $('autonomous');
+  let section = $('bounded-opencode');
+  if (!section) {
+    section = document.createElement('section'); section.id = 'bounded-opencode';
+    const heading = document.createElement('h2'); heading.textContent = 'Bounded OpenCode';
+    const list = document.createElement('div'); list.id = 'bounded-opencode-tasks';
+    section.append(heading, list);
+    (autonomous.closest('section') || autonomous).insertAdjacentElement('afterend', section);
+  }
+  const list = $('bounded-opencode-tasks'); clear(list);
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    list.append(cell('p', '\u8868\u793a\u3067\u304d\u308b\u30bf\u30b9\u30af\u306f\u3042\u308a\u307e\u305b\u3093'));
+    return;
+  }
+  for (const task of tasks) {
+    const safe = normalizeBoundedTask(task);
+    const card = document.createElement('div'); card.className = 'task-grid';
+    for (const [key, label] of boundedFields) pair(card, label, safe[key]);
+    list.append(card);
+  }
 }
 let approval = null, approvalCheckAt = 0, approving = false;
 async function refreshApproval() {
@@ -164,6 +193,7 @@ function render(snapshot) {
   renderCurrentTask(snapshot.current_task);
   renderLatestTask(snapshot.latest_task);
   renderAutonomous(snapshot.autonomous_runs);
+  renderBoundedTasks(snapshot.bounded_tasks);
   void refreshApproval();
   const observed = snapshot.current_task || snapshot.latest_task;
   renderSource(observed, !!snapshot.current_task);

@@ -54,3 +54,31 @@ export const eventSummaryLabel = summary => {
 };
 export const shortId = value => typeof value === 'string' && value.length > 24 ? `${value.slice(0, 12)}…${value.slice(-8)}` : displayValue(value);
 export const shortCommit = value => typeof value === 'string' && value.length > 12 ? `${value.slice(0, 12)}…` : displayValue(value);
+
+const boundedUnknown = '\u672a\u78ba\u8a8d';
+const boundedStates = {
+  RUNNING: '\u5b9f\u884c\u4e2d',
+  REVIEW_PENDING: '\u30ec\u30d3\u30e5\u30fc\u5f85\u3061',
+  REVIEW_ACCEPTED: '\u30ec\u30d3\u30e5\u30fc\u627f\u8a8d\u6e08\u307f',
+  ESCALATE: '\u8981\u78ba\u8a8d'
+};
+const boundedHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) ? value : boundedUnknown;
+const boundedBoolean = value => value === true ? '\u3042\u308a' : value === false ? '\u306a\u3057' : boundedUnknown;
+const boundedCount = value => Number.isSafeInteger(value) && value >= 0 ? String(value) : boundedUnknown;
+
+export const normalizeBoundedTask = task => {
+  const item = task !== null && typeof task === 'object' && !Array.isArray(task) ? task : {};
+  return {
+    task_id: typeof item.task_id === 'string' && /^bounded-[a-f0-9]{32}$/.test(item.task_id) ? item.task_id : boundedUnknown,
+    state: typeof item.state === 'string' && Object.hasOwn(boundedStates, item.state) ? boundedStates[item.state] : boundedUnknown,
+    stop_reason_present: boundedBoolean(item.stop_reason_present),
+    contract_sha256: boundedHash(item.contract_sha256),
+    edit_paths_count: Array.isArray(item.edit_paths) ? boundedCount(item.edit_paths.length) : boundedUnknown,
+    latest_revision: boundedCount(item.latest_revision) !== boundedUnknown && item.latest_revision >= 1 ? String(item.latest_revision) : boundedUnknown,
+    manifest_sha256: boundedHash(item.manifest_sha256),
+    verification_present: boundedBoolean(item.verification_present),
+    file_count: boundedCount(item.file_count),
+    worker: item.worker === 'opencode' ? 'opencode' : boundedUnknown,
+    review_verdict: item.review_verdict === 'PASS' ? '\u5408\u683c' : item.review_verdict === 'NEEDS_WORK' ? '\u8981\u4fee\u6b63' : boundedUnknown
+  };
+};
