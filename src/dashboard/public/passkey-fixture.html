@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dashboard｜パスキー試験承認</title>
+<style>body{font:16px system-ui;max-width:46rem;margin:2rem auto;padding:0 1rem;line-height:1.6;background:#f6f8fb;color:#192538}main{background:white;padding:1.5rem;border:1px solid #bcc9dc;border-radius:12px}dt{font-weight:bold;margin-top:.7rem}dd{margin:0;overflow-wrap:anywhere}button{font:inherit;padding:.75rem 1.2rem;margin-top:1.5rem}strong{color:#873216}#message{min-height:2rem}</style>
+</head><body><header><small>AI WORKSPACE / DASHBOARD・隔離試験</small><h1>パスキーで試験承認</h1></header>
+<main><p><strong>認証・承認の動作確認用。本番操作なし。</strong> 表示されたtaskのChatGPTレビュー結果と変更内容を確認してください。DONE・本番操作には接続しません。</p>
+<dl id="request"></dl><p id="state" role="status">読み込み中…</p><button type="button" id="approve" disabled>パスキーで承認</button>
+<p id="message" role="status"></p><p>承認後はこの隔離領域にだけ完了記録を保存します。内容hashが変わった場合や期限切れ・キャンセルでは実行しません。</p></main>
+<script type="module" src="/passkey-fixture.js"></script></body></html>

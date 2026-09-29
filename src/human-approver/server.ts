@@ -9,6 +9,7 @@ import {
   verifyAuthenticationResponse, verifyRegistrationResponse,
 } from "@simplewebauthn/server";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON, WebAuthnCredential } from "@simplewebauthn/server";
+import type { PasskeyFixture } from "../dashboard/passkey-fixture.js";
 
 const tailnetRPID = "ai-workspace-win.tail2f618d.ts.net";
 type Mode = "localhost" | "tailscale";
@@ -22,12 +23,13 @@ type Pending = { challenge: string; expires: number; kind: "registration" | "aut
 
 // Only the credential ID, public key, counter and optional transport hints persist.
 // This file is NOT a human-only evidence store or a security boundary against this OS principal.
-export function createHumanApprover(options: { mode?: Mode; storePath?: string; now?: () => number } = {}) {
+export function createHumanApprover(options: { mode?: Mode; storePath?: string; now?: () => number; fixture?: PasskeyFixture } = {}) {
   const mode = options.mode ?? "localhost";
   const { rpID, origin, host, file } = configuration(mode);
   const storePath = options.storePath ?? path.join(process.env.LOCALAPPDATA || os.tmpdir(), "ai-workspace-human-approver-poc", file);
   const now = options.now ?? Date.now;
   const pending = new Map<string, Pending>();
+  const fixtureCeremonies = new Map<string, { id: string; hash: string }>();
   const app = express();
   app.disable("x-powered-by");
   app.use((_req, res, next) => {
@@ -68,9 +70,6 @@ export function createHumanApprover(options: { mode?: Mode; storePath?: string; 
     pending.delete(id); // consume even on malformed input, verification failure or expiry
     return entry?.kind === kind && entry.expires > now() ? entry.challenge : null;
   };
-  app.get("/", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
-  app.get("/app.js", (_req, res) => res.sendFile(path.join(publicDir, "app.js")));
-  app.get("/status", (_req, res) => res.json({ registered: read() !== null, mode }));
   const json = express.json({ limit: "32kb", strict: true, type: "application/json" });
   const sameOrigin = (req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (req.headers.origin !== origin || req.headers.host !== host || req.headers["content-type"] !== "application/json") {
@@ -85,6 +84,49 @@ export function createHumanApprover(options: { mode?: Mode; storePath?: string; 
     }
     next();
   };
+  app.get("/", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
+  app.get("/app.js", (_req, res) => res.sendFile(path.join(publicDir, "app.js")));
+  if (options.fixture && mode === "localhost") {
+    const fixture = options.fixture;
+    app.get("/passkey-fixture", (_req, res) => res.sendFile(fileURLToPath(new URL("../dashboard/public/passkey-fixture.html", import.meta.url))));
+    app.get("/passkey-fixture.js", (_req, res) => res.sendFile(fileURLToPath(new URL("../dashboard/public/passkey-fixture.js", import.meta.url))));
+    app.get("/passkey-fixture/status", (_req, res) => res.json({ ...fixture.status(), credential_registered: read() !== null }));
+    app.post("/passkey-fixture/options", sameOrigin, json, fields("request_id", "request_sha256"), async (req, res) => {
+      const { request_id: id, request_sha256: hash } = req.body as { request_id: string; request_sha256: string };
+      const stored = read();
+      if (!stored || typeof id !== "string" || typeof hash !== "string" || !fixture.eligible(id, hash)) {
+        res.status(409).json({ error: "FIXTURE_NOT_ELIGIBLE" }); return;
+      }
+      const opts = await generateAuthenticationOptions({ rpID, challenge: randomBytes(32), userVerification: "required", timeout: ttl,
+        allowCredentials: [{ id: stored.id, transports: stored.transports }] });
+      const ceremony = issue("authentication", opts.challenge);
+      fixtureCeremonies.set(ceremony, { id, hash });
+      res.json({ ceremony, options: opts });
+    });
+    app.post("/passkey-fixture/verify", sameOrigin, json, fields("request_id", "request_sha256", "ceremony", "credential"), async (req, res) => {
+      const { request_id: id, request_sha256: hash, ceremony, credential } = req.body as
+        { request_id: string; request_sha256: string; ceremony: string; credential: AuthenticationResponseJSON };
+      const binding = fixtureCeremonies.get(ceremony);
+      fixtureCeremonies.delete(ceremony);
+      const challenge = consume(ceremony, "authentication");
+      const stored = read();
+      if (!binding || binding.id !== id || binding.hash !== hash || !challenge || !stored ||
+          !fixture.eligible(id, hash) || credential?.id !== stored.id) {
+        res.status(403).json({ error: "FIXTURE_APPROVAL_REJECTED" }); return;
+      }
+      try {
+        const result = await verifyAuthenticationResponse({ response: credential, expectedChallenge: challenge,
+          expectedOrigin: origin, expectedRPID: rpID, requireUserVerification: true,
+          credential: { id: stored.id, publicKey: Buffer.from(stored.publicKey, "base64url"), counter: stored.counter, transports: stored.transports } });
+        if (!result.verified || !result.authenticationInfo.userVerified || result.authenticationInfo.origin !== origin ||
+            result.authenticationInfo.rpID !== rpID || read()?.counter !== stored.counter || !fixture.eligible(id, hash)) throw new Error("REJECTED");
+        save({ ...stored, counter: result.authenticationInfo.newCounter });
+        if (!fixture.complete(id, hash)) throw new Error("REJECTED");
+        res.status(201).json({ state: "APPROVED_TEST_ONLY", request_id: id, request_sha256: hash });
+      } catch { res.status(403).json({ error: "FIXTURE_APPROVAL_REJECTED" }); }
+    });
+  }
+  app.get("/status", (_req, res) => res.json({ registered: read() !== null, mode }));
   app.post("/registration/options", sameOrigin, json, fields(), async (_req, res) => {
     if (read()) { res.status(409).json({ error: "ALREADY_REGISTERED" }); return; }
     const options = await generateRegistrationOptions({ rpName: "AI Workspace Human Approver PoC", rpID, challenge: randomBytes(32),
