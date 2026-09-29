@@ -18,6 +18,8 @@ Task Scheduler の `AI-Workspace-Gateway` は `workspace` ユーザーの **AtSt
 
 Node は `C:\Users\workspace\AppData\Local\Author Software\nvm\installs\v24.16.0\node.exe`、cloudflared は `C:\Program Files (x86)\cloudflared\cloudflared.exe` を固定指定。Node の切替時はスクリプト両方のパスを確認します。`serve` はポート競合の瞬間に別ポートへ退避し得るため、**ポートと workspaceId の両方**を確認してください。
 
+Execution Bridge の恒久 runtime は `C:\work\codex-with-chatgpt\.tooling\ai-workspace-execution-runtime\dist\cli\index.js`、Review Bridge は通常の `C:\work\codex-with-chatgpt\dist\cli\index.js` を使用します。Execution runtime は検証済み release の固定コピーであり、通常の `corepack pnpm build` で上書きしません。runtime を更新するときは別ディレクトリで検証し、証跡保存後に明示的な昇格と supervisor 再起動を行います。
+
 リポジトリのルートから PowerShell 7 で、まず**確認だけ**行います:
 
 ```powershell

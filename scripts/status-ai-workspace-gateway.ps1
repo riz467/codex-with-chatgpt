@@ -6,7 +6,10 @@ if ($task) {
     Write-Host "Task $GatewayTask : $($task.State), user=$($task.Principal.UserId), logon=$($task.Principal.LogonType), lastResult=$($info.LastTaskResult)"
 } else { Write-Host "Task $GatewayTask : NOT REGISTERED" }
 $processes = @(Get-CimInstance Win32_Process | Where-Object {
-    ($_.Name -eq 'node.exe' -and $_.ExecutablePath -eq $GatewayNode -and $_.CommandLine -like '*\dist\cli\index.js serve --workspace *') -or
+    ($_.Name -eq 'node.exe' -and $_.ExecutablePath -eq $GatewayNode -and (
+        $_.CommandLine -like "*$GatewayExecutionCli serve --workspace $GatewayRoot --port 48765*" -or
+        $_.CommandLine -like "*$GatewayReviewCli serve --workspace $GatewayReviewRoot --port 54108*"
+    )) -or
     ($_.Name -eq 'node.exe' -and $_.ExecutablePath -eq $GatewayNode -and $_.CommandLine -like '*run-ai-workspace-gateway.mjs*')
 })
 $tunnelCim = @(Get-CimInstance Win32_Process -Filter "Name='cloudflared.exe'" -ErrorAction SilentlyContinue)

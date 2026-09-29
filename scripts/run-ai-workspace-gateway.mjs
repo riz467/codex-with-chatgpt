@@ -5,21 +5,34 @@ import { existsSync, mkdirSync, renameSync, statSync, appendFileSync, rmSync } f
 import net from 'node:net';
 
 const node = 'C:\\Users\\workspace\\AppData\\Local\\Author Software\\nvm\\installs\\v24.16.0\\node.exe';
-const cli = 'C:\\work\\codex-with-chatgpt\\dist\\cli\\index.js';
+const executionCli = 'C:\\work\\codex-with-chatgpt\\.tooling\\ai-workspace-execution-runtime\\dist\\cli\\index.js';
+const reviewCli = 'C:\\work\\codex-with-chatgpt\\dist\\cli\\index.js';
+const executionStateDir = 'C:\\Users\\workspace\\AppData\\Local\\codex-with-chatgpt';
+const boundedReviewerClientId = 'c2c_client_Um175Y3xYaj2RoCN';
 const cloudflared = 'C:\\Program Files (x86)\\cloudflared\\cloudflared.exe';
 const config = 'C:\\Users\\workspace\\.cloudflared\\config.yml';
 const logDir = 'C:\\work\\ai-workspace-logs';
-const env = {
-  ...process.env,
+const {
+  C2C_STATE_DIR: _ignoredStateDir,
+  C2C_BOUNDED_REVIEW_CLIENT_ID: _ignoredReviewerClientId,
+  ...inheritedEnv
+} = process.env;
+const baseEnv = {
+  ...inheritedEnv,
   USERPROFILE: 'C:\\Users\\workspace',
   HOME: 'C:\\Users\\workspace',
   LOCALAPPDATA: 'C:\\Users\\workspace\\AppData\\Local',
   APPDATA: 'C:\\Users\\workspace\\AppData\\Roaming',
 };
+const executionEnv = {
+  ...baseEnv,
+  C2C_STATE_DIR: executionStateDir,
+  C2C_BOUNDED_REVIEW_CLIENT_ID: boundedReviewerClientId,
+};
 const definitions = [
-  { name: 'execution-bridge', command: node, args: [cli, 'serve', '--workspace', 'C:\\work\\codex-with-chatgpt', '--port', '48765'], port: 48765 },
-  { name: 'review-bridge', command: node, args: [cli, 'serve', '--workspace', 'C:\\work\\ai-orchestration-review', '--port', '54108'], port: 54108 },
-  { name: 'cloudflared', command: cloudflared, args: ['--config', config, 'tunnel', 'run', 'ai-workspace-mcp'] },
+  { name: 'execution-bridge', command: node, args: [executionCli, 'serve', '--workspace', 'C:\\work\\codex-with-chatgpt', '--port', '48765'], port: 48765, env: executionEnv },
+  { name: 'review-bridge', command: node, args: [reviewCli, 'serve', '--workspace', 'C:\\work\\ai-orchestration-review', '--port', '54108'], port: 54108, env: baseEnv },
+  { name: 'cloudflared', command: cloudflared, args: ['--config', config, 'tunnel', 'run', 'ai-workspace-mcp'], env: baseEnv },
 ];
 mkdirSync(logDir, { recursive: true });
 const children = new Map();
@@ -77,7 +90,7 @@ async function reconcile() {
     }
     messages.delete(def.name);
     const child = spawn(def.command, def.args, {
-      cwd: 'C:\\work\\codex-with-chatgpt', env, stdio: 'ignore', windowsHide: true,
+      cwd: 'C:\\work\\codex-with-chatgpt', env: def.env, stdio: 'ignore', windowsHide: true,
     });
     children.set(def.name, child);
     log(def.name, `started pid=${child.pid ?? 'unknown'}`);

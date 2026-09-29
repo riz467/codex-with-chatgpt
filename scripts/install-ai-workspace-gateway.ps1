@@ -12,7 +12,7 @@ if ($identity.Name.Split('\')[-1] -ne $GatewayAccount) {
 if (Get-ScheduledTask -TaskName $GatewayTask -ErrorAction SilentlyContinue) {
     throw "Task $GatewayTask already exists; inspect it before changing registration."
 }
-foreach ($file in @($GatewayNode, $GatewayTunnel, $GatewayConfig, "$GatewayRoot\dist\cli\index.js")) {
+foreach ($file in @($GatewayNode, $GatewayTunnel, $GatewayConfig, $GatewayExecutionCli, $GatewayReviewCli)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing: $file" }
 }
 $action = New-ScheduledTaskAction -Execute $GatewayNode -Argument '"C:\work\codex-with-chatgpt\scripts\run-ai-workspace-gateway.mjs"' -WorkingDirectory $GatewayRoot

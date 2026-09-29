@@ -36,7 +36,7 @@ The deployment scripts register one Task Scheduler **AtStartup** task, `AI-Works
 The task runs the fixed Node supervisor `scripts/run-ai-workspace-gateway.mjs`. It starts (and retries after exit) the following commands, with a preflight port/tunnel check to avoid known duplicates:
 
 ```
-"C:\Users\workspace\AppData\Local\Author Software\nvm\installs\v24.16.0\node.exe" C:\work\codex-with-chatgpt\dist\cli\index.js serve --workspace C:\work\codex-with-chatgpt --port 48765
+"C:\Users\workspace\AppData\Local\Author Software\nvm\installs\v24.16.0\node.exe" C:\work\codex-with-chatgpt\.tooling\ai-workspace-execution-runtime\dist\cli\index.js serve --workspace C:\work\codex-with-chatgpt --port 48765
 "C:\Users\workspace\AppData\Local\Author Software\nvm\installs\v24.16.0\node.exe" C:\work\codex-with-chatgpt\dist\cli\index.js serve --workspace C:\work\ai-orchestration-review --port 54108
 "C:\Program Files (x86)\cloudflared\cloudflared.exe" --config C:\Users\workspace\.cloudflared\config.yml tunnel run ai-workspace-mcp
 ```
