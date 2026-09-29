@@ -145,7 +145,7 @@ function renderSource(task, current) {
   $('events-source').textContent = source;
 }
 function renderPipeline(task) {
-  const root = $('pipeline'); clear(root);
+  const root = arguments.length > 1 ? arguments[1] : $('pipeline'); clear(root);
   for (const name of stages) {
     const status = task?.pipeline?.[name] ?? 'unknown';
     const element = document.createElement('div');
@@ -154,13 +154,50 @@ function renderPipeline(task) {
   }
 }
 function renderLiveEvents(events) {
-  const root = $('events'); clear(root);
+  const root = arguments.length > 1 ? arguments[1] : $('events'); clear(root);
   for (const event of events || []) {
     const row = document.createElement('div'); row.className = 'event';
     row.append(cell('time', new Date(event.timestamp).toLocaleString('ja-JP')), cell('b', actorLabel(event.actor)), cell('span', `${eventTypeLabel(event.event_type)} · ${eventSummaryLabel(event.summary)}`));
     root.append(row);
   }
   if (!root.childNodes.length) root.append(cell('p', '表示できる実行ログはありません'));
+}
+let selectedTaskRequest = 0;
+async function showTaskDetails(taskId) {
+  let section = $('selected-task-details');
+  if (!section) {
+    section = document.createElement('section'); section.id = 'selected-task-details';
+    const heading = cell('h2', 'Task details');
+    const status = document.createElement('p'); status.id = 'selected-task-status'; status.setAttribute('role', 'status');
+    const fields = document.createElement('div'); fields.id = 'selected-task-fields';
+    const pipelineHeading = cell('h3', 'Pipeline');
+    const pipeline = document.createElement('div'); pipeline.id = 'selected-task-pipeline';
+    const eventsHeading = cell('h3', 'Events');
+    const events = document.createElement('div'); events.id = 'selected-task-events';
+    section.append(heading, status, fields, pipelineHeading, pipeline, eventsHeading, events);
+    ($('tasks').closest('table') || $('tasks')).insertAdjacentElement('afterend', section);
+  }
+  const request = ++selectedTaskRequest;
+  $('selected-task-status').textContent = '読み込み中';
+  for (const id of ['selected-task-fields', 'selected-task-pipeline', 'selected-task-events']) clear($(id));
+  try {
+    const encodedId = encodeURIComponent(String(taskId));
+    const [taskResponse, eventsResponse] = await Promise.all([
+      fetch(`/api/tasks/${encodedId}`, { method: 'GET', credentials: 'same-origin' }),
+      fetch(`/api/events/${encodedId}`, { method: 'GET', credentials: 'same-origin' })
+    ]);
+    if (!taskResponse.ok || !eventsResponse.ok) throw new Error('Task details could not be loaded.');
+    const [task, events] = await Promise.all([taskResponse.json(), eventsResponse.json()]);
+    if (request !== selectedTaskRequest) return;
+    renderTask($('selected-task-fields'), task, taskFields, 'Task not found.');
+    renderPipeline(task, $('selected-task-pipeline'));
+    renderLiveEvents(events, $('selected-task-events'));
+    $('selected-task-status').textContent = '';
+  } catch {
+    if (request !== selectedTaskRequest) return;
+    for (const id of ['selected-task-fields', 'selected-task-pipeline', 'selected-task-events']) clear($(id));
+    $('selected-task-status').textContent = 'Task details could not be loaded.';
+  }
 }
 function renderRecentTasks(tasks) {
   const root = $('tasks'); clear(root);
@@ -172,6 +209,10 @@ function renderRecentTasks(tasks) {
       [reviewLabel(task.review_result)], [completionLabel(task.completion_mode)], [shortCommit(task.integrated_commit), task.integrated_commit]
     ];
     for (const [content, full] of fields) { const td = cell('td', content); if (full) td.title = full; row.append(td); }
+    const detailsButton = document.createElement('button');
+    detailsButton.type = 'button'; detailsButton.textContent = '詳細';
+    detailsButton.addEventListener('click', () => { void showTaskDetails(task.task_id); });
+    row.firstElementChild.append(document.createTextNode(' '), detailsButton);
     const state = row.children[2];
     state.className = 'state-' + (['DONE', 'NEEDS_APPROVAL', 'READY_FOR_REVIEW', 'BLOCKED', 'FAILED'].includes(task.state) ? task.state.toLowerCase() : 'default');
     root.append(row);
