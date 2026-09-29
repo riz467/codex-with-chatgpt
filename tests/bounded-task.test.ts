@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { BoundedTasks, type Contract, type Verifier, type Worker } from "../src/mcp/bounded-task.js";
 import { getStateDir } from "../src/config/paths.js";
+import { GatewayError } from "../src/mcp/local-gateway.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
@@ -249,6 +250,35 @@ describe("bounded OpenCode contract and review", () => {
     expect(next.next_revision).toBe(2);
     expect((await tasks.execute(started.task_id)).state).toBe("REVIEW_PENDING");
   });
+  it("persists only sanitized OpenCode worker diagnostics", async () => {
+    const f = fixture();
+    const worker: Worker = async () => {
+      throw new GatewayError(
+        "WORKER_FAILED",
+        "PROMPT_ATTEMPTED:OPENCODE_TIMEOUT:ses_safe123",
+      );
+    };
+    const tasks = new BoundedTasks(
+      { fixture: f.repo },
+      path.join(f.root, "store"),
+      worker,
+    );
+    const started = tasks.start(f.contract);
+
+    await expect(tasks.execute(started.task_id)).rejects.toMatchObject({
+      code: "WORKER_FAILED",
+    });
+
+    expect(tasks.status(started.task_id)).toMatchObject({
+      state: "ESCALATE",
+      stop_reason: "WORKER_FAILED",
+      worker_diagnostic: {
+        phase: "PROMPT_ATTEMPTED",
+        error_code: "OPENCODE_TIMEOUT",
+        session_id: "ses_safe123",
+      },
+    });
+  });
   it("forces a permanently hung worker to timeout and releases execution and repo locks", async () => {
     const f = fixture(), store = path.join(f.root, "store");
     const hung: Worker = () => new Promise(() => {});
@@ -265,6 +295,11 @@ describe("bounded OpenCode contract and review", () => {
     expect(tasks.status(started.task_id)).toMatchObject({
       state: "ESCALATE",
       stop_reason: "WORKER_TIMEOUT",
+      worker_diagnostic: {
+        phase: "CONTROLLER",
+        error_code: "WORKER_TIMEOUT",
+        session_id: null,
+      },
       revisions: [],
       worker_time_ms: 1000,
     });

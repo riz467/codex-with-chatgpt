@@ -36,9 +36,11 @@ type Revision = { revision: number; execution_id: string; input_sha256: string; 
 export type Review = { review_id: string; task_id: string; revision: number; contract_sha256: string;
   manifest_sha256: string; reviewer: "chatgpt"; verdict: "PASS" | "NEEDS_WORK";
   findings: string[] };
+export type WorkerDiagnostic = { phase: string; error_code: string; session_id: string | null };
 type Ledger = { version: 2; task_id: string; contract: Contract; contract_sha256: string; baseline_head: string;
   baseline: Record<string, string>; state: "RUNNING" | "REVIEW_PENDING" | "REVIEW_ACCEPTED" | "ESCALATE";
   revisions: Revision[]; feedback: string[]; started_at: string; stop_reason: string | null;
+  worker_diagnostic?: WorkerDiagnostic | null;
   codex_calls: 0; codex_usage: null; elapsed_ms: number | null; worker_time_ms: number };
 const git = (repo: string, ...args: string[]) => execFileSync("git", ["-C", repo, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", ...args],
   { encoding: "utf8", env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }, timeout: 10000 }).trim();
@@ -132,6 +134,22 @@ const terminateWorkerTree = (child: SpawnedChild) => {
   try { child.kill(); } catch { /* best-effort non-Windows/fallback termination */ }
 };
 
+const workerDiagnostic = (error: unknown): WorkerDiagnostic | null => {
+  if (!(error instanceof GatewayError) || !["WORKER_FAILED", "WORKER_TIMEOUT"].includes(error.code)) return null;
+
+  if (error.code === "WORKER_TIMEOUT" && error.message === "CONTROLLER_TIMEOUT") {
+    return { phase: "CONTROLLER", error_code: "WORKER_TIMEOUT", session_id: null };
+  }
+
+  const match = /^([A-Z_]{3,32}):([A-Z0-9_]{3,80}):(UNKNOWN|ses_[A-Za-z0-9]+)$/.exec(error.message);
+  if (!match) return { phase: "UNKNOWN", error_code: error.code, session_id: null };
+
+  return {
+    phase: match[1],
+    error_code: match[2],
+    session_id: match[3] === "UNKNOWN" ? null : match[3],
+  };
+};
 const withWorkerDeadline = <T>(operation: Promise<T>, timeout: number): Promise<T> => new Promise((resolve, reject) => {
   let settled = false;
   const timer = setTimeout(() => {
@@ -306,7 +324,8 @@ export class BoundedTasks {
       const savedContract = canonicalContract(contract);
       const task: Ledger = { version: 2, task_id: id, contract: savedContract, contract_sha256: sha(json(savedContract)),
         baseline_head: git(repo, "rev-parse", "HEAD"), baseline, state: "RUNNING", revisions: [], feedback: [],
-        started_at: new Date().toISOString(), stop_reason: null, codex_calls: 0, codex_usage: null, elapsed_ms: null, worker_time_ms: 0 };
+        started_at: new Date().toISOString(), stop_reason: null, worker_diagnostic: null,
+        codex_calls: 0, codex_usage: null, elapsed_ms: null, worker_time_ms: 0 };
       record(this.dir(id), task); return { task_id: id, contract_sha256: task.contract_sha256 };
     } catch (error) {
       if (fs.existsSync(safePath(lock, "owner.txt"))) fs.unlinkSync(safePath(lock, "owner.txt"));
@@ -394,8 +413,14 @@ export class BoundedTasks {
         proposal_sha256: sha(result.output), manifest_sha256, worker: workerEvidence, verify: verification, files });
       task.state = "REVIEW_PENDING"; task.elapsed_ms = Date.now() - Date.parse(task.started_at); record(dir, task);
       return { task_id: id, revision, manifest_sha256, state: task.state };
-    } catch (error) { task.state = "ESCALATE"; task.stop_reason = error instanceof GatewayError ? error.code : "EXECUTION_UNKNOWN";
-      record(dir, task); this.releaseRepo(task); throw error; }
+    } catch (error) {
+      task.state = "ESCALATE";
+      task.stop_reason = error instanceof GatewayError ? error.code : "EXECUTION_UNKNOWN";
+      task.worker_diagnostic = workerDiagnostic(error);
+      record(dir, task);
+      this.releaseRepo(task);
+      throw error;
+    }
   }
   artifacts(id: string, revision: number) { const task = this.load(id), rev = task.revisions[revision - 1];
     if (!rev || rev.revision !== revision || sha(json(rev.files)) !== rev.manifest_sha256) fail("MANIFEST_MISMATCH");
