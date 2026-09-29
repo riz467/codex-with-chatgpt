@@ -417,11 +417,36 @@ function insufficientResearchEvidence(message: string): boolean {
   const cannotPropose = /(?:置換箇所|編集案|変更案).{0,35}(?:特定でき|提示でき|作成でき|示せ|不明)|(?:unable|could not|cannot)\s+(?:to\s+)?(?:propose|identify)\s+(?:an?\s+)?(?:edit|replacement)/i;
   return readFailure.test(message) || cannotPropose.test(message);
 }
+// Older ledgers omit gate_decision altogether. A present but incomplete gate is
+// not permission: the engine's v1 bounded allow requires the matching scope and
+// BOUNDED_EDIT reason (see orchestrate-v03 Check-Ledger).
+function gateDisposition(status: Record<string, unknown> | null): "legacy" | "allow" | "refuse" | "unverified" {
+  if (!status || !Object.hasOwn(status, "gate_decision")) return "legacy";
+  const gate = status.gate_decision;
+  if (!gate || typeof gate !== "object" || Array.isArray(gate)) return "unverified";
+  const decision = gate as Record<string, unknown>;
+  if (decision.version !== 1) return "unverified";
+  if (decision.decision !== "ALLOW_BOUNDED_EDIT") return typeof decision.decision === "string" &&
+    ["STOP_SCOPE", "STOP_UNRESOLVED_INTENT", "STOP_OPERATION", "STOP_INVALID_PROPOSAL"].includes(decision.decision)
+    ? "refuse" : "unverified";
+  const scope = decision.scope, paths = status.edit_paths;
+  return decision.reason_code === "BOUNDED_EDIT" && typeof decision.reason === "string" && !!decision.reason &&
+    Array.isArray(scope) && Array.isArray(paths) && scope.length === paths.length &&
+    scope.every((entry, index) => typeof entry === "string" && entry === paths[index]) &&
+    Array.isArray(decision.allowed_operations) && Array.isArray(decision.operations) &&
+    Array.isArray(decision.unresolved_intent) && Array.isArray(decision.evidence) &&
+    decision.evidence.length > 0 ? "allow" : "unverified";
+}
 function classifyStop(status: Record<string, unknown> | null, result: string | null, active: boolean,
   proposal: Record<string, unknown> | null = null) {
   if (status?.state === "READY_FOR_REVIEW") return stopReason("READY_FOR_REVIEW", short(status.message)?.trim() || "Verified task is ready for independent review.");
   if (status?.state === "BLOCKED") {
     const message = short(status.message)?.trim() || "Execution stopped; inspect task evidence.";
+    // A policy refusal is not a transient worker failure and cannot be retried under the same permission.
+    if (["refuse", "unverified"].includes(gateDisposition(status))) return {
+      ...stopReason("EXECUTION_BLOCKED", message),
+      recommended_next_action: "Inspect the policy gate; a newly authorized contract is required, not an automatic retry.",
+    };
     // A VerifyInternal failure is the only failure that ai-resume can consider.
     const verify = /^VerifyInternal failed:/i.test(message) && Number.isInteger(status.verify_exit_code) &&
       Array.isArray(status.state_transition_history) && status.state_transition_history.some((row: unknown) =>
@@ -470,6 +495,11 @@ function retryPlan(id: string, root: string) {
     state: status?.state ?? null, stop_reason_category: category, eligible: false, reason,
     inherited_goal: null, inherited_edit_paths: null, ...lineage(job) });
   if (active || job.exit_code === undefined) return fail("The original job has not finished");
+  if (mode === "change") {
+    const gate = gateDisposition(status);
+    if (gate === "refuse") return fail("Policy refusal requires a newly authorized contract, not an automatic retry");
+    if (gate === "unverified") return fail("Unverified policy gate requires a newly authorized contract, not an automatic retry");
+  }
   if (category === "VERIFY_BLOCKED") return fail("Use the engine's RetryVerify preflight (ai-resume); do not create a new task");
   if (category === "HUMAN_APPROVAL_REQUIRED") return fail("Human approval is required; retry cannot bypass the gate");
   if (category === "READY_FOR_REVIEW" || category === null) return fail("Task is not eligible for a new-task retry");

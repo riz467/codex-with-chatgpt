@@ -441,4 +441,62 @@ describe("bounded actions", () => {
       expect(vi.mocked(spawn)).not.toHaveBeenCalled();
     } finally { exists.mockRestore(); read.mockRestore(); }
   });
+  it("never retries a policy refusal or an unverified gate, while preserving allowed and historical retries", () => {
+    const root = temp(), id = "retry-policy", task = "rpc-retry-policy", goal = "Edit README.md";
+    const dir = path.join(root, "rpc-jobs", id);
+    fs.mkdirSync(dir, { recursive: true });
+    const parent = JSON.stringify({ job_id: id, task_id: task, mode: "change", repo_key: "ai-orchestration-config",
+      process_id: process.pid, exit_code: 2, goal_sha256: sha(Buffer.from(goal)), goal, edit_paths: ["README.md"] });
+    const jobFile = path.join(dir, "job.json");
+    fs.writeFileSync(jobFile, parent);
+    const statusFile = path.join("C:\\work\\ai-orchestration-config", ".ai", "tasks", task, "status.json");
+    const status: Record<string, unknown> = { task_id: task, state: "BLOCKED", goal,
+      message: "VerifyInternal failed: check", verify_exit_code: 1,
+      state_transition_history: [{ from: "VERIFYING", to: "BLOCKED" }],
+      edit_paths: ["README.md"], allowed_paths: ["README.md", `.ai/tasks/${task}/**`], edits: [],
+      gate_decision: { version: 1, decision: "STOP_OPERATION" } };
+    const originalExists = fs.existsSync.bind(fs), originalRead = fs.readFileSync.bind(fs);
+    const exists = vi.spyOn(fs, "existsSync").mockImplementation((file) => String(file) === statusFile || originalExists(file));
+    const read = vi.spyOn(fs, "readFileSync").mockImplementation(((file: string, encoding?: string) =>
+      String(file) === statusFile ? JSON.stringify(status) : originalRead(file, encoding as BufferEncoding)) as typeof fs.readFileSync);
+    const write = vi.spyOn(fs, "writeFileSync");
+    try {
+      expect(getOrchestrationStatus(id, root)).toMatchObject({ state: "BLOCKED", stop_reason_category: "EXECUTION_BLOCKED" });
+      expect(getOrchestrationResult(id, root)).toMatchObject({ state: "BLOCKED", stop_reason_category: "EXECUTION_BLOCKED" });
+      expect(getOrchestrationResult(id, root).recommended_next_action).toMatch(/newly authorized contract/i);
+      const refusal = getOrchestrationRetryPlan(id, root);
+      expect(refusal).toMatchObject({ eligible: false, stop_reason_category: "EXECUTION_BLOCKED",
+        inherited_goal: null, inherited_edit_paths: null });
+      expect(refusal.reason).toMatch(/Policy refusal.*newly authorized contract.*not an automatic retry/i);
+      expect(() => retryOrchestration(id, "Caller requested another attempt", root)).toThrow(/Policy refusal/);
+      expect(() => retryOrchestration(task, undefined, root)).toThrow(/Policy refusal/);
+
+      status.message = "Runtime unavailable";
+      const allowedGate = { version: 1, decision: "ALLOW_BOUNDED_EDIT", reason_code: "BOUNDED_EDIT",
+        reason: "Bounded tracked text edit", scope: ["README.md"], allowed_operations: ["text_change"],
+        operations: [], unresolved_intent: [], evidence: ["goal:bounded-edit-intent"] };
+      for (const gate of [null, { version: 2, decision: "ALLOW_BOUNDED_EDIT" },
+        { version: 1, decision: "ALLOW_BOUNDED_EDIT" }, { version: 1 },
+        { ...allowedGate, reason_code: "UNKNOWN" }, { ...allowedGate, scope: ["OTHER.md"] }]) {
+        status.gate_decision = gate;
+        expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: false, stop_reason_category: "EXECUTION_BLOCKED" });
+        expect(getOrchestrationRetryPlan(id, root).reason).toMatch(/Unverified policy gate.*newly authorized contract/i);
+        expect(() => retryOrchestration(id, "Try anyway", root)).toThrow(/Unverified policy gate/);
+      }
+
+      status.gate_decision = allowedGate;
+      expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: true, stop_reason_category: "EXECUTION_BLOCKED",
+        inherited_goal: goal, inherited_edit_paths: ["README.md"] });
+      status.message = "VerifyInternal failed: check";
+      expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: false, stop_reason_category: "VERIFY_BLOCKED" });
+      status.message = "Runtime unavailable";
+      delete status.gate_decision;
+      expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: true, stop_reason_category: "EXECUTION_BLOCKED",
+        inherited_goal: goal, inherited_edit_paths: ["README.md"] });
+      expect(fs.readFileSync(jobFile, "utf8")).toBe(parent);
+      expect(fs.readdirSync(path.join(root, "rpc-jobs"))).toEqual([id]);
+      expect(write).not.toHaveBeenCalled();
+      expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+    } finally { write.mockRestore(); exists.mockRestore(); read.mockRestore(); }
+  });
 });
