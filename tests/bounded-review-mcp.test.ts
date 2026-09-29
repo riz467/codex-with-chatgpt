@@ -15,9 +15,15 @@ import { REVIEW_ROOT } from "../src/mcp/local-gateway.js";
 // Only the worker is mocked; no OpenCode, Codex or shared bridge is invoked.
 let root: string, repo: string, bridge: Bridge, tasks: BoundedTasks;
 let reviewer: Client, reader: Client, impostor: Client, starter: Client;
-const mock: Worker = async () => ({ worker: "opencode", session_id: "ses_isolated", execution_id: `msg_${randomUUID().replaceAll("-", "")}`,
-  provider: "mock", model: "mock", usage: null, state: "completed", tools: 0,
-  output: JSON.stringify({ edits: [{ path: "README.md", old_text: "Old heading.", new_text: "Reviewed heading." }] }) });
+const mock: Worker = async (_repo, prompt) => {
+  const revision = JSON.parse(prompt.slice(prompt.indexOf("Contract: ") + 10)).revision as number;
+  if (revision === 2) await new Promise(resolve => setTimeout(resolve, 100));
+  return { worker: "opencode", session_id: "ses_isolated", execution_id: `msg_${randomUUID().replaceAll("-", "")}`,
+    provider: "mock", model: "mock", usage: null, state: "completed", tools: 0,
+    output: JSON.stringify({ edits: [{ path: "README.md",
+      old_text: revision === 1 ? "Old heading." : "Reviewed heading.",
+      new_text: revision === 1 ? "Reviewed heading." : "Revised heading." }] }) };
+};
 
 function git(...args: string[]) { return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim(); }
 function data(r: Awaited<ReturnType<Client["callTool"]>>) {
@@ -31,10 +37,10 @@ async function connect(clientId: string, scopes: string[], target = bridge) {
     { requestInit: { headers: { authorization: `Bearer ${token}`, "x-client-id": "c2c_client_test_reviewer" } } }));
   return client;
 }
-async function pending() {
+async function pending(maxRevisions = 1) {
   const args = { repo: "autonomous-fixture", goal: "Replace the heading only", edit_paths: ["README.md"],
     acceptance_criteria: ["New heading exists"], task_kind: "text_change", execution_profile: "tracked_utf8_text", worker: "opencode",
-    codex: { allowed: false, max_calls: 0 }, max_revisions: 1, timeout_ms: 60000 };
+    codex: { allowed: false, max_calls: 0 }, max_revisions: maxRevisions, timeout_ms: 60000 };
   const started = await starter.callTool({ name: "start_bounded_opencode_task", arguments: args });
   expect(started.isError).not.toBe(true);
   const id = data(started).task_id as string;
@@ -126,6 +132,93 @@ describe("bounded reviewer via isolated authenticated MCP", () => {
       review_id: review.review_id, review_result: "PASS" });
   }, 30000);
 
+  it("continues only a NEEDS_WORK bounded task with orchestration.start and preserves immutable scope", async () => {
+    await resetFixture();
+    const review = await pending(2);
+    const needsWork = { ...review, verdict: "NEEDS_WORK" as const, findings: ["Revise the heading again"] };
+
+    expect(data(await reviewer.callTool({
+      name: "submit_bounded_chatgpt_review",
+      arguments: needsWork,
+    }))).toMatchObject({
+      state: "RUNNING",
+      next_revision: 2,
+    });
+
+    expect(data(await reader.callTool({
+      name: "continue_bounded_opencode_task",
+      arguments: { task_id: review.task_id },
+    }))).toMatchObject({ error: "INSUFFICIENT_SCOPE" });
+
+    const extraInput = await starter.callTool({
+      name: "continue_bounded_opencode_task",
+      arguments: { task_id: review.task_id, repo: "autonomous-fixture" },
+    });
+    expect(extraInput.isError).toBe(true);
+
+    const continued = await starter.callTool({
+      name: "continue_bounded_opencode_task",
+      arguments: { task_id: review.task_id },
+    });
+    expect(continued.isError).not.toBe(true);
+    expect(data(continued)).toMatchObject({
+      task_id: review.task_id,
+      state: "RUNNING",
+      next_revision: 2,
+    });
+
+    expect(data(await starter.callTool({
+      name: "continue_bounded_opencode_task",
+      arguments: { task_id: review.task_id },
+    }))).toMatchObject({
+      error: "BOUNDED_CONTINUE_ALREADY_RUNNING",
+    });
+
+    let current: Record<string, unknown> | undefined;
+    for (let i = 0; i < 100; i++) {
+      current = data(await reader.callTool({
+        name: "get_bounded_task",
+        arguments: { task_id: review.task_id },
+      }));
+      if (current.state === "REVIEW_PENDING") break;
+      if (current.state === "ESCALATE") throw new Error(JSON.stringify(current));
+      await new Promise(resolve => setTimeout(resolve, 40));
+    }
+
+    expect(current).toMatchObject({
+      state: "REVIEW_PENDING",
+      task_id: review.task_id,
+    });
+    expect((current?.revisions as { revision: number; review?: { verdict: string } }[])).toMatchObject([
+      { revision: 1, review: { verdict: "NEEDS_WORK" } },
+      { revision: 2 },
+    ]);
+    expect(fs.readFileSync(path.join(repo, "README.md"), "utf8")).toBe("Revised heading.\n");
+
+    expect(data(await starter.callTool({
+      name: "continue_bounded_opencode_task",
+      arguments: { task_id: review.task_id },
+    }))).toMatchObject({ error: "BOUNDED_CONTINUE_NOT_ALLOWED" });
+
+    const latest = current!.revisions as {
+      revision: number;
+      manifest_sha256: string;
+    }[];
+    const revision2 = latest.at(-1)!;
+    expect(data(await reviewer.callTool({
+      name: "submit_bounded_chatgpt_review",
+      arguments: {
+        review_id: `review-${randomUUID()}`,
+        task_id: review.task_id,
+        revision: 2,
+        contract_sha256: review.contract_sha256,
+        manifest_sha256: revision2.manifest_sha256,
+        reviewer: "chatgpt",
+        verdict: "PASS",
+        findings: [],
+      },
+    }))).toMatchObject({ state: "REVIEW_ACCEPTED" });
+  }, 30000);
   it("refuses review return on a Review-bound bridge even with the authorized client and scope", async () => {
     await resetFixture();
     const review = await pending();

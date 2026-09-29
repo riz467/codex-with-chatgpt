@@ -83,6 +83,7 @@ describe("MCP tools over Streamable HTTP", () => {
       "complete_autonomous_orchestration",
       "complete_integrated_orchestration",
       "complete_orchestration",
+      "continue_bounded_opencode_task",
       "execution_output",
       "execution_summary",
       "get_bounded_task",

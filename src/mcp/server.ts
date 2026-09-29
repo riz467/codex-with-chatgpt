@@ -233,6 +233,31 @@ export function createMcpServer(ctx: McpContext): McpServer {
     try { const started = tasks.start(args); void tasks.execute(started.task_id).catch(() => { /* persisted ESCALATE */ });
       return okStructured(started); } catch (error) { return mapError(error); }
   });
+  server.registerTool("continue_bounded_opencode_task", {
+    title: "Continue bounded OpenCode task",
+    description: "Continue only an existing bounded task returned to RUNNING by a NEEDS_WORK ChatGPT review. Reuses the immutable contract and scope; accepts no repo, path, goal, profile or command input.",
+    inputSchema: z.object({ task_id: boundedId }).strict(),
+    annotations: { readOnlyHint: false, openWorldHint: false },
+  }, async (args, extra) => {
+    const denied = requireScope(extra.authInfo, "orchestration.start"); if (denied) return denied;
+    try {
+      if (tasks.executing(args.task_id)) {
+        return fail("BOUNDED_CONTINUE_ALREADY_RUNNING", "This bounded task continuation is already running");
+      }
+      const current = tasks.status(args.task_id);
+      const latest = current.revisions.at(-1);
+      if (current.state !== "RUNNING" || !latest || latest.review?.verdict !== "NEEDS_WORK") {
+        return fail("BOUNDED_CONTINUE_NOT_ALLOWED", "Only a bounded task returned to RUNNING by NEEDS_WORK may continue");
+      }
+      void tasks.execute(args.task_id)
+        .catch(() => { /* persisted ESCALATE */ });
+      return okStructured({
+        task_id: args.task_id,
+        state: "RUNNING",
+        next_revision: latest.revision + 1,
+      });
+    } catch (error) { return mapError(error); }
+  });
   server.registerTool("get_bounded_task", {
     title: "Get bounded task state", description: "Read durable contract, revisions and review state.",
     inputSchema: { task_id: boundedId }, annotations: { readOnlyHint: true },

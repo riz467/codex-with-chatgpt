@@ -312,6 +312,7 @@ export class BoundedTasks {
     }
   }
   status(id: string) { return this.load(id); }
+  executing(id: string) { return fs.existsSync(safePath(this.dir(id), "execution.lock")); }
   async execute(id: string) {
     const lock = safePath(this.dir(id), "execution.lock");
     try { fs.mkdirSync(lock); } catch { fail("EXECUTION_ALREADY_RUNNING"); }
