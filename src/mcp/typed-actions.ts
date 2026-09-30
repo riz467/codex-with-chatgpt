@@ -68,6 +68,29 @@ const target = <T extends string>(kind: T) => z.object({ kind: z.literal(kind), 
 const packageExpected = z.object({ generation, inventorySha256: sha256, backup }).strict();
 const packageDesired = z.object({ approvedManifestSha256: sha256 }).strict();
 
+/** Canonical local-state digests, shared by preflight and final observations.
+ * Encode exact paths and identities unambiguously in deterministic path order;
+ * never hash diff display text, locale-dependent output or rename inference.
+ * stagedDelta: only HEAD/index differences, binding path and each side's mode
+ * and blob/object identity (including object algorithm), or explicit absence.
+ * Covers add/delete/modify/mode/type changes; renames may be delete + add.
+ * This is NOT the whole index or HEAD identity: clean paths are excluded.
+ * unstagedDelta: only index/working-tree differences, binding path, index-side
+ * mode/object identity or absence, and working-tree content/type/mode identity
+ * or absence. untrackedState binds path, file type and content identity.
+ * localChangePaths binds the deduplicated union of staged/unstaged/untracked
+ * paths. A future adapter must BLOCK unmerged index stages and remote-only
+ * changed paths overlapping this union before mutation (fail closed).
+ * Disjoint remote changes may advance HEAD and clean index entries while all
+ * four local-state digests remain equal. Computing observations is adapter work.
+ */
+const gitLocalState = {
+  stagedDeltaSha256: sha256,
+  unstagedDeltaSha256: sha256,
+  untrackedStateSha256: sha256,
+  localChangePathsSha256: sha256,
+};
+
 /** IDs resolve only through a future trusted inventory; they are not paths or selectors.
  * Manifests/policies are content-addressed, independently approved inventory records.
  * A digest alone never authorizes executing a manifest or accessing a resource.
@@ -75,21 +98,18 @@ const packageDesired = z.object({ approvedManifestSha256: sha256 }).strict();
 export const actionRequestSchema = z.discriminatedUnion("kind", [
   z.object({
     ...common, ...elevated, kind: z.literal("GitIntegrateMain"), target: target("repository"),
-    // HEAD is local main, remoteHead is origin/main. Index digest covers staged
-    // entries/modes/content; dirty/untracked digests cover sets AND content/modes,
-    // not merely filenames. Inventory fixes the repository and origin identity.
-    expected: z.object({ generation, head: commit, remoteHead: commit,
-      indexStateSha256: sha256, dirtyPathsSha256: sha256,
-      dirtyWorkingTreeSha256: sha256, untrackedStateSha256: sha256 }).strict(),
+    // HEAD is local main, remoteHead is origin/main. Inventory fixes repository
+    // and origin identity; both observations use the local-state contract above.
+    expected: z.object({ generation, head: commit, remoteHead: commit, ...gitLocalState }).strict(),
     desired: z.object({
       branch: z.literal("main"), remote: z.literal("origin"),
       operation: z.literal("merge-origin-main-no-edit-and-push"),
       fetch: z.literal("no-tags"), remoteHeadCheck: z.literal("match-expected-after-fetch"),
       divergenceCheck: z.literal("recheck-before-merge"),
-      overlapCheck: z.literal("remote-only-paths-disjoint-from-dirty-and-untracked"),
+      overlapCheck: z.literal("remote-only-paths-disjoint-from-local-change-paths"),
       onConflict: z.literal("merge-abort-and-block"),
       parentCheck: z.literal("verify-against-premerge-heads"),
-      localState: z.literal("preserve-index-dirty-and-untracked-changes"),
+      localState: z.literal("preserve-staged-unstaged-and-untracked-deltas"),
       finalRelation: z.literal("origin-main-equals-head"),
       finalVerification: z.literal("fetch-and-check-zero-ahead-zero-behind-and-local-state"),
     }).strict(),
@@ -270,11 +290,7 @@ const gitResult = z.object({
   integration: z.enum(["merge", "fast-forward", "unchanged"]),
   finalHead: commit, originMainHead: commit,
   mergeCommit: commit.nullable(), mergeParents: z.array(commit).max(2),
-  dirtyPathsSha256: sha256, dirtyWorkingTreeSha256: sha256, untrackedStateSha256: sha256,
-  // Final observed index digest uses the same definition as expected.indexStateSha256.
-  // The boolean alone is not evidence of preservation; success requires hash equality.
-  indexStateSha256: sha256,
-  indexChangesPreserved: z.literal(true),
+  ...gitLocalState,
   ahead: generation, behind: generation,
 }).strict();
 export const actionReceiptSchema = z.object({
@@ -315,10 +331,8 @@ export function bindActionReceipt(input: unknown, requestInput: unknown, attempt
     const result = receipt.gitResult;
     if (!result || result.ahead !== 0 || result.behind !== 0
       || canonical(result.finalHead) !== canonical(result.originMainHead)
-      || result.indexStateSha256 !== request.expected.indexStateSha256
-      || result.dirtyPathsSha256 !== request.expected.dirtyPathsSha256
-      || result.dirtyWorkingTreeSha256 !== request.expected.dirtyWorkingTreeSha256
-      || result.untrackedStateSha256 !== request.expected.untrackedStateSha256) throw new Error("Git postcondition mismatch");
+      || (Object.keys(gitLocalState) as (keyof typeof gitLocalState)[])
+        .some((key) => result[key] !== request.expected[key])) throw new Error("Git postcondition mismatch");
     if (result.integration === "merge") {
       if (canonical(result.mergeCommit) !== canonical(result.finalHead)
         || canonical(result.mergeParents) !== canonical([request.expected.head, request.expected.remoteHead])

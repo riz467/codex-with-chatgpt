@@ -33,12 +33,12 @@ function request(kind: core.ActionKind = "RestartService"): any {
   };
   const variants = {
     GitIntegrateMain: { target: { kind: "repository", id: uuid },
-      expected: { generation: 1, head: commit, remoteHead: commit, indexStateSha256: hash,
-        dirtyPathsSha256: hash, dirtyWorkingTreeSha256: hash, untrackedStateSha256: hash },
+      expected: { generation: 1, head: commit, remoteHead: commit, stagedDeltaSha256: hash,
+        localChangePathsSha256: hash, unstagedDeltaSha256: hash, untrackedStateSha256: hash },
       desired: { branch: "main", remote: "origin", operation: "merge-origin-main-no-edit-and-push",
         fetch: "no-tags", remoteHeadCheck: "match-expected-after-fetch", divergenceCheck: "recheck-before-merge",
-        overlapCheck: "remote-only-paths-disjoint-from-dirty-and-untracked", onConflict: "merge-abort-and-block",
-        parentCheck: "verify-against-premerge-heads", localState: "preserve-index-dirty-and-untracked-changes",
+        overlapCheck: "remote-only-paths-disjoint-from-local-change-paths", onConflict: "merge-abort-and-block",
+        parentCheck: "verify-against-premerge-heads", localState: "preserve-staged-unstaged-and-untracked-deltas",
         finalRelation: "origin-main-equals-head", finalVerification: "fetch-and-check-zero-ahead-zero-behind-and-local-state" } },
     AptUpgradeNode: { target: { kind: "node", id: uuid }, expected: { generation: 1, inventorySha256: hash, backup },
       desired: { approvedManifestSha256: hash }, reboot: "separate-approved-action-if-needed" },
@@ -382,8 +382,8 @@ describe("fixed main integration contract", () => {
     expect(input.desired).toEqual({
       branch: "main", remote: "origin", operation: "merge-origin-main-no-edit-and-push",
       fetch: "no-tags", remoteHeadCheck: "match-expected-after-fetch", divergenceCheck: "recheck-before-merge",
-      overlapCheck: "remote-only-paths-disjoint-from-dirty-and-untracked", onConflict: "merge-abort-and-block",
-      parentCheck: "verify-against-premerge-heads", localState: "preserve-index-dirty-and-untracked-changes",
+      overlapCheck: "remote-only-paths-disjoint-from-local-change-paths", onConflict: "merge-abort-and-block",
+      parentCheck: "verify-against-premerge-heads", localState: "preserve-staged-unstaged-and-untracked-deltas",
       finalRelation: "origin-main-equals-head", finalVerification: "fetch-and-check-zero-ahead-zero-behind-and-local-state",
     });
     for (const field of Object.keys(input.desired)) {
@@ -414,8 +414,8 @@ describe("fixed main integration contract", () => {
     const generated = { algorithm: "sha1", digest: "c".repeat(40) };
     result.gitResult = { integration: "merge", finalHead: generated, originMainHead: generated,
       mergeCommit: generated, mergeParents: [input.expected.head, input.expected.remoteHead],
-      dirtyPathsSha256: hash, dirtyWorkingTreeSha256: hash, untrackedStateSha256: hash,
-      indexStateSha256: hash, indexChangesPreserved: true, ahead: 0, behind: 0 };
+       localChangePathsSha256: hash, unstagedDeltaSha256: hash, untrackedStateSha256: hash,
+       stagedDeltaSha256: hash, ahead: 0, behind: 0 };
     return { input, result };
   }
 
@@ -433,8 +433,8 @@ describe("fixed main integration contract", () => {
       (g: any) => { g.mergeParents = []; },
       (g: any) => { g.originMainHead = input.expected.remoteHead; },
       (g: any) => { g.ahead = 1; }, (g: any) => { g.behind = 1; },
-      (g: any) => { g.dirtyPathsSha256 = otherHash; },
-      (g: any) => { g.dirtyWorkingTreeSha256 = otherHash; },
+      (g: any) => { g.localChangePathsSha256 = otherHash; },
+      (g: any) => { g.unstagedDeltaSha256 = otherHash; },
       (g: any) => { g.untrackedStateSha256 = otherHash; },
       (g: any) => { g.indexChangesPreserved = false; },
       (g: any) => { g.strategy = "ours"; },
@@ -459,34 +459,36 @@ describe("fixed main integration contract", () => {
     expect(() => bindReceipt(result, input)).toThrow();
   });
 
-  it.each(["merge", "fast-forward", "unchanged"])("requires the bound final index hash for successful %s", (integration) => {
+  const localDigestKeys = ["stagedDeltaSha256", "unstagedDeltaSha256", "untrackedStateSha256", "localChangePathsSha256"] as const;
+
+  describe.each(["merge", "fast-forward", "unchanged"])("successful %s local state", (integration) => {
+  it.each(localDigestKeys)("requires the bound final %s", (key) => {
     const { input, result } = gitReceipt();
     if (integration !== "merge") {
       const head = integration === "fast-forward" ? input.expected.remoteHead : input.expected.head;
       Object.assign(result.gitResult, { integration, finalHead: head, originMainHead: head, mergeCommit: null, mergeParents: [] });
     }
     const bound = bindReceipt(result, input);
-    expect(bound.receipt.gitResult?.indexStateSha256).toBe(input.expected.indexStateSha256);
-    expect(bound.receipt.gitResult?.indexChangesPreserved).toBe(true);
+    expect(bound.receipt.gitResult?.[key]).toBe(input.expected[key]);
 
     for (const digest of [otherHash, "0".repeat(64), "f".repeat(64)]) {
       const changed = structuredClone(result);
-      changed.gitResult.indexStateSha256 = digest;
-      expect(changed.gitResult.indexChangesPreserved).toBe(true);
+      changed.gitResult[key] = digest;
       // Well-formed caller claims still cannot satisfy the bound expected state.
       expect(() => bindReceipt(changed, input)).toThrow("Git postcondition mismatch");
     }
     const missing = structuredClone(result);
-    delete missing.gitResult.indexStateSha256;
+    delete missing.gitResult[key];
     expect(() => bindReceipt(missing, input)).toThrow();
     for (const digest of [undefined, null, "arbitrary", "a".repeat(63), "A".repeat(64), 123]) {
       const malformed = structuredClone(result);
-      malformed.gitResult.indexStateSha256 = digest;
+      malformed.gitResult[key] = digest;
       expect(() => bindReceipt(malformed, input)).toThrow();
     }
   });
+  });
 
-  it("binds the observed index result into the receipt hash independently of the request", () => {
+  it.each(localDigestKeys)("binds observed %s into the receipt hash independently of the request", (key) => {
     const { input, result } = gitReceipt();
     // Failed verification may record an observed mismatch for audit. Keeping
     // request/attempt and every other receipt field fixed isolates this field.
@@ -494,13 +496,84 @@ describe("fixed main integration contract", () => {
     result.healthCheck.status = "failed";
     const bound = bindReceipt(result, input);
     const changed = structuredClone(result);
-    changed.gitResult.indexStateSha256 = otherHash;
+    changed.gitResult[key] = otherHash;
     const changedBound = bindReceipt(changed, input);
     expect(changedBound.receipt.requestHash).toBe(bound.receipt.requestHash);
     expect(changedBound.receipt.attemptHash).toBe(bound.receipt.attemptHash);
-    expect(changedBound.receipt.gitResult?.indexStateSha256).toBe(otherHash);
+    expect(changedBound.receipt.gitResult?.[key]).toBe(otherHash);
     expect(changedBound.receiptHash).not.toBe(bound.receiptHash);
     expect(bindReceipt(reverseKeys(changed), input).receiptHash).toBe(changedBound.receiptHash);
+  });
+
+  it.each(localDigestKeys)("binds expected %s into the request hash", (key) => {
+    const input = request("GitIntegrateMain");
+    const changed = structuredClone(input);
+    changed.expected[key] = otherHash;
+    expect(core.hashActionRequest(changed)).not.toBe(core.hashActionRequest(input));
+  });
+
+  it.each(["indexStateSha256", "dirtyWorkingTreeSha256", "dirtyPathsSha256", "indexChangesPreserved"])("rejects obsolete field %s", (key) => {
+    const { input, result } = gitReceipt();
+    expect(() => bindReceipt(result, input)).not.toThrow();
+    const changed = structuredClone(input);
+    changed.expected[key] = key === "indexChangesPreserved" ? true : hash;
+    expect(() => core.parseActionRequest(changed)).toThrow();
+    result.gitResult[key] = changed.expected[key];
+    expect(() => bindReceipt(result, input)).toThrow();
+    for (const field of localDigestKeys) delete result.gitResult[field];
+    expect(() => bindReceipt(result, input)).toThrow();
+  });
+
+  // Test-only semantic model, not an adapter or a production digest encoder.
+  // Sorted tuples bind exact paths and both sides, with null for absence.
+  type Entry = { mode: string; object: { algorithm: string; digest: string } };
+  type Tree = Record<string, Entry>;
+  const blob = (content: string, mode = "100644"): Entry => ({ mode,
+    object: { algorithm: "sha256", digest: createHash("sha256").update(content).digest("hex") } });
+  const fixtureHash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  function stagedDigest(head: Tree, index: Tree): string {
+    const paths = [...new Set([...Object.keys(head), ...Object.keys(index)])].sort();
+    return fixtureHash(paths.filter((path) => JSON.stringify(head[path]) !== JSON.stringify(index[path]))
+      .map((path) => [path, head[path] ?? null, index[path] ?? null]));
+  }
+  function withStagedDigest(expected: string, observed: string) {
+    const { input, result } = gitReceipt();
+    input.expected.stagedDeltaSha256 = expected;
+    const rebound = receipt(input);
+    rebound.gitResult = { ...result.gitResult, stagedDeltaSha256: observed };
+    return { input, result: rebound };
+  }
+
+  it.each(["modify", "add", "delete", "mode", "type"])("preserves staged %s while HEAD and clean index paths advance", (change) => {
+    const head: Tree = { A: blob("A1"), B: blob("B1") };
+    const index: Tree = { ...head, B: blob("B2") };
+    if (change === "add") delete head.B;
+    if (change === "delete") delete index.B;
+    if (change === "mode") index.B = blob("B1", "100755");
+    if (change === "type") index.B = blob("target", "120000");
+    const finalHead = { ...head, A: blob("A2") };
+    const finalIndex = { ...index, A: blob("A2") };
+    expect(fixtureHash(finalIndex)).not.toBe(fixtureHash(index));
+    expect(stagedDigest(head, index)).not.toBe(stagedDigest(head, head));
+    expect(stagedDigest(finalHead, finalIndex)).toBe(stagedDigest(head, index));
+    const { input, result } = withStagedDigest(stagedDigest(head, index), stagedDigest(finalHead, finalIndex));
+    expect(result.gitResult.finalHead).not.toEqual(input.expected.head);
+    expect(() => bindReceipt(result, input)).not.toThrow();
+  });
+
+  it.each(["blob", "path-add", "path-remove", "head-blob", "mode", "type"])("rejects staged delta change: %s", (change) => {
+    const head: Tree = { A: blob("A1"), B: blob("B1") };
+    const index: Tree = { ...head, B: blob("B2") };
+    const finalHead = { ...head, A: blob("A2") };
+    const finalIndex = { ...index, A: blob("A2") };
+    if (change === "blob") finalIndex.B = blob("B3");
+    if (change === "path-add") finalIndex.C = blob("C1");
+    if (change === "path-remove") finalIndex.B = head.B;
+    if (change === "head-blob") finalHead.B = blob("B0");
+    if (change === "mode") finalIndex.B = blob("B2", "100755");
+    if (change === "type") finalIndex.B = blob("B2", "120000");
+    const { input, result } = withStagedDigest(stagedDigest(head, index), stagedDigest(finalHead, finalIndex));
+    expect(() => bindReceipt(result, input)).toThrow("Git postcondition mismatch");
   });
 });
 
