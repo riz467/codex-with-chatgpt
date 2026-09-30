@@ -1,4 +1,4 @@
-import { stateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, reviewLabel, completionLabel, stopLabel, stopSummaryLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask } from './labels.js';
+import { stateLabel, taskStateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, reviewLabel, completionLabel, stopLabel, stopSummaryLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask } from './labels.js';
 
 const $ = id => document.getElementById(id);
 const cell = (tag, content) => { const e = document.createElement(tag); e.textContent = displayValue(content); return e; };
@@ -35,7 +35,7 @@ function renderTask(root, task, fields, empty) {
   if (!task) { root.append(cell('p', empty)); return; }
   for (const [key, label, format] of fields) {
     const raw = task[key];
-    pair(root, label, format ? format(raw, task) : raw, (key === 'task_id' || key === 'retry_of' || key === 'integrated_commit') && raw ? raw : undefined);
+    pair(root, label, key === 'state' ? taskStateLabel(raw, task.mode) : format ? format(raw, task) : raw, (key === 'task_id' || key === 'retry_of' || key === 'integrated_commit') && raw ? raw : undefined);
   }
   root.classList.add('task-grid');
   root.querySelectorAll('.pair').forEach((element, index) => {
@@ -67,7 +67,7 @@ function renderAutonomous(runs) {
     REVIEW_HANDOFF: '構造レビュー待ち', REVIEWING: 'レビュー中', STRUCTURAL_REVIEW: '構造レビュー中', SEMANTIC_REVIEW: '意味レビュー中',
     HUMAN_FINAL_APPROVAL: '人間承認待ち', ESCALATE: '停止 / 要確認', READY_FOR_REVIEW: 'レビュー待ち', DONE_CANDIDATE_NO_CHANGE: '変更不要' };
   for (const [label, value] of [['Run ID', run.run_id], ['Task ID', run.task_id], ['Repo', run.repo],
-    ['段階', run.done ? '完了' : labels[run.live_stage] ?? '未確認'], ['担当', run.actor], ['判断', run.decision],
+    ['\u6bb5\u968e', run.done ? '\u30ed\u30fc\u30ab\u30eb\u5b8c\u4e86\uff08Finalizer\u672a\u78ba\u8a8d\uff09' : labels[run.live_stage] ?? '\u672a\u78ba\u8a8d'], ['\u62c5\u5f53', run.actor], ['\u5224\u65ad', run.decision],
     ['構造レビュー', run.review_phase?.structural], ['意味レビュー', run.review_phase?.semantic],
     ['人間の操作', run.human_action_required ? '承認が必要' : '不要 / 未確認'], ['最終結果', run.final_result],
     ['OpenCode input / output / reasoning', [run.usage?.opencode?.input, run.usage?.opencode?.output, run.usage?.opencode?.reasoning].map(displayValue).join(' / ')],
@@ -80,7 +80,7 @@ function renderAutonomous(runs) {
   for (const event of run.events ?? []) events.append(cell('p', `${event.timestamp} · ${event.event_type}`));
   root.append(events);
 }
-const boardBuckets = ['処理中', 'レビュー待ち', '完了', '要確認'];
+const boardBuckets = ['\u51e6\u7406\u4e2d', '\u30ec\u30d3\u30e5\u30fc\u5f85\u3061', '\u30ed\u30fc\u30ab\u30eb\u5b8c\u4e86\uff08Finalizer\u672a\u78ba\u8a8d\uff09', '\u8981\u78ba\u8a8d'];
 function boardBucket(state, bounded) {
   if (bounded) {
     if (state === 'RUNNING') return 0;
@@ -127,7 +127,7 @@ function renderTaskBoard(snapshot) {
         const button = document.createElement('button'); button.type = 'button';
         button.textContent = displayValue(shortId(task.task_id));
         button.addEventListener('click', () => { void showTaskDetails(task.task_id); });
-        item.append(button, document.createTextNode(' '), cell('span', task.repo), document.createTextNode(' · '), cell('span', stateLabel(task.state)));
+        item.append(button, document.createTextNode(' '), cell('span', task.repo), document.createTextNode(' · '), cell('span', taskStateLabel(task.state, task.mode)));
       }
       list.append(item);
     }
@@ -305,7 +305,7 @@ function renderRecentTasks(tasks) {
   for (const task of tasks || []) {
     const row = document.createElement('tr');
     const fields = [
-      [shortId(task.task_id), task.task_id], [task.repo], [stateLabel(task.state)], [modeLabel(task.mode)],
+      [shortId(task.task_id), task.task_id], [task.repo], [taskStateLabel(task.state, task.mode)], [modeLabel(task.mode)],
       [`${displayValue(task.created_at)} / ${displayValue(task.completed_at)}`], [task.attempt], [shortId(task.retry_of), task.retry_of],
       [reviewLabel(task.review_result)], [completionLabel(task.completion_mode)], [shortCommit(task.integrated_commit), task.integrated_commit]
     ];
@@ -323,7 +323,7 @@ function renderStatusBar(task) {
   const bar = $('status-bar');
   if (!task) { bar.textContent = '● 待機中 — 実行中のタスクはありません'; bar.className = 'status-bar idle'; return; }
   const knownActor = task.actor && !['UNKNOWN', 'unknown', 'IDLE'].includes(task.actor);
-  const heading = knownActor ? `${actorLabel(task.actor)} ${stateLabel(task.state)}` : 'タスク実行中';
+  const heading = knownActor ? `${actorLabel(task.actor)} ${taskStateLabel(task.state, task.mode)}` : 'タスク実行中';
   const elapsed = Number.isFinite(task.elapsed_seconds) && task.elapsed_seconds >= 0 ? ` — ${duration(task.elapsed_seconds)}` : '';
   bar.textContent = `● ${heading} — ${displayValue(task.repo)}${elapsed}`;
   bar.className = 'status-bar active';

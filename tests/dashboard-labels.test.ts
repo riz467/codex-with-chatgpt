@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { stateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask } from "../src/dashboard/public/labels.js";
+import { stateLabel, taskStateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask } from "../src/dashboard/public/labels.js";
 
 describe("dashboard display labels (API values remain unchanged)", () => {
   it("translates state, mode, actor, pipeline stage and status", () => {
@@ -12,6 +12,17 @@ describe("dashboard display labels (API values remain unchanged)", () => {
     expect(stageLabel("Scope")).toBe("対象確定");
     expect(pipelineLabel("not_started")).toBe("未開始");
     expect(healthLabel("healthy")).toBe("正常");
+  });
+  it("distinguishes worker completion from local completion without changing API state", () => {
+    const readOnly = { state: "DONE", mode: "read_only" };
+    const change = { state: "DONE", mode: "change" };
+    expect(taskStateLabel(readOnly.state, readOnly.mode)).toBe("\u8aad\u307f\u53d6\u308a\u5b8c\u4e86\uff08\u4f5c\u696d\u8005\uff09");
+    expect(taskStateLabel(change.state, change.mode)).toBe("\u30ed\u30fc\u30ab\u30eb\u5b8c\u4e86\uff08Finalizer\u672a\u78ba\u8a8d\uff09");
+    expect(taskStateLabel("DONE", "autonomous")).toBe("\u30ed\u30fc\u30ab\u30eb\u5b8c\u4e86\uff08Finalizer\u672a\u78ba\u8a8d\uff09");
+    expect(taskStateLabel("DONE", undefined)).toBe("\u30ed\u30fc\u30ab\u30eb\u5b8c\u4e86\uff08Finalizer\u672a\u78ba\u8a8d\uff09");
+    expect(taskStateLabel("READY_FOR_REVIEW", "change")).toBe(stateLabel("READY_FOR_REVIEW"));
+    expect(readOnly.state).toBe("DONE");
+    expect(change.state).toBe("DONE");
   });
   it("translates event types and only known safe summary templates", () => {
     expect(eventTypeLabel("state_transition")).toBe("状態変更");

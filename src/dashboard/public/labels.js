@@ -31,6 +31,9 @@ const actionSources = {
 const label = (group, value) => value === null || value === undefined || value === '' || value === 'unknown' || value === 'UNKNOWN'
   ? unknown : (Object.hasOwn(maps[group], value) ? maps[group][value] : String(value));
 export const stateLabel = value => label('state', value);
+export const taskStateLabel = (state, mode) => state === 'DONE'
+  ? mode === 'read_only' ? '\u8aad\u307f\u53d6\u308a\u5b8c\u4e86\uff08\u4f5c\u696d\u8005\uff09' : '\u30ed\u30fc\u30ab\u30eb\u5b8c\u4e86\uff08Finalizer\u672a\u78ba\u8a8d\uff09'
+  : stateLabel(state);
 export const modeLabel = value => label('mode', value);
 export const actorLabel = value => label('actor', value);
 export const stageLabel = value => label('stage', value);
