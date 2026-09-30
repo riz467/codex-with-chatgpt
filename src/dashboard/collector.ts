@@ -152,7 +152,9 @@ function boundedProjection(raw: Record<string, unknown> | null, taskId: string) 
   if (raw.state === "REVIEW_ACCEPTED" && review?.verdict !== "PASS") return null;
   if (raw.stop_reason !== undefined && raw.stop_reason !== null && !cleanString(raw.stop_reason, 500)) return null;
   return { task_id: taskId, state: raw.state as string, stop_reason_present: raw.stop_reason !== undefined && raw.stop_reason !== null,
-    contract_sha256: raw.contract_sha256 as string, edit_paths: contract.edit_paths as string[],
+    contract_sha256: raw.contract_sha256 as string,
+    goal: (contract.goal as string).replace(/[\u0080-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, "").trim().slice(0, 500),
+    edit_paths: contract.edit_paths as string[],
     latest_revision: latest?.revision as number | undefined ?? null, manifest_sha256: latest?.manifest_sha256 as string | undefined ?? null,
     verification_present: !!latest && Object.hasOwn(latest, "verify"), file_count: Array.isArray(latest?.files) ? latest.files.length : null,
     worker: "opencode", review_verdict: review?.verdict as string | undefined ?? null };

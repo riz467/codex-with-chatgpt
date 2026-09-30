@@ -116,7 +116,13 @@ function renderTaskBoard(snapshot) {
       const item = document.createElement('li');
       if (bounded) {
         const safe = normalizeBoundedTask(task);
-        item.append(cell('span', `${displayValue(safe.task_id)} · ${displayValue(safe.state)}`));
+        const label = `${displayValue(safe.task_id)} · ${displayValue(safe.state)}`;
+        if (task?.state === 'REVIEW_PENDING' || task?.state === 'REVIEW_ACCEPTED') {
+          const button = document.createElement('button'); button.type = 'button';
+          button.textContent = label;
+          button.addEventListener('click', () => showBoundedReviewSummary(task));
+          item.append(button);
+        } else item.append(cell('span', label));
       } else {
         const button = document.createElement('button'); button.type = 'button';
         button.textContent = displayValue(shortId(task.task_id));
@@ -127,6 +133,30 @@ function renderTaskBoard(snapshot) {
     }
     bucket.append(list); section.append(bucket);
   });
+}
+function showBoundedReviewSummary(task) {
+  let section = $('bounded-review-summary');
+  if (!section) {
+    section = document.createElement('section'); section.id = 'bounded-review-summary';
+    section.append(cell('h2', '\u5909\u66f4\u5185\u5bb9'));
+    $('task-board').insertAdjacentElement('afterend', section);
+  }
+  let fields = $('bounded-review-summary-fields');
+  if (!fields) {
+    fields = document.createElement('div'); fields.id = 'bounded-review-summary-fields';
+    fields.className = 'task-grid'; section.append(fields);
+  }
+  clear(fields);
+  const paths = Array.isArray(task.edit_paths) ? task.edit_paths.filter(path => typeof path === 'string').join(', ') : null;
+  for (const [label, value] of [
+    ['\u76ee\u7684', typeof task.goal === 'string' ? task.goal : null],
+    ['\u5909\u66f4\u30d1\u30b9', paths],
+    ['\u30ea\u30d3\u30b8\u30e7\u30f3', task.latest_revision],
+    ['\u691c\u8a3c\u72b6\u614b', task.verification_present === true ? '\u3042\u308a' : '\u306a\u3057'],
+    ['\u5909\u66f4\u30d5\u30a1\u30a4\u30eb\u6570', task.file_count],
+    ['\u4f5c\u696d\u8005', task.worker],
+    ['\u30ec\u30d3\u30e5\u30fc\u7d50\u679c', task.review_verdict]
+  ]) pair(fields, label, value);
 }
 const boundedFields = [
   ['task_id', 'Task ID'], ['state', '\u72b6\u614b'], ['stop_reason_present', '\u505c\u6b62\u7406\u7531'],
