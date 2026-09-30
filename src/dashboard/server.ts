@@ -27,6 +27,15 @@ export function createDashboard(collector = new Collector(), fixtureApprovalEnab
   app.get("/style.css", (_req, res) => res.sendFile(path.join(publicDir, "style.css")));
   app.get("/health.css", (_req, res) => res.sendFile(path.join(publicDir, "health.css")));
   app.get("/health", (_req, res) => res.json({ ok: true, service: "ai-workspace-dashboard" }));
+  // Static implementation capabilities, not inferred from fixtures, local state or requests.
+  app.get("/api/authority-status", (_req, res) => res.json({
+    local_review: "projection_only",
+    local_done: "projection_only",
+    independent_review_authority_connected: false,
+    signed_approver_integration_connected: false,
+    finalizer_connected: false,
+    authoritative_done_available: false
+  }));
   app.get("/api/status", async (_req, res) => res.json(await collector.snapshot()));
   app.get("/api/tasks", (_req, res) => res.json(collector.list()));
   const handle = (fn: (id: string) => unknown) => (req: express.Request, res: express.Response) => {

@@ -134,6 +134,32 @@ function renderTaskBoard(snapshot) {
     bucket.append(list); section.append(bucket);
   });
 }
+async function refreshAuthorityStatus() {
+  const section = document.createElement('section'); section.id = 'authority-status';
+  section.append(cell('h2', '\u6a29\u9650\u72b6\u614b'));
+  const details = document.createElement('div'); details.className = 'task-grid';
+  section.append(details);
+  $('status-bar').insertAdjacentElement('afterend', section);
+  const unavailable = '\u672a\u78ba\u8a8d';
+  try {
+    const response = await fetch('/api/authority-status', { method: 'GET', credentials: 'same-origin', cache: 'no-store' });
+    if (!response.ok) throw new Error('Authority status unavailable');
+    const status = await response.json();
+    for (const [label, key] of [
+      ['\u30ed\u30fc\u30ab\u30eb Review', 'local_review'],
+      ['\u30ed\u30fc\u30ab\u30eb DONE', 'local_done']
+    ]) pair(details, label, status?.[key] === 'projection_only' ? '\u6295\u5f71\u306e\u307f\uff08\u6a29\u5a01\u3042\u308b\u78ba\u5b9a\u3067\u306f\u306a\u3044\uff09' : unavailable);
+    for (const [label, key] of [
+      ['\u72ec\u7acb Review Authority', 'independent_review_authority_connected'],
+      ['\u7f72\u540d\u4ed8\u304d Approver \u9023\u643a', 'signed_approver_integration_connected'],
+      ['Finalizer', 'finalizer_connected'],
+      ['\u6a29\u5a01\u3042\u308b DONE', 'authoritative_done_available']
+    ]) pair(details, label, status?.[key] === false ? '\u672a\u63a5\u7d9a\uff0f\u5229\u7528\u4e0d\u53ef' : unavailable);
+  } catch {
+    clear(details);
+    details.append(cell('p', '\u6a29\u9650\u72b6\u614b\u3092\u53d6\u5f97\u3067\u304d\u307e\u305b\u3093\u3002\u6a29\u5a01\u3042\u308b\u5b8c\u4e86\u306f\u672a\u78ba\u8a8d\u3067\u3059\u3002'));
+  }
+}
 function showBoundedReviewSummary(task) {
   let section = $('bounded-review-summary');
   if (!section) {
@@ -344,6 +370,8 @@ function render(snapshot) {
   renderLiveEvents(snapshot.events);
   renderRecentTasks(snapshot.recent_tasks);
 }
+
+void refreshAuthorityStatus();
 
 // The snapshot is the only input to the view; a future event adapter can update sections independently.
 const stream = new EventSource('/events');

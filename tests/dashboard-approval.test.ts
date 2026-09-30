@@ -42,6 +42,32 @@ describe("local human final approval endpoint", () => {
     const source = fs.readFileSync(new URL("../src/dashboard/public/app.js", import.meta.url), "utf8");
     expect(source).toContain("function renderSource(task, current) {");
   });
+  it("exposes only static, fail-closed authority capabilities regardless of fixture approval or request input", async () => {
+    const expected = {
+      local_review: "projection_only", local_done: "projection_only",
+      independent_review_authority_connected: false, signed_approver_integration_connected: false,
+      finalizer_connected: false, authoritative_done_available: false
+    };
+    for (const fixtureApprovalEnabled of [false, true]) {
+      const server = createDashboard(undefined, fixtureApprovalEnabled).listen(0, "127.0.0.1");
+      try {
+        await new Promise<void>((resolve, reject) => { server.once("listening", resolve); server.once("error", reject); });
+        const address = server.address(); if (!address || typeof address === "string") throw new Error("no listener");
+        const base = `http://127.0.0.1:${address.port}/api/authority-status`;
+        for (const url of [base, `${base}?connected=true&fixture_approval_enabled=true`]) {
+          const response = await fetch(url);
+          expect(response.status).toBe(200);
+          expect(response.headers.get("cache-control")).toBe("no-store");
+          expect(response.headers.get("set-cookie")).toBeNull();
+          expect(await response.json()).toEqual(expected);
+        }
+        expect((await fetch(base, { method: "POST" })).status).toBe(405);
+      } finally { server.close(); }
+    }
+    const source = fs.readFileSync(new URL("../src/dashboard/public/app.js", import.meta.url), "utf8");
+    expect(source).toContain("fetch('/api/authority-status'");
+    expect(source).toContain("section.id = 'authority-status'");
+  });
   it("defaults to no approval endpoint even on localhost", async () => {
     const server = createDashboard().listen(0, "127.0.0.1");
     try {
