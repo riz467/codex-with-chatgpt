@@ -80,6 +80,54 @@ function renderAutonomous(runs) {
   for (const event of run.events ?? []) events.append(cell('p', `${event.timestamp} · ${event.event_type}`));
   root.append(events);
 }
+const boardBuckets = ['処理中', 'レビュー待ち', '完了', '要確認'];
+function boardBucket(state, bounded) {
+  if (bounded) {
+    if (state === 'RUNNING') return 0;
+    if (state === 'REVIEW_PENDING' || state === 'REVIEW_ACCEPTED') return 1;
+  } else {
+    if (['PLANNING', 'RESEARCHING', 'EXECUTING', 'VERIFYING'].includes(state)) return 0;
+    if (state === 'READY_FOR_REVIEW') return 1;
+    if (state === 'DONE') return 2;
+  }
+  return 3;
+}
+function renderTaskBoard(snapshot) {
+  let section = $('task-board');
+  if (!section) {
+    section = document.createElement('section'); section.id = 'task-board';
+    section.append(cell('h2', 'Task Board'));
+    $('status-bar').insertAdjacentElement('afterend', section);
+  }
+  section.querySelectorAll('.task-board-bucket').forEach(clear);
+  section.querySelectorAll('.task-board-bucket').forEach(element => element.remove());
+  const buckets = boardBuckets.map(() => []);
+  for (const task of Array.isArray(snapshot.recent_tasks) ? snapshot.recent_tasks : []) {
+    buckets[boardBucket(task?.state, false)].push({ task, bounded: false });
+  }
+  for (const task of Array.isArray(snapshot.bounded_tasks) ? snapshot.bounded_tasks : []) {
+    buckets[boardBucket(task?.state, true)].push({ task, bounded: true });
+  }
+  buckets.forEach((entries, index) => {
+    const bucket = document.createElement('div'); bucket.className = 'task-board-bucket';
+    bucket.append(cell('h3', `${boardBuckets[index]} (${entries.length})`));
+    const list = document.createElement('ul');
+    for (const { task, bounded } of entries.slice(0, 5)) {
+      const item = document.createElement('li');
+      if (bounded) {
+        const safe = normalizeBoundedTask(task);
+        item.append(cell('span', `${displayValue(safe.task_id)} · ${displayValue(safe.state)}`));
+      } else {
+        const button = document.createElement('button'); button.type = 'button';
+        button.textContent = displayValue(shortId(task.task_id));
+        button.addEventListener('click', () => { void showTaskDetails(task.task_id); });
+        item.append(button, document.createTextNode(' '), cell('span', task.repo), document.createTextNode(' · '), cell('span', stateLabel(task.state)));
+      }
+      list.append(item);
+    }
+    bucket.append(list); section.append(bucket);
+  });
+}
 const boundedFields = [
   ['task_id', 'Task ID'], ['state', '\u72b6\u614b'], ['stop_reason_present', '\u505c\u6b62\u7406\u7531'],
   ['contract_sha256', 'Contract SHA256'], ['edit_paths_count', '\u5909\u66f4\u5bfe\u8c61\u6570'],
@@ -93,11 +141,14 @@ function renderBoundedTasks(tasks) {
   if (!section) {
     section = document.createElement('section'); section.id = 'bounded-opencode';
     const heading = document.createElement('h2'); heading.textContent = 'Bounded OpenCode';
+    const details = document.createElement('details');
+    const summary = document.createElement('summary'); summary.id = 'bounded-opencode-summary';
     const list = document.createElement('div'); list.id = 'bounded-opencode-tasks';
-    section.append(heading, list);
+    details.append(summary, list); section.append(heading, details);
     (autonomous.closest('section') || autonomous).insertAdjacentElement('afterend', section);
   }
   const list = $('bounded-opencode-tasks'); clear(list);
+  $('bounded-opencode-summary').textContent = `Tasks (${Array.isArray(tasks) ? tasks.length : 0})`;
   if (!Array.isArray(tasks) || tasks.length === 0) {
     list.append(cell('p', '\u8868\u793a\u3067\u304d\u308b\u30bf\u30b9\u30af\u306f\u3042\u308a\u307e\u305b\u3093'));
     return;
@@ -230,6 +281,7 @@ function renderStatusBar(task) {
 function render(snapshot) {
   $('connection').textContent = `受信中 · ${new Date(snapshot.generated_at).toLocaleTimeString('ja-JP')}`;
   renderStatusBar(snapshot.current_task);
+  renderTaskBoard(snapshot);
   renderSystemHealth(snapshot.health);
   renderCurrentTask(snapshot.current_task);
   renderLatestTask(snapshot.latest_task);
