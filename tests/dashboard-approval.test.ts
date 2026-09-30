@@ -38,6 +38,10 @@ function approvalFixture() {
 }
 
 describe("local human final approval endpoint", () => {
+  it("keeps the Dashboard source renderer declaration", () => {
+    const source = fs.readFileSync(new URL("../src/dashboard/public/app.js", import.meta.url), "utf8");
+    expect(source).toContain("function renderSource(task, current) {");
+  });
   it("defaults to no approval endpoint even on localhost", async () => {
     const server = createDashboard().listen(0, "127.0.0.1");
     try {
@@ -49,6 +53,35 @@ describe("local human final approval endpoint", () => {
         body: JSON.stringify({ action: "FINAL_DONE_APPROVAL" }) })).status).toBe(403);
     } finally { server.close(); }
   });
+  it.skipIf(process.platform !== "win32" || !fs.existsSync(path.join(REVIEW_ROOT, "rpc-jobs", `auto-${fixtureId}`)))(
+    "previews validated metadata in production without enabling approval writes", async () => {
+      const fixture = approvalFixture();
+      const server = createDashboard(new Collector(REPOS, fixture.root)).listen(0, "127.0.0.1");
+      try {
+        await new Promise<void>((resolve, reject) => { server.once("listening", resolve); server.once("error", reject); });
+        const address = server.address(); if (!address || typeof address === "string") throw new Error("no listener");
+        const base = `http://127.0.0.1:${address.port}`;
+        const preview = await fetch(`${base}/api/approval/candidate`);
+        expect(preview.status).toBe(200);
+        expect(preview.headers.get("set-cookie")).toBeNull();
+        const data = await preview.json();
+        expect(data).toMatchObject({ task_id: fixture.taskId, run_id: fixture.runId,
+          authoritative_review_id: fixture.reviewId, fixture_approval_enabled: false });
+        for (const key of ["csrf", "approval_nonce", "session", "signing_evidence"]) expect(data).not.toHaveProperty(key);
+        expect((await fetch(`${base}/approval/current`)).status).toBe(403);
+        expect((await fetch(`${base}/approval/final`, { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "FINAL_DONE_APPROVAL", task_id: fixture.taskId, run_id: fixture.runId,
+            authoritative_review_id: fixture.reviewId }) })).status).toBe(403);
+        const binding = path.join(fixture.root, "CURRENT_REVIEW.json");
+        const original = fs.readFileSync(binding);
+        try {
+          fs.writeFileSync(binding, JSON.stringify({ ...JSON.parse(original.toString("utf8")), task_id: "rpc-stale" }));
+          const stale = await fetch(`${base}/api/approval/candidate`);
+          expect(stale.status).toBe(409);
+          expect(await stale.json()).toEqual({ error: "NO_CURRENT_ELIGIBLE_REVIEW" });
+        } finally { fs.writeFileSync(binding, original); }
+      } finally { server.close(); fs.rmSync(fixture.root, { recursive: true, force: true }); }
+    });
   it.skipIf(process.platform !== "win32" || !fs.existsSync(path.join(REVIEW_ROOT, "rpc-jobs", `auto-${fixtureId}`)))(
     "requires local browser session, exact current Review and a single manual action; never completes task", async () => {
       const fixture = approvalFixture();

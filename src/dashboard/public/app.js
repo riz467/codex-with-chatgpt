@@ -190,35 +190,55 @@ function renderBoundedTasks(tasks) {
     list.append(card);
   }
 }
-let approval = null, approvalCheckAt = 0, approving = false;
-async function refreshApproval() {
-  if (approving || Date.now() - approvalCheckAt < 5000) return;
-  approvalCheckAt = Date.now();
-  try {
-    const response = await fetch('/approval/current', { credentials: 'same-origin', cache: 'no-store' });
-    approval = response.ok ? await response.json() : null;
-  } catch { approval = null; }
-  const section = $('final-approval'); section.hidden = !approval;
+const approvalFields = ['task_id', 'run_id', 'authoritative_review_id', 'goal', 'review_evidence_hash', 'bundle_manifest_sha256', 'canonical_goal_hash'];
+let approval = null, approvalCheckAt = 0, approving = false, approvalResult = null;
+const approvalButton = $('approve-done');
+function renderApproval() {
+  const section = $('final-approval'); section.hidden = !approval && !approvalResult;
   const details = $('final-approval-details'); clear(details);
   if (approval) {
     for (const [label, value] of [['Goal', approval.goal], ['Task ID', approval.task_id], ['Run ID', approval.run_id],
       ['Review ID', approval.authoritative_review_id], ['Review evidence SHA256', approval.review_evidence_hash],
       ['Manifest SHA256', approval.bundle_manifest_sha256], ['Canonical goal SHA256', approval.canonical_goal_hash]]) pair(details, label, value);
   }
+  approvalButton.disabled = approving || !approval || approval.fixture_approval_enabled !== true;
+  $('final-approval-message').textContent = approvalResult ??
+    (!approval || approval.fixture_approval_enabled !== true
+      ? 'DONE approval is disabled: the independent Approver/Finalizer path is not connected.' : '');
 }
-$('approve-done').addEventListener('click', async event => {
-  if (!event.isTrusted || !approval || approving || !window.confirm('現在のgoal・Reviewを確認しましたか？ このtaskのDONEを明示的に承認します。')) return;
-  approving = true; $('approve-done').disabled = true;
-  const request = { action: 'FINAL_DONE_APPROVAL', task_id: approval.task_id, run_id: approval.run_id,
-    authoritative_review_id: approval.authoritative_review_id };
+async function refreshApproval() {
+  if (approving || Date.now() - approvalCheckAt < 5000) return;
+  approvalCheckAt = Date.now();
   try {
-    const response = await fetch('/approval/final', { method: 'POST', credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json', 'X-Final-Approval-CSRF': approval.csrf }, body: JSON.stringify(request) });
-    if (!response.ok) throw new Error('承認は拒否されました。現在のReviewを再確認してください。');
-    $('final-approval-message').textContent = '明示承認を記録しました。MCP Completeの実行・ledger DONE確認は別途必要です。';
-    approval = null; $('final-approval').hidden = true;
-  } catch (error) { $('final-approval-message').textContent = error.message; }
-  finally { approving = false; $('approve-done').disabled = false; approvalCheckAt = 0; }
+    const response = await fetch('/api/approval/candidate', { credentials: 'same-origin', cache: 'no-store' });
+    const candidate = response.ok ? await response.json() : null;
+    if (approving) return;
+    approval = candidate;
+  } catch { if (approving) return; approval = null; }
+  renderApproval();
+}
+approvalButton.addEventListener('click', async event => {
+  if (!event.isTrusted || !approval || approval.fixture_approval_enabled !== true || approving ||
+      !window.confirm('Confirm the current goal and Review and explicitly approve DONE for this task?')) return;
+  const preview = approval;
+  approving = true; approvalResult = null; renderApproval();
+  try {
+    const response = await fetch('/approval/current', { credentials: 'same-origin', cache: 'no-store' });
+    if (!response.ok) throw new Error('Current approval candidate is no longer available.');
+    const current = await response.json();
+    if (approvalFields.some(key => typeof preview[key] !== 'string' || preview[key] !== current[key]) ||
+        typeof current.csrf !== 'string') throw new Error('Approval candidate changed. Refresh and review it again.');
+    const request = { action: 'FINAL_DONE_APPROVAL', task_id: current.task_id, run_id: current.run_id,
+      authoritative_review_id: current.authoritative_review_id };
+    const posted = await fetch('/approval/final', { method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Final-Approval-CSRF': current.csrf }, body: JSON.stringify(request) });
+    if (!posted.ok) throw new Error('Approval rejected. Refresh and review the current candidate.');
+    approvalResult = 'Explicit approval recorded. Completion and DONE remain separate.';
+    approval = null;
+  } catch (error) {
+    approval = null;
+    approvalResult = error instanceof Error ? error.message : 'Approval failed. Refresh and review the current candidate.';
+  } finally { approving = false; approvalCheckAt = 0; renderApproval(); void refreshApproval(); }
 });
 function renderSource(task, current) {
   const source = task ? `（${current ? '実行中タスク' : '最新の履歴タスク'}: ${task.task_id}）` : '（証拠なし）';

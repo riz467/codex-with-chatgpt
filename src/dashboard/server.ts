@@ -35,6 +35,16 @@ export function createDashboard(collector = new Collector(), fixtureApprovalEnab
   };
   app.get("/api/tasks/:taskId", handle(id => collector.task(id)));
   app.get("/api/events/:taskId", handle(id => collector.events(id)));
+  // Read-only preview: explicitly select metadata, never expose a session or write capability.
+  app.get("/api/approval/candidate", (_req, res) => {
+    try {
+      const candidate = currentApprovalCandidate(collector.reviewRoot);
+      const { goal, task_id, run_id, authoritative_review_id, review_evidence_hash,
+        bundle_manifest_sha256, canonical_goal_hash } = candidate;
+      res.json({ goal, task_id, run_id, authoritative_review_id, review_evidence_hash,
+        bundle_manifest_sha256, canonical_goal_hash, fixture_approval_enabled: fixtureApprovalEnabled });
+    } catch { res.status(409).json({ error: "NO_CURRENT_ELIGIBLE_REVIEW" }); }
+  });
   // Isolated fixture UI action only: no shell, retry, scope, Review or DONE write.
   // A same-user local process CAN acquire the CSRF secret; this is not provenance.
   app.get("/approval/current", (req, res) => {
