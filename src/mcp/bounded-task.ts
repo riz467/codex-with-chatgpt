@@ -11,7 +11,7 @@ const json = (value: unknown) => JSON.stringify(value);
 const fail = (code: string): never => { throw new GatewayError(code, code); };
 const idPattern = /^bounded-[a-f0-9]{32}$/;
 const defaultStateRoot = () => path.join(getStateDir(), "bounded-v2");
-export type ExecutionProfile = "tracked_utf8_text" | "tracked_typescript_dashboard";
+export type ExecutionProfile = "tracked_utf8_text" | "tracked_typescript_dashboard" | "tracked_typescript_control_plane";
 export type Contract = { repo: string; goal: string; edit_paths: string[]; acceptance_criteria: string[];
   task_kind: "text_change"; execution_profile: ExecutionProfile; worker: "opencode";
   codex: { allowed: false; max_calls: 0 }; max_revisions: number; timeout_ms: number };
@@ -59,6 +59,9 @@ const pathCheck = (repo: string, name: string) => {
 };
 const profilePathAllowed = (profile: ExecutionProfile, name: string) => {
   if (profile === "tracked_utf8_text") return true;
+  if (profile === "tracked_typescript_control_plane") {
+    return name === "src/mcp/server.ts" || name === "src/mcp/typed-actions.ts" || name === "tests/typed-actions.test.ts";
+  }
   if (name === "src/dashboard/passkey-fixture.ts" || name.startsWith("src/dashboard/public/passkey-fixture.")) return false;
   return /^(?:src\/dashboard\/.*\.(?:ts|js)|tests\/dashboard[^/]*\.test\.ts)$/.test(name);
 };
@@ -408,7 +411,7 @@ export class BoundedTasks {
         task.contract.edit_paths.some(p => !profilePathAllowed(task.contract.execution_profile, p))) fail("CONTRACT_MISMATCH"); return task; }
   start(contract: Contract) {
     if (!contract || contract.worker !== "opencode" || contract.task_kind !== "text_change" ||
-        !["tracked_utf8_text", "tracked_typescript_dashboard"].includes(contract.execution_profile) ||
+        !["tracked_utf8_text", "tracked_typescript_dashboard", "tracked_typescript_control_plane"].includes(contract.execution_profile) ||
         contract.execution_profile !== this.profileFor(contract.repo) ||
         Object.keys(contract).sort().join() !== "acceptance_criteria,codex,edit_paths,execution_profile,goal,max_revisions,repo,task_kind,timeout_ms,worker" ||
         !contract.codex || Object.keys(contract.codex).sort().join() !== "allowed,max_calls" ||
