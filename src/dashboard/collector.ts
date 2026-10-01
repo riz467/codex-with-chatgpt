@@ -6,7 +6,7 @@ import { QUEUE } from "../worker/codex-interactive.js";
 import { getStateDir } from "../config/paths.js";
 import { SENSITIVE_PATTERNS } from "../workspace/ignore.js";
 import { verifiedHealth, observeOsHealth, normalizeOsHealth, type OsHealth } from "./verified-health.js";
-import { reviewProfiles } from "../mcp/review-profiles.js";
+import { reviewProfiles, type ReviewProfile } from "../mcp/review-profiles.js";
 import { autonomousState } from "../mcp/autonomous-read-model.js";
 import { activeQueueTask, queueDepth } from "../worker/status-projection.js";
 
@@ -161,7 +161,8 @@ function boundedProjection(raw: Record<string, unknown> | null, taskId: string) 
 }
 export class Collector {
   constructor(public readonly roots: Roots = REPOS, public readonly reviewRoot = REVIEW_ROOT, public readonly queueRoot = QUEUE,
-    private readonly osProbe: () => Promise<OsHealth> = roots === REPOS ? observeOsHealth : async () => normalizeOsHealth(null)) {}
+    private readonly osProbe: () => Promise<OsHealth> = roots === REPOS ? observeOsHealth : async () => normalizeOsHealth(null),
+    private readonly autonomousReviewProfiles: Readonly<Record<string, Pick<ReviewProfile, "workspace">>> = reviewProfiles) {}
   boundedTask(taskId: string) {
     if (!boundedId.test(taskId)) return null;
     try {
@@ -200,8 +201,9 @@ export class Collector {
         if (!entry.isDirectory() || !/^auto-[a-f0-9]{32}$/.test(entry.name)) continue;
         const run = readJson(this.reviewRoot, `rpc-jobs/${entry.name}/autonomous-run.json`);
         if (!run || run.run_id !== entry.name || run.task_id !== `rpc-${entry.name.slice(5)}` ||
-            typeof run.repo_key !== "string" || !Object.hasOwn(reviewProfiles, run.repo_key)) continue;
-        const profile = reviewProfiles[run.repo_key];
+            typeof run.repo_key !== "string" || !Object.hasOwn(reviewProfiles, run.repo_key) ||
+            !Object.hasOwn(this.autonomousReviewProfiles, run.repo_key)) continue;
+        const profile = this.autonomousReviewProfiles[run.repo_key];
         const result = readJson(this.reviewRoot, `rpc-jobs/${entry.name}/result.json`);
         const ledger = readJson(profile.workspace, `.ai/tasks/${run.task_id}/status.json`);
         const phase = enumValue(run.phase, [...autonomousPhases]);

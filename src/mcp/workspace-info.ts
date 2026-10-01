@@ -7,16 +7,18 @@ import { REVIEW_ROOT } from "./local-gateway.js";
 type GitIdentity = ReturnType<typeof gitInfo>;
 
 /** The review root is fixed by the host, not a tool argument or caller-supplied path. */
-export function isReviewWorkspace(workspace: Workspace): boolean {
-  return process.platform === "win32" && workspace.root.toLowerCase() === path.resolve(REVIEW_ROOT).toLowerCase();
+export function isReviewWorkspace(workspace: Workspace, expectedReviewRoot = REVIEW_ROOT): boolean {
+  return process.platform === "win32" && workspace.root.toLowerCase() === path.resolve(expectedReviewRoot).toLowerCase();
 }
 
 export function workspaceOverview(
   workspace: Workspace,
   readGit: (root: string) => GitIdentity = gitInfo,
-  onGitError?: (error: unknown) => void
+  onGitError?: (error: unknown) => void,
+  // Trusted in-process identity seam. Production server never passes an override.
+  expectedReviewRoot = REVIEW_ROOT
 ) {
-  const review = isReviewWorkspace(workspace);
+  const review = isReviewWorkspace(workspace, expectedReviewRoot);
   const project = workspace.detectProject();
   let git: GitIdentity;
   try {

@@ -17,10 +17,11 @@ const optional = (name: string) => fs.existsSync(name) && fs.statSync(name).size
 type Registration = { job_id: string; run_id: string; task_id: string; repo_key: string; repo_path: string;
   goal_sha256: string; process_id: number; started_at: string; exit_code?: number | null };
 
-function profile(repo: string) {
+function profile(repo: string, trustedProfiles?: Record<string, unknown>) {
   if (Object.hasOwn(REPOS, repo)) return { root: REPOS[repo as keyof typeof REPOS], kind: "read_only" as const };
-  const profiles = read(profilesFile);
-  if (!Object.hasOwn(reviewProfiles, repo) || !Object.hasOwn(profiles, repo)) throw new GatewayError("INVALID_REPO", "Unknown autonomous repository key");
+  if (!Object.hasOwn(reviewProfiles, repo)) throw new GatewayError("INVALID_REPO", "Unknown autonomous repository key");
+  const profiles = trustedProfiles ?? read(profilesFile);
+  if (!Object.hasOwn(profiles, repo)) throw new GatewayError("INVALID_REPO", "Unknown autonomous repository key");
   const config = profiles[repo] as Record<string, unknown>;
   const review = reviewProfiles[repo];
   if (config.path !== review.workspace || config.review !== true || config.semantic_review !== true ||
@@ -28,6 +29,14 @@ function profile(repo: string) {
     throw new GatewayError("INVALID_PROFILE", "Autonomous repository profile is not trusted for a bounded change");
   }
   return { root: review.workspace, kind: "change" as const, edit_path: config.edit_path };
+}
+/** Pure boundary check for trusted in-process composition; never a tool argument or worker destination. */
+export function validateAutonomousRequest(repo: string, boundedScope?: string[], trustedProfiles?: Record<string, unknown>) {
+  const p = profile(repo, trustedProfiles);
+  if (boundedScope !== undefined && (p.kind !== "change" || boundedScope.length !== 1 || boundedScope[0] !== p.edit_path)) {
+    throw new GatewayError("INVALID_EDIT_PATHS", "Only the trusted fixed edit scope is accepted");
+  }
+  return p;
 }
 function active(pid: number) {
   try { process.kill(pid, 0); return true; } catch { return false; }
@@ -43,10 +52,7 @@ function registered(root: string) {
 }
 export function startAutonomous(repo: string, goal: string, boundedScope?: string[], root = REVIEW_ROOT) {
   if (typeof goal !== "string" || !goal.trim() || goal.length > 800 || /[\x00-\x1f\x7f]/.test(goal)) throw new GatewayError("INVALID_GOAL", "Invalid bounded autonomous goal");
-  const p = profile(repo);
-  if (boundedScope !== undefined && (p.kind !== "change" || boundedScope.length !== 1 || boundedScope[0] !== p.edit_path)) {
-    throw new GatewayError("INVALID_EDIT_PATHS", "Only the trusted fixed edit scope is accepted");
-  }
+  const p = validateAutonomousRequest(repo, boundedScope);
   if (registered(root).some(job => job.repo_key === repo && active(job.process_id))) throw new GatewayError("REPO_BUSY", "Autonomous run already active");
   const run_id = `auto-${randomUUID().replaceAll("-", "")}`;
   const task_id = `rpc-${run_id.slice(5)}`;

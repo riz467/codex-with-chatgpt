@@ -12,7 +12,9 @@ import { workspaceOverview } from "./workspace-info.js";
 import { GatewayError, verifyBundleIntegrity, startTestJob, startOrchestration, getOrchestrationStatus, getOrchestrationResult, getOrchestrationApproval, getOrchestrationRetryPlan, retryOrchestration, completeOrchestration, completeIntegratedOrchestration, REVIEW_ROOT } from "./local-gateway.js";
 import { completeCurrentAutonomous } from "./autonomous-approval.js";
 import { searchRepo, readRepoFile } from "./repo-research.js";
+import type { RepoResearchRoots } from "./repo-research.js";
 import { BoundedTasks } from "./bounded-task.js";
+import type { OrchestrationReadDependencies } from "./local-gateway.js";
 
 // The new ledger is not the legacy Codex execution/approval path. Repository/profile pairings are fixed here.
 const boundedTasks = new BoundedTasks({
@@ -212,6 +214,10 @@ export interface McpContext {
   logger: Logger;
   boundedTasks?: BoundedTasks;
   boundedReviewerClientId?: string;
+  /** Internal read-only ledger composition; not used by start/retry/completion tools. */
+  orchestrationReads?: OrchestrationReadDependencies;
+  /** Trusted in-process mapping for read-only repo research; never tool input. */
+  repoResearchRoots?: RepoResearchRoots;
 }
 
 export function createMcpServer(ctx: McpContext): McpServer {
@@ -333,7 +339,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     try {
       const ids = [args.id, args.job_id, args.task_id].filter((value) => value !== undefined);
       if (ids.length !== 1) throw new GatewayError("INVALID_ID", "Supply exactly one id, job_id or task_id");
-      return okStructured(getOrchestrationStatus(ids[0]!));
+      return okStructured(getOrchestrationStatus(ids[0]!, ctx.orchestrationReads?.reviewRoot, ctx.orchestrationReads?.repoRoots));
     } catch (error) { return mapError(error); }
   });
   server.registerTool("get_orchestration_result", {
@@ -349,7 +355,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     try {
       const ids = [args.id, args.job_id, args.task_id].filter((value) => value !== undefined);
       if (ids.length !== 1) throw new GatewayError("INVALID_ID", "Supply exactly one id, job_id or task_id");
-      return okStructured(getOrchestrationResult(ids[0]!));
+      return okStructured(getOrchestrationResult(ids[0]!, ctx.orchestrationReads?.reviewRoot, ctx.orchestrationReads?.repoRoots));
     } catch (error) { return mapError(error); }
   });
   server.registerTool("get_orchestration_approval", {
@@ -423,7 +429,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     annotations: { readOnlyHint: true, openWorldHint: false },
   }, async (args, extra) => {
     const denied = requireScope(extra.authInfo, "review.read"); if (denied) return denied;
-    try { return okStructured(searchRepo(args.repo, args.query, args.max_results)); } catch (error) { return mapError(error); }
+    try { return okStructured(searchRepo(args.repo, args.query, args.max_results, ctx.repoResearchRoots)); } catch (error) { return mapError(error); }
   });
   server.registerTool("read_repo_file", {
     title: "Read allowlisted repository file",
@@ -434,7 +440,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     annotations: { readOnlyHint: true, openWorldHint: false },
   }, async (args, extra) => {
     const denied = requireScope(extra.authInfo, "review.read"); if (denied) return denied;
-    try { return okStructured(readRepoFile(args.repo, args.path, args.start_line, args.end_line)); } catch (error) { return mapError(error); }
+    try { return okStructured(readRepoFile(args.repo, args.path, args.start_line, args.end_line, ctx.repoResearchRoots)); } catch (error) { return mapError(error); }
   });
 
   server.registerTool(

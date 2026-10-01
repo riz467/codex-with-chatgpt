@@ -1,12 +1,15 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { spawn, spawnSync } from "node:child_process";
-import { REVIEW_ROOT, verifyBundleIntegrity, startTestJob, startOrchestration, getOrchestrationStatus, getOrchestrationResult, getOrchestrationApproval, getOrchestrationRetryPlan, retryOrchestration, validateEditPaths, completeOrchestration, completeIntegratedOrchestration } from "../src/mcp/local-gateway.js";
+import { verifyBundleIntegrity, startTestJob, startOrchestration, getOrchestrationStatus, getOrchestrationResult, getOrchestrationApproval, getOrchestrationRetryPlan, retryOrchestration, validateEditPaths, completeOrchestration, completeIntegratedOrchestration } from "../src/mcp/local-gateway.js";
 import { runReadOnlyJob } from "../src/mcp/read-only-worker.js";
+import { createScratch, type Scratch } from "./support/scratch.js";
+import { writeCompletedTask } from "./support/synthetic-review.js";
+import { testPowerShellExecutable } from "./support/powershell.js";
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -66,25 +69,105 @@ describe("local review integrity", () => {
     expect(verifyBundleIntegrity(undefined, root).issues).toContainEqual({ kind: "invalid", path: "link" });
   });
 });
-describe("bounded actions", () => {
-  it("reads the existing integrated CPU task without a registry job or any writes", () => {
-    const id = "rpc-e2e-cpu-20260925-02";
-    const registry = path.join(REVIEW_ROOT, "rpc-jobs");
-    expect(fs.readdirSync(registry).some((entry) => {
-      const file = path.join(registry, entry, "job.json");
-      return fs.existsSync(file) && JSON.parse(fs.readFileSync(file, "utf8")).task_id === id;
-    })).toBe(false);
-    const write = vi.spyOn(fs, "writeFileSync");
+describe("RC-01_B2 synthetic completed ledger gateway reads", () => {
+  let scratch: Scratch;
+  let fixture: ReturnType<typeof writeCompletedTask>;
+  beforeEach(() => { scratch = createScratch(); fixture = writeCompletedTask(scratch); });
+  afterEach(() => scratch?.dispose());
+  const status = (id: string = fixture.taskId) => getOrchestrationStatus(id, fixture.reviewRoot, fixture.reads.repoRoots);
+  const result = (id: string = fixture.taskId) => getOrchestrationResult(id, fixture.reviewRoot, fixture.reads.repoRoots);
+  function replace(file: string, value: unknown) {
+    scratch.remove(file);
+    scratch.write(file, JSON.stringify(value));
+  }
+  const readJson = (file: string) => JSON.parse(scratch.read(file).toString("utf8"));
+
+  it("reads a generated integrated DONE task without a registry job or filesystem writes", () => {
+    expect(fs.readdirSync(path.join(fixture.reviewRoot, "rpc-jobs"))).toEqual([".keep"]);
+    expect(Object.isFrozen(fixture.reads)).toBe(true);
+    expect(Object.isFrozen(fixture.reads.repoRoots)).toBe(true);
+    const reads = vi.spyOn(fs, "readFileSync");
+    const writes = [vi.spyOn(fs, "writeFileSync"), vi.spyOn(fs, "appendFileSync"), vi.spyOn(fs, "mkdirSync"),
+      vi.spyOn(fs, "rmSync"), vi.spyOn(fs, "unlinkSync"), vi.spyOn(fs, "renameSync")];
     try {
-      expect(getOrchestrationStatus(id)).toMatchObject({ task_id: id, repo: "pve-doc", job_id: null,
+      expect(status()).toMatchObject({ task_id: fixture.taskId, repo: "pve-doc", job_id: null, mode: "change",
         state: "DONE", process: "not_running", result_category: "DONE", next_action: "None" });
-      expect(getOrchestrationResult(id)).toMatchObject({ task_id: id, repo: "pve-doc", mode: "change", state: "DONE",
+      expect(result()).toMatchObject({ task_id: fixture.taskId, job_id: null, repo: "pve-doc", mode: "change", state: "DONE",
         result_category: "DONE", review_result: "PASS", done_approved: true, completion_mode: "post_integration",
-        integrated_commit: "97920b6bf6cdd86e9f89b3f416f5f9ed2977a98e", published: true,
-        changed_paths: ["03_services/ai-workspace.md"], verification: { completed: true, exit_code: 0 } });
-      expect(write).not.toHaveBeenCalled();
-    } finally { write.mockRestore(); }
+        integrated_commit: fixture.integratedCommit, published: true, review_bundle: path.join(fixture.reviewRoot, fixture.bundle),
+        completed_at: fixture.completedAt, changed_paths: fixture.changedPaths, verification: { completed: true, exit_code: 0 } });
+      expect(verifyBundleIntegrity(fixture.bundle, fixture.reviewRoot)).toMatchObject({ valid: true, issues: [] });
+      for (const write of writes) expect(write).not.toHaveBeenCalled();
+      expect(reads.mock.calls.length).toBeGreaterThan(0);
+      for (const [file] of reads.mock.calls) expect(() => scratch.resolve(String(file))).not.toThrow();
+    } finally { reads.mockRestore(); for (const write of writes) write.mockRestore(); }
   });
+
+  it("fails closed for unknown tasks, malformed IDs and untrusted registry repo keys", () => {
+    for (const read of [status, result]) {
+      expect(() => read("rpc-rc01-unknown")).toThrow(expect.objectContaining({ code: "NOT_FOUND" }));
+      for (const id of ["../escape", "rpc-../test", "rpc-foo\\bar", "rpc-%2e%2e", "rpc-"]) expect(() => read(id)).toThrow();
+    }
+    scratch.write(path.join(fixture.reviewRoot, "rpc-jobs/untrusted/job.json"), JSON.stringify({
+      job_id: "untrusted", task_id: fixture.taskId, repo_key: "unknown", mode: "change",
+    }));
+    for (const read of [status, result]) expect(() => read("untrusted")).toThrow(expect.objectContaining({ code: "INVALID_EVIDENCE" }));
+  });
+
+  it("rejects duplicate task identities across the two logical repos", () => {
+    scratch.write(path.join(fixture.configRoot, `.ai/tasks/${fixture.taskId}/status.json`), scratch.read(fixture.statusFile));
+    for (const read of [status, result]) expect(() => read()).toThrow(expect.objectContaining({ code: "AMBIGUOUS_TASK" }));
+  });
+
+  it("rejects a real task-directory junction/symlink before reading escaped evidence", () => {
+    const outside = createScratch();
+    outside.write("status.json", scratch.read(fixture.statusFile));
+    scratch.remove(fixture.taskRoot);
+    fs.symlinkSync(outside.root, fixture.taskRoot, process.platform === "win32" ? "junction" : "dir");
+    try {
+      for (const read of [status, result]) expect(() => read()).toThrow(expect.objectContaining({ code: "INVALID_PATH" }));
+    } finally { fs.unlinkSync(fixture.taskRoot); outside.dispose(); }
+  });
+
+  it.each(["decisionFile", "integrationFile"] as const)("rejects missing DONE %s", field => {
+    scratch.remove(fixture[field]);
+    expect(() => result()).toThrow(expect.objectContaining({ code: "INVALID_EVIDENCE" }));
+  });
+
+  it.each(["task_id", "new_state", "review_result", "done_approved"])("binds the DONE decision's %s", field => {
+    replace(fixture.decisionFile, { ...readJson(fixture.decisionFile), [field]: "mismatch" });
+    expect(() => result()).toThrow(expect.objectContaining({ code: "INVALID_EVIDENCE" }));
+  });
+
+  it.each(["task_id", "new_state", "review_bundle", "completion_mode", "review_result", "done_approved", "integrated_commit"])(
+    "binds integration completion %s", field => {
+      replace(fixture.integrationFile, { ...readJson(fixture.integrationFile), [field]: "mismatch" });
+      expect(() => result()).toThrow(expect.objectContaining({ code: "INVALID_EVIDENCE" }));
+    });
+
+  it.each(["manifest", "payload", "task", "workspace", "decision-manifest"])("does not publish evidence with %s mismatch", kind => {
+    const metadataFile = path.join(fixture.reviewRoot, fixture.bundle, "review-bundle.json");
+    if (kind === "manifest") replace(path.join(fixture.reviewRoot, fixture.bundle, "manifest.json"), { version: 1, files: [] });
+    else if (kind === "payload") replace(path.join(fixture.reviewRoot, fixture.bundle, "verification.md"), "tampered");
+    else if (kind === "decision-manifest") replace(fixture.decisionFile, { ...readJson(fixture.decisionFile), manifest_sha256: "0".repeat(64) });
+    else replace(metadataFile, { ...readJson(metadataFile), [kind === "task" ? "task_id" : "source_workspace"]:
+      kind === "task" ? "rpc-other-task" : fixture.repoRoot }); // Filesystem location is NOT the trusted logical identity.
+    expect(result()).toMatchObject({ state: "DONE", published: false, review_bundle: null });
+  });
+
+  it("reads normal review completion's DONE transition and READY_FOR_REVIEW without fixed roots", () => {
+    const decision = readJson(fixture.decisionFile);
+    delete decision.completion_mode;
+    scratch.remove(fixture.integrationFile);
+    replace(fixture.decisionFile, decision);
+    expect(result()).toMatchObject({ completion_mode: null, integrated_commit: null, completed_at: fixture.completedAt });
+    replace(fixture.statusFile, { ...readJson(fixture.statusFile), state: "READY_FOR_REVIEW" });
+    expect(status()).toMatchObject({ state: "READY_FOR_REVIEW", stop_reason_category: "READY_FOR_REVIEW" });
+    expect(result()).toMatchObject({ state: "READY_FOR_REVIEW", published: false });
+  });
+});
+
+describe("bounded actions", () => {
   it("reads normal review DONE and READY_FOR_REVIEW from a fixed ledger, failing closed on ambiguity and traversal", () => {
     const root = temp(), id = "rpc-fallback-test", repo = "C:\\work\\pve-doc", other = "C:\\work\\ai-orchestration-config";
     const ledger = path.join(repo, ".ai", "tasks", id, "status.json");
@@ -212,7 +295,7 @@ describe("bounded actions", () => {
     fs.writeFileSync(stub, 'param([string]$Repo,[string]$TaskId,[string]$Goal,[string[]]$EditPaths)\nConvertTo-Json -InputObject @($EditPaths) -Compress\n');
     fs.writeFileSync(wrapper, fs.readFileSync("src/mcp/invoke-ai-run.ps1", "utf8").replace("C:\\Users\\workspace\\.local\\bin\\ai-run.ps1", stub.replaceAll("'", "''")));
     const encoded = Buffer.from(JSON.stringify(["README.md", "docs/guide.md"]), "utf8").toString("base64");
-    const output = spawnSync("C:\\Program Files\\PowerShell\\7\\pwsh.exe", ["-NoProfile", "-NonInteractive", "-File", wrapper, "-Repo", "test-repo", "-TaskId", "test-task", "-Goal", "test-goal", "-EditPathsBase64", encoded], { encoding: "utf8" });
+    const output = spawnSync(testPowerShellExecutable(), ["-NoProfile", "-NonInteractive", "-File", wrapper, "-Repo", "test-repo", "-TaskId", "test-task", "-Goal", "test-goal", "-EditPathsBase64", encoded], { encoding: "utf8", shell: false });
     expect(output.status).toBe(0);
     expect(JSON.parse(output.stdout.trim())).toEqual(["README.md", "docs/guide.md"]);
   });
@@ -249,7 +332,7 @@ describe("bounded actions", () => {
     expect(status.state).toBeNull();
     expect(JSON.stringify(status)).not.toContain("SECRET");
     const result = getOrchestrationResult(id, root);
-    expect(result.final_result_line).toBe("RESULT: BLOCKED");
+    expect(result).toHaveProperty("final_result_line", "RESULT: BLOCKED");
     expect(JSON.stringify(result)).not.toContain("SECRET");
     fs.writeFileSync(path.join(dir, "job.json"), JSON.stringify({ ...job, exit_code: 2 }));
     expect(getOrchestrationStatus(id, root).process).toBe("exited");
@@ -269,8 +352,7 @@ describe("bounded actions", () => {
         expect(getOrchestrationStatus(id, root).state).toBe(state);
         expect(getOrchestrationResult(id, root).state).toBe(state);
       }
-      expect(getOrchestrationResult(id, root).changed_paths).toEqual([]);
-      expect(getOrchestrationResult(id, root).published).toBe(false);
+      expect(getOrchestrationResult(id, root)).toMatchObject({ changed_paths: [], published: false });
     } finally { existsMock.mockRestore(); readMock.mockRestore(); }
   });
   it("inspects recorded approval without exposing replacement text or changing the ledger", () => {
@@ -297,8 +379,8 @@ describe("bounded actions", () => {
         stop_reason_category: "HUMAN_APPROVAL_REQUIRED", human_action_required: true });
       expect(getOrchestrationStatus(id, root)).toMatchObject({ state: "NEEDS_APPROVAL", result_category: "HUMAN_APPROVAL_REQUIRED",
         stop_reason_category: "HUMAN_APPROVAL_REQUIRED", human_action_required: true });
-      expect(result.proposal_hash).toBe(sha(Buffer.from(JSON.stringify(proposal))));
-      expect(result.risky_actions).toContain("git push origin main");
+      expect(result).toMatchObject({ proposal_hash: sha(Buffer.from(JSON.stringify(proposal))),
+        risky_actions: expect.arrayContaining(["git push origin main"]) });
       expect(getOrchestrationApproval(id, root).structured_proposal?.edits).toHaveLength(1);
       expect(JSON.stringify(getOrchestrationApproval(id, root))).not.toMatch(/PRIVATE OLD TEXT|PRIVATE NEW TEXT/);
       expect(vi.mocked(spawn)).not.toHaveBeenCalled();

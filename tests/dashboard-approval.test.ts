@@ -1,40 +1,18 @@
 import { describe, expect, it } from "vitest";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { createDashboard } from "../src/dashboard/server.js";
 import { Collector } from "../src/dashboard/collector.js";
-import { REPOS, REVIEW_ROOT } from "../src/mcp/local-gateway.js";
 import { consumeHumanApproval } from "../src/mcp/autonomous-approval.js";
+import { createScratch } from "./support/scratch.js";
+import { writePolicyReview } from "./support/synthetic-review.js";
 
-const fixtureId = "4b089f56be4c411db2689c3889860815";
 function approvalFixture() {
-  const source = path.join(REVIEW_ROOT, "rpc-jobs", `auto-${fixtureId}`, "autonomous-run.json");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dashboard-approval-"));
-  const run = JSON.parse(fs.readFileSync(source, "utf8"));
-  const bundle = path.relative(REVIEW_ROOT, run.review_bundle).replaceAll(path.sep, "/");
-  const hash = (data: string | Buffer) => createHash("sha256").update(data).digest("hex");
-  const put = (ref: string, value: unknown) => { const file = path.join(root, ref);
-    fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(value)); };
-  fs.cpSync(run.review_bundle, path.join(root, bundle), { recursive: true });
-  const status = JSON.parse(fs.readFileSync(path.join(root, bundle, "status.json"), "utf8"));
-  const goalHash = hash(status.goal);
-  const meta = JSON.parse(fs.readFileSync(path.join(root, bundle, "review-bundle.json"), "utf8"));
-  meta.canonical_goal_sha256 = goalHash; put(`${bundle}/review-bundle.json`, meta);
-  const reviewId = "review-12345678-1234-4234-8234-123456789abc";
-  const oldReview = JSON.parse(fs.readFileSync(path.join(REVIEW_ROOT, run.review_evidence_ref), "utf8"));
-  put(`rpc-jobs/${reviewId}/result.json`, { ...oldReview, review_job_id: reviewId,
-    evidence_ref: `rpc-jobs/${reviewId}/result.json`, canonical_goal_sha256: goalHash });
-  const reviewHash = hash(fs.readFileSync(path.join(root, `rpc-jobs/${reviewId}/result.json`)));
-  run.review_job_id = reviewId; run.review_evidence_sha256 = reviewHash; run.review_bundle = path.join(root, bundle);
-  put(`rpc-jobs/auto-${fixtureId}/autonomous-run.json`, run);
-  const taskId = `rpc-${fixtureId}`;
-  put("CURRENT_REVIEW.json", { task_id: taskId, source_workspace: meta.source_workspace,
-    review_bundle: bundle, canonical_goal_sha256: goalHash });
-  put(`rpc-jobs/authoritative/${taskId}.json`, { task_id: taskId, review_job_id: reviewId, bundle_id: bundle,
-    manifest_sha256: meta.manifest_sha256, canonical_goal_sha256: goalHash, evidence_sha256: reviewHash });
-  return { root, taskId, runId: `auto-${fixtureId}`, reviewId, reviewHash, manifestHash: meta.manifest_sha256 };
+  const scratch = createScratch();
+  const fixture = writePolicyReview(scratch, "approval");
+  const collector = new Collector({ "pve-doc": scratch.resolve("repos/pve-doc"),
+    "ai-orchestration-config": scratch.resolve("repos/config") }, fixture.root, scratch.resolve("queue"));
+  return { scratch, fixture, collector };
 }
 
 describe("local human final approval endpoint", () => {
@@ -79,10 +57,10 @@ describe("local human final approval endpoint", () => {
         body: JSON.stringify({ action: "FINAL_DONE_APPROVAL" }) })).status).toBe(403);
     } finally { server.close(); }
   });
-  it.skipIf(process.platform !== "win32" || !fs.existsSync(path.join(REVIEW_ROOT, "rpc-jobs", `auto-${fixtureId}`)))(
+  it(
     "previews validated metadata in production without enabling approval writes", async () => {
-      const fixture = approvalFixture();
-      const server = createDashboard(new Collector(REPOS, fixture.root)).listen(0, "127.0.0.1");
+      const { scratch, fixture, collector } = approvalFixture();
+      const server = createDashboard(collector, false, fixture.observation).listen(0, "127.0.0.1");
       try {
         await new Promise<void>((resolve, reject) => { server.once("listening", resolve); server.once("error", reject); });
         const address = server.address(); if (!address || typeof address === "string") throw new Error("no listener");
@@ -98,20 +76,17 @@ describe("local human final approval endpoint", () => {
         expect((await fetch(`${base}/approval/final`, { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action: "FINAL_DONE_APPROVAL", task_id: fixture.taskId, run_id: fixture.runId,
             authoritative_review_id: fixture.reviewId }) })).status).toBe(403);
-        const binding = path.join(fixture.root, "CURRENT_REVIEW.json");
-        const original = fs.readFileSync(binding);
-        try {
-          fs.writeFileSync(binding, JSON.stringify({ ...JSON.parse(original.toString("utf8")), task_id: "rpc-stale" }));
-          const stale = await fetch(`${base}/api/approval/candidate`);
-          expect(stale.status).toBe(409);
-          expect(await stale.json()).toEqual({ error: "NO_CURRENT_ELIGIBLE_REVIEW" });
-        } finally { fs.writeFileSync(binding, original); }
-      } finally { server.close(); fs.rmSync(fixture.root, { recursive: true, force: true }); }
+        scratch.remove(path.join(fixture.root, "CURRENT_REVIEW.json"));
+        scratch.write(path.join(fixture.root, "CURRENT_REVIEW.json"), JSON.stringify({ task_id: "rpc-stale" }));
+        const stale = await fetch(`${base}/api/approval/candidate`);
+        expect(stale.status).toBe(409);
+        expect(await stale.json()).toEqual({ error: "NO_CURRENT_ELIGIBLE_REVIEW" });
+      } finally { server.close(); scratch.dispose(); }
     });
-  it.skipIf(process.platform !== "win32" || !fs.existsSync(path.join(REVIEW_ROOT, "rpc-jobs", `auto-${fixtureId}`)))(
+  it(
     "requires local browser session, exact current Review and a single manual action; never completes task", async () => {
-      const fixture = approvalFixture();
-      const app = createDashboard(new Collector(REPOS, fixture.root), true);
+      const { scratch, fixture, collector } = approvalFixture();
+      const app = createDashboard(collector, true, fixture.observation);
       const server = app.listen(0, "127.0.0.1");
       try {
         await new Promise<void>((resolve, reject) => { server.once("listening", resolve); server.once("error", reject); });
@@ -137,11 +112,10 @@ describe("local human final approval endpoint", () => {
         expect(approved.status).toBe(201);
         expect(await approved.json()).toMatchObject({ task_id: fixture.taskId, approved: true });
         expect((await post(request, { Cookie: renewedCookie ?? "", "X-Final-Approval-CSRF": token.csrf })).status).toBe(403);
-        const approval = { task_id: fixture.taskId, review_result: "PASS" as const, done_approved: true as const,
-          review_evidence_hash: fixture.reviewHash, bundle_manifest_sha256: fixture.manifestHash, authoritative_review_id: fixture.reviewId };
-        consumeHumanApproval(fixture.root, fixture.taskId, approval);
-        expect(() => consumeHumanApproval(fixture.root, fixture.taskId, approval)).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
-        expect(fs.existsSync(path.join("C:\\work\\autonomous-semantic-accepted-fixture", ".ai", "tasks", fixture.taskId, "review-decision.json"))).toBe(false);
-      } finally { server.close(); }
+        const approval = fixture.approval;
+        consumeHumanApproval(fixture.root, fixture.taskId, approval, fixture.observation);
+        expect(() => consumeHumanApproval(fixture.root, fixture.taskId, approval, fixture.observation)).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
+        expect(fs.existsSync(path.join(fixture.sourceRoot, ".ai", "tasks", fixture.taskId, "review-decision.json"))).toBe(false);
+      } finally { server.close(); scratch.dispose(); }
     });
 });

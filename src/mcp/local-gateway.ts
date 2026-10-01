@@ -12,6 +12,10 @@ export const REPOS = {
   "pve-doc": "C:\\work\\pve-doc",
   "ai-orchestration-config": "C:\\work\\ai-orchestration-config",
 } as const;
+/** Filesystem locations for legacy read-only lookup. Logical identities remain fixed in REPOS. */
+export type LedgerReadRoots = Readonly<Record<keyof typeof REPOS, string>>;
+/** Trusted in-process composition only; never a tool argument or mutation dependency. */
+export type OrchestrationReadDependencies = Readonly<{ reviewRoot: string; repoRoots: LedgerReadRoots }>;
 // Review-only fixture identities. Do not add these to orchestration.start's repo allowlist.
 const AI_RUN = "C:\\Users\\workspace\\.local\\bin\\ai-run.ps1";
 const AI_COMPLETE = "C:\\Users\\workspace\\.local\\bin\\ai-complete.ps1";
@@ -195,6 +199,18 @@ function repoRoot(key: keyof typeof REPOS): string {
   return repo;
 }
 
+function readRepoRoot(key: keyof typeof REPOS, roots: LedgerReadRoots): string {
+  if (roots === REPOS) return repoRoot(key);
+  if (!Object.hasOwn(REPOS, key) || !Object.hasOwn(roots, key) || typeof roots[key] !== "string") {
+    throw new GatewayError("INVALID_REPO", "Unknown read repository");
+  }
+  const root = safePath(roots[key]);
+  if (!fs.statSync(root).isDirectory() || fs.realpathSync.native(root).toLowerCase() !== path.resolve(root).toLowerCase()) {
+    throw new GatewayError("INVALID_REPO", "Read repo root is not a real directory");
+  }
+  return root;
+}
+
 export function validateEditPaths(repo: string, paths: string[]): string[] {
   if (!Array.isArray(paths) || paths.length < 1 || paths.length > 5) throw new GatewayError("INVALID_EDIT_PATHS", "Provide 1-5 edit paths");
   const rules = new IgnoreRules(repo);
@@ -304,21 +320,24 @@ export function ledgerTask(id: string, roots: Readonly<Record<keyof typeof REPOS
   if (!matches.length) throw new GatewayError("NOT_FOUND", "Unknown job/task id");
   return matches[0];
 }
-function lookupForRead(id: string, root: string): { job: Job | null; repo: keyof typeof REPOS; status: Record<string, unknown> | null } {
+function lookupForRead(id: string, root: string, roots: LedgerReadRoots): { job: Job | null; repo: keyof typeof REPOS; status: Record<string, unknown> | null } {
   try {
     const job = findJob(id, root);
-    return { job, repo: job.repo_key, status: (job.mode ?? "change") === "change" ? evidence(job) : null };
+    return { job, repo: job.repo_key, status: (job.mode ?? "change") === "change" ? readTaskEvidence(readRepoRoot(job.repo_key, roots), job.task_id) : null };
   } catch (error) {
     if (!(error instanceof GatewayError) || error.code !== "NOT_FOUND" || !/^rpc-[a-zA-Z0-9_-]{1,75}$/.test(id)) throw error;
-    const { repo, status } = ledgerTask(id);
+    const { repo, status } = ledgerTask(id, roots);
     return { job: null, repo, status };
   }
 }
 function evidence(job: Job) {
-  const file = safePath(repoRoot(job.repo_key), `.ai/tasks/${job.task_id}/status.json`);
+  return readTaskEvidence(repoRoot(job.repo_key), job.task_id);
+}
+function readTaskEvidence(repo: string, taskId: string) {
+  const file = safePath(repo, `.ai/tasks/${taskId}/status.json`);
   if (!fs.existsSync(file)) return null;
   const status = jsonFile(file);
-  if (status.task_id !== job.task_id || typeof status.state !== "string") throw new GatewayError("INVALID_EVIDENCE", "Task ledger identity mismatch");
+  if (status.task_id !== taskId || typeof status.state !== "string") throw new GatewayError("INVALID_EVIDENCE", "Task ledger identity mismatch");
   return status;
 }
 function readOnlyEvidence(job: Job, root: string) {
@@ -352,16 +371,16 @@ function bundleFor(job: Job, root: string): string | null {
   try { return verifyBundleIntegrity(pointer.review_bundle as string, root).valid ? pointer.review_bundle as string : null; }
   catch { return null; }
 }
-function completionDetails(taskId: string, repo: keyof typeof REPOS, status: Record<string, unknown>, root: string) {
+function completionDetails(taskId: string, repo: keyof typeof REPOS, status: Record<string, unknown>, root: string, roots: LedgerReadRoots) {
   if (status.state !== "DONE") return {};
   const base = `.ai/tasks/${taskId}`;
-  const decisionFile = safePath(repoRoot(repo), `${base}/review-decision.json`);
+  const decisionFile = safePath(readRepoRoot(repo, roots), `${base}/review-decision.json`);
   if (!fs.existsSync(decisionFile)) throw new GatewayError("INVALID_EVIDENCE", "DONE review decision missing");
   const decision = jsonFile(decisionFile);
   if (decision.task_id !== taskId || decision.new_state !== "DONE" || decision.review_result !== "PASS" || decision.done_approved !== true) {
     throw new GatewayError("INVALID_EVIDENCE", "Invalid DONE review decision");
   }
-  const integrationFile = safePath(repoRoot(repo), `${base}/integration-completion.json`);
+  const integrationFile = safePath(readRepoRoot(repo, roots), `${base}/integration-completion.json`);
   const integration = fs.existsSync(integrationFile) ? jsonFile(integrationFile) : null;
   if (integration && (integration.task_id !== taskId || integration.new_state !== "DONE" || integration.review_bundle !== decision.review_bundle ||
     integration.completion_mode !== "post_integration" || integration.review_result !== "PASS" || integration.done_approved !== true ||
@@ -564,8 +583,8 @@ export function retryOrchestration(id: string, retryReason = "User requested a s
     { parent_task_id: parent.task_id, retry_of: parent.retry_of ?? parent.task_id, retry_reason: retryReason, attempt: (parent.attempt ?? 1) + 1 });
   return { ...child, retry_reason: retryReason, stop_reason_category: plan.stop_reason_category };
 }
-function finalProposal(job: Job, status: Record<string, unknown>): { proposal: Record<string, unknown> | null; proposal_hash: string | null } {
-  const repo = repoRoot(job.repo_key);
+function finalProposal(job: Job, status: Record<string, unknown>, roots: LedgerReadRoots = REPOS): { proposal: Record<string, unknown> | null; proposal_hash: string | null } {
+  const repo = readRepoRoot(job.repo_key, roots);
   const attempt = status.codex_attempts;
   const proposalPath = Number.isInteger(attempt) && (attempt as number) >= 1 && (attempt as number) <= 2
     ? safePath(repo, `.ai/tasks/${job.task_id}/codex-attempt-${attempt}.stdout.txt`) : null;
@@ -584,11 +603,11 @@ function finalProposal(job: Job, status: Record<string, unknown>): { proposal: R
   }
   return { proposal, proposal_hash };
 }
-function approvalDetails(job: Job, status: Record<string, unknown>) {
+function approvalDetails(job: Job, status: Record<string, unknown>, roots: LedgerReadRoots = REPOS) {
   const attempt = status.codex_attempts;
   // The engine's final structured stdout is the sole proposal source. Never expose
   // raw replacement text, arbitrary logs, or an oversized/unparseable candidate.
-  const { proposal, proposal_hash } = finalProposal(job, status);
+  const { proposal, proposal_hash } = finalProposal(job, status, roots);
   const edits = Array.isArray(proposal?.edits) ? proposal.edits.slice(0, 20).map((entry: unknown) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return { path: null };
     const edit = entry as Record<string, unknown>;
@@ -625,10 +644,10 @@ export function getOrchestrationApproval(id: string, root = REVIEW_ROOT) {
   if (!status || status.state !== "NEEDS_APPROVAL") throw new GatewayError("INVALID_STATE", "Task is not NEEDS_APPROVAL");
   return { job_id: job.job_id, task_id: job.task_id, repo: job.repo_key, state: "NEEDS_APPROVAL", ...approvalDetails(job, status) };
 }
-export function getOrchestrationStatus(id: string, root = REVIEW_ROOT) {
+export function getOrchestrationStatus(id: string, root = REVIEW_ROOT, roots: LedgerReadRoots = REPOS) {
   const autonomous = autonomousObservation(id, root);
   if (autonomous) return autonomous;
-  const lookup = lookupForRead(id, root), { job, repo } = lookup;
+  const lookup = lookupForRead(id, root, roots), { job, repo } = lookup;
   if (!job) {
     const status = lookup.status!;
     const state = status.state as string;
@@ -645,7 +664,7 @@ export function getOrchestrationStatus(id: string, root = REVIEW_ROOT) {
   const active = running(job);
   const state = mode === "read_only" && (active || job.exit_code !== 0) ? null : status?.state as string | undefined ?? null;
   const result = mode === "read_only" ? state === "DONE" ? "READ_ONLY_COMPLETE" : active ? null : "FAILED" : resultLine(job, root)?.slice(8) ?? null;
-  const stop = mode === "change" ? classifyStop(status, result, active, state === "NEEDS_APPROVAL" ? finalProposal(job, status!).proposal : null) :
+  const stop = mode === "change" ? classifyStop(status, result, active, state === "NEEDS_APPROVAL" ? finalProposal(job, status!, roots).proposal : null) :
     state === "DONE" || active ? stopReason(null, null) : stopReason("EXECUTION_BLOCKED", "Read-only worker did not complete successfully.");
   return { job_id: job.job_id, repo: job.repo_key, task_id: job.task_id, mode, process: active ? "running" : "exited",
     exit_code: job.exit_code ?? null, state, updated_at: status?.last_updated ?? status?.updated_at ?? null,
@@ -654,10 +673,10 @@ export function getOrchestrationStatus(id: string, root = REVIEW_ROOT) {
        state === "DONE" ? "None" : state === "READY_FOR_REVIEW" ? "ChatGPT review" : active ? "Poll status" : "Inspect job output locally",
     result_category: state === "DONE" && mode === "change" ? "DONE" : result, ...stop, ...lineage(job) };
 }
-export function getOrchestrationResult(id: string, root = REVIEW_ROOT) {
+export function getOrchestrationResult(id: string, root = REVIEW_ROOT, roots: LedgerReadRoots = REPOS) {
   const autonomous = autonomousObservation(id, root);
   if (autonomous) return autonomous;
-  const lookup = lookupForRead(id, root), { job, repo } = lookup;
+  const lookup = lookupForRead(id, root, roots), { job, repo } = lookup;
   const mode = job?.mode ?? "change";
   const status = mode === "change" ? lookup.status : readOnlyEvidence(job!, root);
   if (mode === "read_only" && job) {
@@ -672,13 +691,13 @@ export function getOrchestrationResult(id: string, root = REVIEW_ROOT) {
   const state = status?.state as string | undefined ?? null;
   const bundle = job ? bundleFor(job, root) : null;
   const taskId = job?.task_id ?? id;
-  const completion = status && state === "DONE" ? completionDetails(taskId, repo, status, root) : {};
+  const completion = status && state === "DONE" ? completionDetails(taskId, repo, status, root, roots) : {};
   return { job_id: job?.job_id ?? null, task_id: taskId, repo, mode, state, summary: String(status?.message ?? "").slice(0, 1000),
     changed_paths: Array.isArray(status?.edits) ? status.edits.slice(0, 20).map((edit: unknown) => edit && typeof edit === "object" ? short((edit as Record<string, unknown>).path, 240) : null).filter((x): x is string => x !== null) : [],
     verification: { completed: status?.verify_completed === true, exit_code: status?.verify_exit_code ?? null },
     blocker_or_approval_reason: state === "BLOCKED" || state === "NEEDS_APPROVAL" ? String(status?.message ?? "").slice(0, 1000) : null,
     review_bundle: bundle ? safePath(root, bundle) : null, published: bundle !== null, final_result_line: job ? resultLine(job, root) : null,
-    ...(state === "NEEDS_APPROVAL" && job ? { result_category: resultLine(job, root)?.slice(8) ?? "HUMAN_APPROVAL_REQUIRED", ...approvalDetails(job, status!) } :
+    ...(state === "NEEDS_APPROVAL" && job ? { result_category: resultLine(job, root)?.slice(8) ?? "HUMAN_APPROVAL_REQUIRED", ...approvalDetails(job, status!, roots) } :
       { ...classifyStop(status, job ? resultLine(job, root)?.slice(8) ?? null : null, job ? running(job) : false) }),
     ...(job ? lineage(job) : { parent_task_id: typeof status?.parent_task_id === "string" ? status.parent_task_id : null,
       retry_of: typeof status?.retry_of === "string" ? status.retry_of : null, attempt: typeof status?.attempt === "number" ? status.attempt : null }),

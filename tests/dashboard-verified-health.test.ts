@@ -4,12 +4,12 @@ import { fileURLToPath } from "node:url";
 import { probeBridge } from "../src/bridge/runtime.js";
 import { bridgeHealth, normalizeOsHealth, verifiedHealth } from "../src/dashboard/verified-health.js";
 import { Collector } from "../src/dashboard/collector.js";
+import { testPowerShellExecutable } from "./support/powershell.js";
 
 const script = fileURLToPath(new URL("../scripts/observe-ai-workspace-health.ps1", import.meta.url));
-const shell = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
 function ps(code: string) {
-  return JSON.parse(execFileSync(shell, ["-NoProfile", "-NonInteractive", "-Command", `. '${script}'; ${code}`],
-    { encoding: "utf8", timeout: 12000, windowsHide: true })) as Record<string, any>;
+  return JSON.parse(execFileSync(testPowerShellExecutable(), ["-NoProfile", "-NonInteractive", "-Command", `. '${script}'; ${code}`],
+    { encoding: "utf8", timeout: 12000, windowsHide: true, shell: false })) as Record<string, any>;
 }
 const live = { status: "ready", summary: "確認済み", pid: 42, session_id: 1, observed_at: new Date().toISOString() };
 describe("verified dashboard health", () => {

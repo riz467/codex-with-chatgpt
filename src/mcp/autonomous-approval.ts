@@ -16,6 +16,15 @@ export type DoneApproval = {
 const read = (file: string) => JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
 function reject(): never { throw new Error("AUTONOMOUS_APPROVAL_REJECTED"); }
 
+/** Trusted in-process observation only; never accepted from approval input or transport config. */
+export interface ApprovalObservation {
+  readSourceStatus(workspace: string, taskId: string): Buffer;
+}
+const productionObservation: ApprovalObservation = Object.freeze({
+  readSourceStatus: (workspace: string, taskId: string) =>
+    fs.readFileSync(safePath(workspace, `.ai/tasks/${taskId}/status.json`)),
+});
+
 function approvalDirectory(root: string, taskId: string) { return safePath(root, `rpc-jobs/human-approvals/${taskId}`); }
 function withTaskLock<T>(root: string, taskId: string, action: () => T): T {
   const lockFile = safePath(root, `rpc-jobs/review-locks/${taskId}.lock`);
@@ -26,7 +35,7 @@ function withTaskLock<T>(root: string, taskId: string, action: () => T): T {
 }
 
 /** Read-only gate. The caller cannot choose the repo, bundle, profile or review result. */
-export function validateDoneApproval(input: unknown, repoKey: string, root = REVIEW_ROOT) {
+export function validateDoneApproval(input: unknown, repoKey: string, root = REVIEW_ROOT, observation: ApprovalObservation = productionObservation) {
   if (!input || typeof input !== "object" || Array.isArray(input)) reject();
   const approval = input as Record<string, unknown>;
   const fields = ["task_id", "review_result", "review_evidence_hash", "bundle_manifest_sha256", "authoritative_review_id", "done_approved"];
@@ -51,7 +60,7 @@ export function validateDoneApproval(input: unknown, repoKey: string, root = REV
         !verifyBundleIntegrity(bundle, root).valid) reject();
     const metadata = read(safePath(root, `${bundle}/review-bundle.json`));
     const status = read(safePath(root, `${bundle}/status.json`));
-    const live = read(safePath(profile.workspace, `.ai/tasks/${taskId}/status.json`));
+    const live = JSON.parse(observation.readSourceStatus(profile.workspace, taskId).toString("utf8")) as Record<string, unknown>;
     const run = read(safePath(root, `rpc-jobs/auto-${taskId.slice(4)}/autonomous-run.json`));
     const reviewFile = safePath(root, `rpc-jobs/${approval.authoritative_review_id}/result.json`);
     const bytes = fs.readFileSync(reviewFile);
@@ -65,7 +74,7 @@ export function validateDoneApproval(input: unknown, repoKey: string, root = REV
         run.review_evidence_sha256 !== approval.review_evidence_hash || run.phase !== "HUMAN_FINAL_APPROVAL" ||
         run.review_bundle !== path.join(root, bundle.replaceAll("/", path.sep)) ||
         status.task_id !== taskId || live.task_id !== taskId || live.state !== "READY_FOR_REVIEW" ||
-        digest(fs.readFileSync(safePath(profile.workspace, `.ai/tasks/${taskId}/status.json`))) !==
+        digest(observation.readSourceStatus(profile.workspace, taskId)) !==
           digest(fs.readFileSync(safePath(root, `${bundle}/status.json`))) ||
         review.task_id !== taskId || review.review_job_id !== approval.authoritative_review_id ||
         review.bundle_id !== bundle || review.manifest_sha256 !== approval.bundle_manifest_sha256 ||
@@ -78,7 +87,7 @@ export function validateDoneApproval(input: unknown, repoKey: string, root = REV
 }
 
 /** Read-only, fail-closed candidate for the current Review pointer. */
-export function currentApprovalCandidate(root = REVIEW_ROOT) {
+export function currentApprovalCandidate(root = REVIEW_ROOT, observation: ApprovalObservation = productionObservation) {
   try {
     const pointer = read(safePath(root, "CURRENT_REVIEW.json"));
     const taskId = pointer.task_id;
@@ -89,7 +98,7 @@ export function currentApprovalCandidate(root = REVIEW_ROOT) {
     const approval = { task_id: taskId, review_result: "PASS" as const,
       review_evidence_hash: authority.evidence_sha256, bundle_manifest_sha256: authority.manifest_sha256,
       authoritative_review_id: authority.review_job_id, done_approved: true as const };
-    validateDoneApproval(approval, matches[0][0], root);
+    validateDoneApproval(approval, matches[0][0], root, observation);
     const runId = `auto-${taskId.slice(4)}`;
     const status = read(safePath(root, `${pointer.review_bundle}/status.json`));
     return { ...approval, run_id: runId, canonical_goal_hash: authority.canonical_goal_sha256 as string,
@@ -98,7 +107,7 @@ export function currentApprovalCandidate(root = REVIEW_ROOT) {
 }
 
 /** Dashboard-only write. No model or MCP route invokes this function. */
-export function issueHumanDoneApproval(input: unknown, root = REVIEW_ROOT) {
+export function issueHumanDoneApproval(input: unknown, root = REVIEW_ROOT, observation: ApprovalObservation = productionObservation) {
   if (!input || typeof input !== "object" || Array.isArray(input)) reject();
   const request = input as Record<string, unknown>;
   if (Object.keys(request).sort().join("|") !== ["action", "authoritative_review_id", "run_id", "task_id"].sort().join("|") ||
@@ -106,7 +115,7 @@ export function issueHumanDoneApproval(input: unknown, root = REVIEW_ROOT) {
       typeof request.run_id !== "string" || !runPattern.test(request.run_id) ||
       typeof request.authoritative_review_id !== "string") reject();
   return withTaskLock(root, request.task_id, () => {
-    const current = currentApprovalCandidate(root);
+    const current = currentApprovalCandidate(root, observation);
     if (current.task_id !== request.task_id || current.run_id !== request.run_id ||
         current.authoritative_review_id !== request.authoritative_review_id) reject();
     const dir = approvalDirectory(root, current.task_id);
@@ -131,8 +140,8 @@ export function issueHumanDoneApproval(input: unknown, root = REVIEW_ROOT) {
   });
 }
 
-export function consumeHumanApproval(root: string, taskId: string, expected: DoneApproval) {
-  const candidate = currentApprovalCandidate(root);
+export function consumeHumanApproval(root: string, taskId: string, expected: DoneApproval, observation: ApprovalObservation = productionObservation) {
+  const candidate = currentApprovalCandidate(root, observation);
   if (candidate.task_id !== taskId || Object.entries(expected).some(([key, value]) => candidate[key as keyof typeof candidate] !== value)) reject();
   const dir = approvalDirectory(root, taskId);
   const record = read(safePath(dir, "current.json"));

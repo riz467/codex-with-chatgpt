@@ -5,6 +5,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { categoryFor, createExitTelemetry, safeError } from "../src/worker/exit-telemetry.js";
+import { testPowerShellExecutable } from "./support/powershell.js";
 
 const dirs: string[] = [];
 const dir = () => { const value = fs.mkdtempSync(path.join(os.tmpdir(), "worker-exit-")); dirs.push(value); return value; };
@@ -87,9 +88,9 @@ describe.skipIf(process.platform !== "win32")("wrapper fallback evidence", () =>
   const wrapper = fileURLToPath(new URL("../scripts/start-codex-interactive-worker.ps1", import.meta.url));
   const call = (root: string, code: number, nodeStarted: boolean) => {
     const escaped = root.replaceAll("'", "''");
-    execFileSync("C:\\Program Files\\PowerShell\\7\\pwsh.exe", ["-NoProfile", "-NonInteractive", "-Command",
+    execFileSync(testPowerShellExecutable(), ["-NoProfile", "-NonInteractive", "-Command",
       `. '${helper}'; Write-CodexWorkerFallbackExit -Started ([DateTimeOffset]::UtcNow.AddSeconds(-3)) -ExitCode ${code} -NodeStarted $${nodeStarted} -EvidenceDir '${escaped}'`],
-    { windowsHide: true, timeout: 12000 });
+    { windowsHide: true, timeout: 12000, shell: false });
   };
   it("records a nonzero child exit without claiming the cause", () => {
     const root = dir(); call(root, 1, true);

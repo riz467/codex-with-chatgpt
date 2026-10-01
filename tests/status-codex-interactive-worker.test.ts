@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { testPowerShellExecutable } from "./support/powershell.js";
 
 const script = fileURLToPath(new URL("../scripts/status-codex-interactive-worker.ps1", import.meta.url));
 const source = fs.readFileSync(script, "utf8");
@@ -22,8 +23,8 @@ function run(dir: string, timezone: string) {
   const command = `$env:TZ='${escape(timezone)}'; function Get-ScheduledTask { [pscustomobject]@{ State='Running' } }; ` +
     `$source=[IO.File]::ReadAllText('${escape(script)}'); ` +
     `$source=$source.Replace('C:\\work\\ai-workspace-logs\\codex-worker','${escape(dir)}'); & ([scriptblock]::Create($source))`;
-  return execFileSync("C:\\Program Files\\PowerShell\\7\\pwsh.exe", ["-NoProfile", "-NonInteractive", "-Command", command],
-    { encoding: "utf8", windowsHide: true, timeout: 12000 });
+  return execFileSync(testPowerShellExecutable(), ["-NoProfile", "-NonInteractive", "-Command", command],
+    { encoding: "utf8", windowsHide: true, timeout: 12000, shell: false });
 }
 const age = (output: string) => {
   const match = /Last heartbeat: ([\d,]+)s ago \(last known PID 2460\)/.exec(output);

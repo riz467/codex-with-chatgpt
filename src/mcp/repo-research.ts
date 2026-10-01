@@ -5,15 +5,17 @@ import { IgnoreRules } from "../workspace/ignore.js";
 import { GatewayError, REPOS } from "./local-gateway.js";
 
 export type RepoKey = keyof typeof REPOS;
+/** Trusted in-process read mapping only; logical repo keys and public tool schemas stay fixed. */
+export type RepoResearchRoots = Readonly<Record<RepoKey, string>>;
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_LINES = 200;
 const excluded = ignore().add(["vendor/", "generated/", "__generated__/", ".generated/", ".ai/", "*.min.js", "*.map", "*.lockb"]);
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
 
-function rootFor(repo: string): string {
+function rootFor(repo: string, roots: RepoResearchRoots): string {
   if (!Object.hasOwn(REPOS, repo)) throw new GatewayError("INVALID_REPO", "Unknown repository key");
-  const root = path.resolve(REPOS[repo as RepoKey]);
+  const root = path.resolve(roots[repo as RepoKey]);
   if (!fs.statSync(root).isDirectory() || fs.realpathSync.native(root).toLowerCase() !== root.toLowerCase()) {
     throw new GatewayError("INVALID_REPO", "Allowlisted repo root is not a real directory");
   }
@@ -90,8 +92,8 @@ function ignored(relative: string, directory: boolean, rules: IgnoreRules, scope
   return scopes.some(({ prefix, rule }) => relative.startsWith(prefix) && rule.ignores(candidate.slice(prefix.length)));
 }
 
-export function searchRepo(repo: string, query: string, maxResults = 20) {
-  const root = rootFor(repo);
+export function searchRepo(repo: string, query: string, maxResults = 20, roots: RepoResearchRoots = REPOS) {
+  const root = rootFor(repo, roots);
   if (typeof query !== "string" || !query.trim() || query.length > 200 || /[\x00-\x1f\x7f]/.test(query)) {
     throw new GatewayError("INVALID_QUERY", "Query must be 1-200 characters without control characters");
   }
@@ -132,8 +134,8 @@ export function searchRepo(repo: string, query: string, maxResults = 20) {
   return { repo, query, matches: matches.slice(0, maxResults), totalFiles: matches.length, truncated: matches.length > maxResults };
 }
 
-export function readRepoFile(repo: string, relative: string, startLine = 1, endLine?: number) {
-  const root = rootFor(repo);
+export function readRepoFile(repo: string, relative: string, startLine = 1, endLine?: number, roots: RepoResearchRoots = REPOS) {
+  const root = rootFor(repo, roots);
   if (!Number.isInteger(startLine) || startLine < 1 || (endLine !== undefined && (!Number.isInteger(endLine) || endLine < startLine))) {
     throw new GatewayError("INVALID_RANGE", "Invalid line range");
   }

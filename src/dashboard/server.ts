@@ -4,13 +4,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Collector } from "./collector.js";
 import { GatewayError, safePath } from "../mcp/local-gateway.js";
-import { currentApprovalCandidate, issueHumanDoneApproval } from "../mcp/autonomous-approval.js";
+import { currentApprovalCandidate, issueHumanDoneApproval, type ApprovalObservation } from "../mcp/autonomous-approval.js";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
 const publicDir = fileURLToPath(new URL("./public/", import.meta.url));
 // Approval is disabled in the production entrypoint until an independent
 // human/AI OS trust boundary is deployed. Loopback and CSRF are not identity.
-export function createDashboard(collector = new Collector(), fixtureApprovalEnabled = false) {
+export function createDashboard(collector = new Collector(), fixtureApprovalEnabled = false, approvalObservation?: ApprovalObservation) {
   const app = express();
   app.disable("x-powered-by");
   const approvalSessions = new Map<string, { csrf: string; expires: number }>();
@@ -47,7 +47,7 @@ export function createDashboard(collector = new Collector(), fixtureApprovalEnab
   // Read-only preview: explicitly select metadata, never expose a session or write capability.
   app.get("/api/approval/candidate", (_req, res) => {
     try {
-      const candidate = currentApprovalCandidate(collector.reviewRoot);
+      const candidate = currentApprovalCandidate(collector.reviewRoot, approvalObservation);
       const { goal, task_id, run_id, authoritative_review_id, review_evidence_hash,
         bundle_manifest_sha256, canonical_goal_hash } = candidate;
       res.json({ goal, task_id, run_id, authoritative_review_id, review_evidence_hash,
@@ -62,7 +62,7 @@ export function createDashboard(collector = new Collector(), fixtureApprovalEnab
       res.status(403).json({ error: "LOCAL_BROWSER_REQUIRED" }); return;
     }
     try {
-      const candidate = currentApprovalCandidate(collector.reviewRoot);
+      const candidate = currentApprovalCandidate(collector.reviewRoot, approvalObservation);
       const session = randomBytes(32).toString("hex"), csrf = randomBytes(32).toString("hex");
       approvalSessions.set(session, { csrf, expires: Date.now() + 120_000 });
       for (const [key, value] of approvalSessions) if (value.expires <= Date.now()) approvalSessions.delete(key);
@@ -86,7 +86,7 @@ export function createDashboard(collector = new Collector(), fixtureApprovalEnab
     }
     approvalSessions.delete(cookie!);
     try {
-      const result = issueHumanDoneApproval(req.body, collector.reviewRoot);
+      const result = issueHumanDoneApproval(req.body, collector.reviewRoot, approvalObservation);
       res.clearCookie("final_approval_session", { path: "/approval" });
       res.status(201).json(result);
     } catch { res.status(409).json({ error: "APPROVAL_REJECTED" }); }

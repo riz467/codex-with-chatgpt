@@ -8,6 +8,8 @@ import { bearerAuth } from "../auth/middleware.js";
 import { PairingManager } from "../pairing/manager.js";
 import { createMcpServer } from "../mcp/server.js";
 import type { BoundedTasks } from "../mcp/bounded-task.js";
+import type { OrchestrationReadDependencies } from "../mcp/local-gateway.js";
+import type { RepoResearchRoots } from "../mcp/repo-research.js";
 import { createMcpHttpHandler } from "../mcp/http.js";
 import { CloudflaredQuickTunnel } from "../tunnel/cloudflared.js";
 import { CloudflaredNamedTunnel } from "../tunnel/cloudflared-named.js";
@@ -84,7 +86,9 @@ function listen(app: express.Express, host: string, preferredPort: number): Prom
   });
 }
 
-export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
+// The second parameter is trusted in-process composition, not serializable BridgeOptions/config.
+export async function startBridge(opts: BridgeOptions, orchestrationReads?: OrchestrationReadDependencies,
+  repoResearchRoots?: RepoResearchRoots): Promise<Bridge> {
   const logger = opts.logger ?? nullLogger;
   const workspace = new Workspace(opts.workspaceRoot);
   const host = opts.host ?? DEFAULT_HOST;
@@ -132,7 +136,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
 
   const mcpHandler = createMcpHttpHandler(() => createMcpServer({ workspace, logger,
     boundedReviewerClientId: opts.boundedReviewerClientId ?? process.env.C2C_BOUNDED_REVIEW_CLIENT_ID,
-    boundedTasks: opts.boundedTasks }), logger);
+    boundedTasks: opts.boundedTasks, orchestrationReads, repoResearchRoots }), logger);
   app.all(
     "/mcp",
     express.json({ limit: "8mb" }),

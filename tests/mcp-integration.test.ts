@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -7,23 +7,31 @@ import { startBridge, type Bridge } from "../src/bridge/server.js";
 import { appendExecutionRecord } from "../src/execution/records.js";
 import { saveExecutionOutput } from "../src/execution/output.js";
 import { makeTmpDir, cleanup, write, makeGitRepo, git, isolateStateDir } from "./helpers.js";
+import { CloudflaredQuickTunnel } from "../src/tunnel/cloudflared.js";
+import { createScratch, type Scratch } from "./support/scratch.js";
+import { writeCompletedTask } from "./support/synthetic-review.js";
+import { writeResearchRepos } from "./support/synthetic-repos.js";
 
 let root: string;
 let bridge: Bridge;
 let client: Client;
 let accessToken: string;
 let stateDir: string;
+let researchScratch: Scratch;
+let researchFixture: ReturnType<typeof writeResearchRepos>;
 
-function textOf(result: { content?: unknown }): string {
+type ToolResponse = Awaited<ReturnType<Client["callTool"]>>;
+
+function textOf(result: ToolResponse): string {
   const content = result.content as { type: string; text: string }[];
   return content?.[0]?.text ?? "";
 }
 
-function jsonOf<T = Record<string, unknown>>(result: { content?: unknown }): T {
+function jsonOf<T = Record<string, unknown>>(result: ToolResponse): T {
   return JSON.parse(textOf(result)) as T;
 }
 
-function structuredJsonOf<T = Record<string, unknown>>(result: { content?: unknown; structuredContent?: unknown }): T {
+function structuredJsonOf<T = Record<string, unknown>>(result: ToolResponse): T {
   const parsed = jsonOf<T>(result);
   expect(result.structuredContent).toEqual(parsed);
   return parsed;
@@ -41,7 +49,102 @@ function expectToolOutputSchema(
   expect(Object.keys(schema?.properties ?? {})).toEqual(expect.arrayContaining(properties));
 }
 
+describe("RC-01_B2 synthetic completed ledger over MCP", () => {
+  let scratch: Scratch;
+  let fixture: ReturnType<typeof writeCompletedTask>;
+  let bridge: Bridge | undefined;
+  let client: Client | undefined;
+  beforeEach(async () => {
+    scratch = createScratch();
+    fixture = writeCompletedTask(scratch);
+    bridge = await startBridge({ workspaceRoot: fixture.reviewRoot, port: 0, persistRuntime: false,
+      authStoreFile: scratch.resolve("auth/store.json"), tunnelProvider: new CloudflaredQuickTunnel() }, fixture.reads);
+    const token = bridge.authStore.issueTokens({ clientId: "rc01-completed-reader", scopes: ["review.read"] });
+    client = new Client({ name: "rc01-completed-reader", version: "1" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${bridge.localBaseUrl()}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${token.accessToken}` } },
+    }));
+  });
+  afterEach(async () => {
+    try { await client?.close(); } finally {
+      try { await bridge?.close(); } finally { client = undefined; bridge = undefined; scratch?.dispose(); }
+    }
+  });
+  const call = (name: string, args: Record<string, unknown> = { task_id: fixture.taskId }) => client!.callTool({ name, arguments: args });
+
+  it("reads a generated completed task through task_id without filesystem writes or production reads", async () => {
+    const reads = vi.spyOn(fs, "readFileSync");
+    const writes = [vi.spyOn(fs, "writeFileSync"), vi.spyOn(fs, "appendFileSync"), vi.spyOn(fs, "mkdirSync"),
+      vi.spyOn(fs, "rmSync"), vi.spyOn(fs, "unlinkSync"), vi.spyOn(fs, "renameSync")];
+    try {
+      const status = await call("get_orchestration_status");
+      expect(status.isError ?? false).toBe(false);
+      expect(structuredJsonOf(status)).toMatchObject({ task_id: fixture.taskId, repo: "pve-doc", job_id: null,
+        mode: "change", state: "DONE", process: "not_running", result_category: "DONE" });
+      const result = await call("get_orchestration_result");
+      expect(result.isError ?? false).toBe(false);
+      expect(structuredJsonOf(result)).toMatchObject({ task_id: fixture.taskId, repo: "pve-doc", job_id: null,
+        mode: "change", state: "DONE", result_category: "DONE", review_result: "PASS", done_approved: true,
+        completion_mode: "post_integration", integrated_commit: fixture.integratedCommit, completed_at: fixture.completedAt,
+        published: true, changed_paths: fixture.changedPaths, verification: { completed: true, exit_code: 0 } });
+      for (const write of writes) expect(write).not.toHaveBeenCalled();
+      expect(reads.mock.calls.length).toBeGreaterThan(0);
+      for (const [file] of reads.mock.calls) expect(() => scratch.resolve(String(file))).not.toThrow();
+    } finally { reads.mockRestore(); for (const write of writes) write.mockRestore(); }
+  });
+
+  it("keeps public schemas unchanged and rejects caller roots, repo paths and malformed IDs", async () => {
+    const tools = (await client!.listTools()).tools;
+    for (const name of ["get_orchestration_status", "get_orchestration_result"]) {
+      const schema = tools.find(tool => tool.name === name)!.inputSchema;
+      expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["id", "job_id", "task_id"]);
+      expect(schema.additionalProperties).toBe(false);
+      for (const args of [{ task_id: "../escape" }, { task_id: "rpc-" }, { id: fixture.taskId, task_id: fixture.taskId },
+        { task_id: fixture.taskId, repo: "unknown" }, { task_id: fixture.taskId, repo: fixture.repoRoot },
+        { task_id: fixture.taskId, repo: fixture.workspaceIdentity }, { task_id: fixture.taskId, root: fixture.reviewRoot },
+        { task_id: fixture.taskId, repoRoots: fixture.reads.repoRoots }, { task_id: fixture.taskId, readRoots: fixture.reads.repoRoots },
+        { task_id: fixture.taskId, orchestrationReads: fixture.reads }]) {
+        expect((await call(name, args)).isError).toBe(true);
+      }
+      expect((await call(name)).isError ?? false).toBe(false);
+    }
+  });
+
+  it("fails closed for unknown and duplicate ledger tasks", async () => {
+    for (const name of ["get_orchestration_status", "get_orchestration_result"]) {
+      const missing = await call(name, { task_id: "rpc-rc01-unknown" });
+      expect(missing.isError).toBe(true);
+      expect(textOf(missing)).toContain("NOT_FOUND");
+    }
+    scratch.write(path.join(fixture.configRoot, `.ai/tasks/${fixture.taskId}/status.json`), scratch.read(fixture.statusFile));
+    for (const name of ["get_orchestration_status", "get_orchestration_result"]) {
+      const duplicate = await call(name);
+      expect(duplicate.isError).toBe(true);
+      expect(textOf(duplicate)).toContain("AMBIGUOUS_TASK");
+    }
+  });
+
+  it.each(["decisionFile", "integrationFile"] as const)("refuses DONE results without %s", async field => {
+    scratch.remove(fixture[field]);
+    const result = await call("get_orchestration_result");
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("INVALID_EVIDENCE");
+  });
+
+  it("never reports a tampered bundle as published", async () => {
+    const evidence = path.join(fixture.reviewRoot, fixture.bundle, "verification.md");
+    scratch.remove(evidence);
+    scratch.write(evidence, "tampered\n");
+    const result = await call("get_orchestration_result");
+    expect(result.isError ?? false).toBe(false);
+    expect(structuredJsonOf(result)).toMatchObject({ state: "DONE", published: false, review_bundle: null });
+  });
+});
+
+describe("MCP tools over Streamable HTTP", () => {
 beforeAll(async () => {
+  researchScratch = createScratch();
+  researchFixture = writeResearchRepos(researchScratch);
   stateDir = isolateStateDir();
   root = makeTmpDir("mcp-ws");
   makeGitRepo(root);
@@ -55,7 +158,7 @@ beforeAll(async () => {
     port: 0,
     persistRuntime: false,
     authStoreFile: path.join(makeTmpDir("auth"), "store.json"),
-  });
+  }, undefined, researchFixture.roots);
   const tokens = bridge.authStore.issueTokens({
     clientId: "it-client",
     scopes: ["workspace.read", "workspace.search", "git.read", "execution.read", "review.read", "orchestration.start"],
@@ -72,10 +175,11 @@ beforeAll(async () => {
 afterAll(async () => {
   await client.close();
   await bridge.close();
+  researchFixture.disposeEscape();
+  researchScratch.dispose();
   cleanup(root);
 });
 
-describe("MCP tools over Streamable HTTP", () => {
   it("lists read-only and bounded local gateway tools", async () => {
     const { tools } = await client.listTools();
     const names = tools.map((tool) => tool.name).sort();
@@ -148,19 +252,6 @@ describe("MCP tools over Streamable HTTP", () => {
     expect(description).not.toContain("has_more");
     expect(description).not.toContain("next_offset");
   });
-  it("reads a completed task through the task_id MCP argument", async () => {
-    const task_id = "rpc-e2e-cpu-20260925-02";
-    const status = await client.callTool({ name: "get_orchestration_status", arguments: { task_id } });
-    expect(status.isError ?? false).toBe(false);
-    expect(structuredJsonOf(status)).toMatchObject({ task_id, state: "DONE", process: "not_running", result_category: "DONE" });
-    const result = await client.callTool({ name: "get_orchestration_result", arguments: { task_id } });
-    expect(result.isError ?? false).toBe(false);
-    expect(structuredJsonOf(result)).toMatchObject({ task_id, state: "DONE", review_result: "PASS", done_approved: true,
-      completion_mode: "post_integration", integrated_commit: "97920b6bf6cdd86e9f89b3f416f5f9ed2977a98e" });
-    for (const arguments_ of [{ task_id: "../escape" }, { task_id, repo: "C:\\work\\pve-doc" }, { id: task_id, task_id }]) {
-      expect((await client.callTool({ name: "get_orchestration_result", arguments: arguments_ })).isError).toBe(true);
-    }
-  });
   it("refuses completion without explicit PASS and human approval", async () => {
     for (const name of ["complete_orchestration", "complete_integrated_orchestration"]) {
       for (const args of [
@@ -188,9 +279,15 @@ describe("MCP tools over Streamable HTTP", () => {
   });
 
   it("searches and reads an allowlisted repo over MCP without accepting caller paths", async () => {
+    const schemas = (await client.listTools()).tools;
+    expect(Object.keys(schemas.find(tool => tool.name === "search_repo")!.inputSchema.properties ?? {}).sort())
+      .toEqual(["max_results", "query", "repo"]);
+    expect(Object.keys(schemas.find(tool => tool.name === "read_repo_file")!.inputSchema.properties ?? {}).sort())
+      .toEqual(["end_line", "path", "repo", "start_line"]);
     const search = await client.callTool({ name: "search_repo", arguments: { repo: "pve-doc", query: "AI-Workspace", max_results: 2 } });
     const found = structuredJsonOf<{ matches: { path: string; line: number }[] }>(search);
     expect(found.matches.length).toBeGreaterThan(0);
+    expect(found.matches.every(match => !path.isAbsolute(match.path))).toBe(true);
     const first = found.matches[0];
     const read = await client.callTool({ name: "read_repo_file", arguments: { repo: "pve-doc", path: first.path,
       start_line: first.line, end_line: first.line } });
@@ -198,6 +295,7 @@ describe("MCP tools over Streamable HTTP", () => {
     for (const request of [
       { name: "search_repo", arguments: { repo: "unknown", query: "AI-Workspace" } },
       { name: "read_repo_file", arguments: { repo: "pve-doc", path: "../outside" } },
+      { name: "read_repo_file", arguments: { repo: "pve-doc", path: "C:\\work\\pve-doc\\00_overview.md" } },
     ]) expect((await client.callTool(request)).isError).toBe(true);
   });
 

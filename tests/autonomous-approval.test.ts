@@ -1,80 +1,115 @@
-import { describe, expect, it } from "vitest";
-import { validateDoneApproval, currentApprovalCandidate, issueHumanDoneApproval, consumeHumanApproval } from "../src/mcp/autonomous-approval.js";
-import fs from "node:fs";
-import os from "node:os";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { REVIEW_ROOT } from "../src/mcp/local-gateway.js";
+import { validateDoneApproval, currentApprovalCandidate, issueHumanDoneApproval, consumeHumanApproval } from "../src/mcp/autonomous-approval.js";
+import { createScratch, type Scratch } from "./support/scratch.js";
+import { writePolicyReview } from "./support/synthetic-review.js";
 
-const historical = {
-  task_id: "rpc-4b089f56be4c411db2689c3889860815", review_result: "PASS",
-  review_evidence_hash: "a".repeat(64), bundle_manifest_sha256: "b".repeat(64),
-  authoritative_review_id: "review-b1afa4c5-7b70-4e3b-b38d-542b7efbc750", done_approved: true,
-} as const;
-describe("explicit autonomous DONE gate", () => {
-  it("rejects historical wrong PASS and any unbound/stale review", () => {
-    expect(() => validateDoneApproval(historical, "autonomous-semantic-accepted-fixture")).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
-    expect(() => validateDoneApproval({ ...historical, task_id: "rpc-b8dfd6682b04447f97aaf5272e3ac4be" },
-      "autonomous-semantic-no-behavior-fixture")).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
+let scratch: Scratch;
+let fixture: ReturnType<typeof writePolicyReview>;
+const json = (ref: string) => JSON.parse(scratch.read(path.join(fixture.root, ref)).toString("utf8"));
+function replace(ref: string, value: unknown) {
+  const file = path.join(fixture.root, ref);
+  scratch.remove(file);
+  scratch.write(file, JSON.stringify(value) + "\n");
+}
+const validate = (input: unknown = fixture.approval) => validateDoneApproval(input, fixture.repoKey, fixture.root, fixture.observation);
+const candidate = () => currentApprovalCandidate(fixture.root, fixture.observation);
+const issue = (input: unknown = fixture.request) => issueHumanDoneApproval(input, fixture.root, fixture.observation);
+const consume = () => consumeHumanApproval(fixture.root, fixture.taskId, fixture.approval, fixture.observation);
+
+beforeEach(() => { scratch = createScratch(); fixture = writePolicyReview(scratch, "approval"); });
+afterEach(() => scratch?.dispose());
+
+describe("explicit autonomous DONE gate on generated scratch evidence", () => {
+  it("accepts only the exact current two-phase PASS", () => {
+    expect(validate()).toMatchObject({ task_id: fixture.taskId, review_id: fixture.reviewId });
+    expect(candidate()).toMatchObject({ task_id: fixture.taskId, run_id: fixture.runId,
+      canonical_goal_hash: fixture.goalHash, authoritative_review_id: fixture.reviewId });
+    // Fixed trusted path is metadata-only. The observer reads a different, scratch-local file.
+    expect(() => scratch.read(fixture.workspaceIdentity)).toThrow("SCRATCH_CONTAINMENT");
+    expect(JSON.parse(fixture.observation.readSourceStatus(fixture.workspaceIdentity, fixture.taskId).toString("utf8")))
+      .toEqual(json(`${fixture.bundle}/status.json`));
   });
-  it("does not infer human approval from prose or truthy values", () => {
-    for (const input of ["approved", { ...historical, done_approved: "true" }, { ...historical, done_approved: false },
-      { ...historical, extra: "approved" }, { ...historical, review_result: "NEEDS_WORK" },
-      { ...historical, review_evidence_hash: "0".repeat(64) }]) {
-      expect(() => validateDoneApproval(input, "autonomous-semantic-accepted-fixture")).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
+
+  it("rejects wrong/stale PASS and does not infer approval from prose or truthy values", () => {
+    const good = fixture.approval;
+    for (const input of ["approved", { ...good, task_id: `rpc-${"e".repeat(32)}` },
+      { ...good, authoritative_review_id: "review-ffffffff-ffff-4fff-8fff-ffffffffffff" },
+      { ...good, done_approved: "true" }, { ...good, done_approved: false }, { ...good, extra: "approved" },
+      { ...good, observation: fixture.observation }, { ...good, root: fixture.root },
+      { ...good, review_result: "NEEDS_WORK" }, { ...good, review_evidence_hash: "0".repeat(64) },
+      { ...good, bundle_manifest_sha256: "0".repeat(64) }]) {
+      expect(() => validate(input)).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
     }
   });
-  it("accepts only a current exact two-phase PASS in an isolated copy, then rejects supersession", () => {
-    const original = path.join(REVIEW_ROOT, "rpc-jobs", "auto-4b089f56be4c411db2689c3889860815", "autonomous-run.json");
-    if (!fs.existsSync(original)) return; // historical fixture is optional on non-Windows CI
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "approval-fixture-"));
-    const run = JSON.parse(fs.readFileSync(original, "utf8"));
-    const bundle = path.relative(REVIEW_ROOT, run.review_bundle).replaceAll(path.sep, "/");
-    const oldReview = JSON.parse(fs.readFileSync(path.join(REVIEW_ROOT, run.review_evidence_ref), "utf8"));
-    const reviewId = "review-12345678-1234-4234-8234-123456789abc";
-    const hash = (v: string | Buffer) => createHash("sha256").update(v).digest("hex");
-    const goalHash = hash(JSON.parse(fs.readFileSync(path.join(run.review_bundle, "status.json"), "utf8")).goal);
-    const write = (ref: string, value: unknown) => {
-      const file = path.join(root, ref); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(value));
-    };
-    fs.cpSync(run.review_bundle, path.join(root, bundle), { recursive: true });
-    const meta = JSON.parse(fs.readFileSync(path.join(root, bundle, "review-bundle.json"), "utf8"));
-    meta.canonical_goal_sha256 = goalHash; write(`${bundle}/review-bundle.json`, meta);
-    const review = { ...oldReview, review_job_id: reviewId, evidence_ref: `rpc-jobs/${reviewId}/result.json`, canonical_goal_sha256: goalHash };
-    write(`rpc-jobs/${reviewId}/result.json`, review);
-    const reviewHash = hash(fs.readFileSync(path.join(root, `rpc-jobs/${reviewId}/result.json`)));
-    run.review_job_id = reviewId; run.review_evidence_sha256 = reviewHash; run.review_bundle = path.join(root, bundle);
-    write("rpc-jobs/auto-4b089f56be4c411db2689c3889860815/autonomous-run.json", run);
-    write("CURRENT_REVIEW.json", { task_id: historical.task_id, source_workspace: meta.source_workspace,
-      review_bundle: bundle, canonical_goal_sha256: goalHash });
-    const authority = { task_id: historical.task_id, review_job_id: reviewId, bundle_id: bundle,
-      manifest_sha256: meta.manifest_sha256, canonical_goal_sha256: goalHash, evidence_sha256: reviewHash };
-    write(`rpc-jobs/authoritative/${historical.task_id}.json`, authority);
-    const approval = { ...historical, authoritative_review_id: reviewId, review_evidence_hash: reviewHash,
-      bundle_manifest_sha256: meta.manifest_sha256 };
-    expect(validateDoneApproval(approval, "autonomous-semantic-accepted-fixture", root)).toMatchObject({ review_id: reviewId });
-    const candidate = currentApprovalCandidate(root);
-    expect(candidate).toMatchObject({ task_id: historical.task_id, run_id: "auto-4b089f56be4c411db2689c3889860815",
-      canonical_goal_hash: goalHash, authoritative_review_id: reviewId });
-    const request = { action: "FINAL_DONE_APPROVAL", task_id: historical.task_id, run_id: candidate.run_id,
-      authoritative_review_id: reviewId };
-    expect(() => issueHumanDoneApproval({ ...request, arbitrary: "path" }, root)).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
-    expect(issueHumanDoneApproval(request, root)).toMatchObject({ approved: true, task_id: historical.task_id });
-    const approvalDir = path.join(root, "rpc-jobs", "human-approvals", historical.task_id);
-    const current = JSON.parse(fs.readFileSync(path.join(approvalDir, "current.json"), "utf8"));
-    expect(current).toMatchObject({ run_id: candidate.run_id, canonical_goal_hash: goalHash,
-      authoritative_review_id: reviewId, review_evidence_hash: reviewHash, done_approved: true });
+
+  it.each(["task_id", "source_workspace", "review_bundle", "canonical_goal_sha256"])("binds the current pointer's %s", field => {
+    replace("CURRENT_REVIEW.json", { ...json("CURRENT_REVIEW.json"), [field]: "stale" });
+    expect(() => validate()).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
+  });
+
+  it.each(["task_id", "review_job_id", "bundle_id", "evidence_sha256", "manifest_sha256", "canonical_goal_sha256"])(
+    "binds authoritative review %s", field => {
+      replace(fixture.authorityRef, { ...json(fixture.authorityRef), [field]: "stale" });
+      expect(() => validate()).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
+    });
+
+  it("rejects changed review bytes even when their JSON still claims PASS", () => {
+    replace(fixture.resultRef, { ...json(fixture.resultRef), summary: "unbound new bytes" });
+    expect(() => validate()).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
+  });
+
+  it("rejects a changed bundle manifest", () => {
+    const ref = `${fixture.bundle}/manifest.json`;
+    replace(ref, { ...json(ref), files: [] });
+    expect(() => validate()).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
+  });
+
+  it.each(["structural_result", "semantic_result", "integrity_valid", "done_eligible", "semantic_review"])(
+    "requires two-phase PASS after valid evidence hash binding (%s)", field => {
+      const result = { ...json(fixture.resultRef), [field]: null };
+      replace(fixture.resultRef, result);
+      const hash = createHash("sha256").update(scratch.read(path.join(fixture.root, fixture.resultRef))).digest("hex");
+      replace(fixture.authorityRef, { ...json(fixture.authorityRef), evidence_sha256: hash });
+      replace(fixture.runRef, { ...json(fixture.runRef), review_evidence_sha256: hash });
+      expect(() => validate({ ...fixture.approval, review_evidence_hash: hash })).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
+    });
+
+  it("preserves source-status byte and state binding through the internal observer", () => {
+    const source = JSON.parse(scratch.read(fixture.sourceStatus).toString("utf8"));
+    for (const changed of [{ ...source, state: "DONE" }, { ...source, extra: "changed bytes" }]) {
+      scratch.remove(fixture.sourceStatus);
+      scratch.write(fixture.sourceStatus, JSON.stringify(changed));
+      expect(() => validate()).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
+    }
+    const unavailable = { readSourceStatus: () => { throw new Error("Source unavailable"); } };
+    expect(() => validateDoneApproval(fixture.approval, fixture.repoKey, fixture.root, unavailable)).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
+  });
+
+  it("issues a bound human approval exactly once and rejects consumed approval replay", () => {
+    expect(() => issue({ ...fixture.request, arbitrary: "path" })).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
+    expect(issue()).toMatchObject({ approved: true, task_id: fixture.taskId });
+    const ref = `rpc-jobs/human-approvals/${fixture.taskId}/current.json`;
+    const current = json(ref);
+    expect(current).toMatchObject({ run_id: fixture.runId, canonical_goal_hash: fixture.goalHash,
+      authoritative_review_id: fixture.reviewId, review_evidence_hash: fixture.approval.review_evidence_hash, done_approved: true });
     expect(current.approval_nonce).toMatch(/^[a-f0-9]{64}$/);
-    expect(() => issueHumanDoneApproval(request, root)).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
-    write(`rpc-jobs/authoritative/${historical.task_id}.json`, { ...authority, review_job_id: "review-ffffffff-ffff-4fff-8fff-ffffffffffff" });
-    expect(() => validateDoneApproval(approval, "autonomous-semantic-accepted-fixture", root)).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
-    expect(() => currentApprovalCandidate(root)).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
-    // Even a previously issued local approval is unusable after the Review pointer moves.
-    expect(() => issueHumanDoneApproval(request, root)).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
-    expect(() => consumeHumanApproval(root, historical.task_id, approval)).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
-    write(`rpc-jobs/authoritative/${historical.task_id}.json`, authority);
-    consumeHumanApproval(root, historical.task_id, approval);
-    expect(() => consumeHumanApproval(root, historical.task_id, approval)).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
-    // Preserve the test copy for diagnosis; never touch the original audit result.
+    expect(() => issue()).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
+    consume();
+    expect(() => consume()).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
+    replace(ref, current); // Replaying the same human record cannot erase nonce consumption.
+    expect(() => consume()).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
+    expect(() => issue()).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
+  });
+
+  it("rejects superseded authority, including an already-issued human approval", () => {
+    issue();
+    const authority = json(fixture.authorityRef);
+    replace(fixture.authorityRef, { ...authority, review_job_id: "review-ffffffff-ffff-4fff-8fff-ffffffffffff" });
+    for (const action of [validate, candidate, issue, consume]) expect(() => action()).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
+    replace(fixture.authorityRef, authority);
+    consume();
+    expect(() => consume()).toThrow("AUTONOMOUS_APPROVAL_REJECTED");
   });
 });

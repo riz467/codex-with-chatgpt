@@ -1,0 +1,9 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": { "rootDir": "..", "noEmit": true },
+  "include": ["support/scratch.ts", "support/synthetic-review.ts", "support/synthetic-repos.ts", "support/powershell.ts", "scratch-containment.test.ts", "synthetic-review.test.ts", "repo-research.test.ts",
+    "autonomous-approval.test.ts", "review-structural.test.ts", "review-workspace-info.test.ts",
+    "local-gateway.test.ts", "mcp-integration.test.ts", "autonomous-mcp-approval.test.ts", "dashboard-approval.test.ts", "autonomous-gateway.test.ts",
+    "dashboard-verified-health.test.ts", "status-codex-interactive-worker.test.ts", "worker-exit-telemetry.test.ts", "dashboard-autonomous.test.ts"],
+  "exclude": []
+}
