@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "uid": 702,
+  "user": "ct702-review",
+  "listen": "127.0.0.1",
+  "port": 7020,
+  "database": "/var/lib/ct702-review/review.db",
+  "signingKey": "/var/lib/ct702-review/signing.key",
+  "provider": "deny-all",
+  "peerAuthorization": "deny-all",
+  "keyId": "REPLACE_WITH_REVIEWED_KEY_ID"
+}

@@ -1,0 +1,32 @@
+[Unit]
+Description=CT702 Independent Review Authority (deny-all composition)
+After=local-fs.target
+
+[Service]
+Type=simple
+User=ct702-review
+Group=ct702-review
+WorkingDirectory=/opt/ct702-review
+ExecStart=/opt/ct702-review/node --jitless /opt/ct702-review/runtime/review-service/production-cli.js serve
+Environment=NODE_OPTIONS=
+Environment=NODE_PATH=
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_UNIX
+ReadWritePaths=/var/lib/ct702-review
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
