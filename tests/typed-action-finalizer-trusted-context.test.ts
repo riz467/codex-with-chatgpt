@@ -242,7 +242,7 @@ describe("CT701 trusted authority core", () => {
     const f = await setup();
     await expect(f.provider.withFence(f.identity, async () => { f.setTime(now - 1); })).rejects.toThrow();
   });
-  it.each(["DROP TRIGGER reviews_no_reactivation", "CREATE TABLE unexpected(x)", "PRAGMA user_version=2", "PRAGMA application_id=0", "PRAGMA journal_mode=DELETE"])("rejects altered schema without repair: %s", async sql => {
+  it.each(["DROP TRIGGER reviews_no_reactivation", "CREATE TABLE unexpected(x)", "PRAGMA user_version=1", "PRAGMA application_id=0", "PRAGMA journal_mode=DELETE"])("rejects altered schema without repair: %s", async sql => {
     const f = await setup(); f.authority.close();
     const db = new DatabaseSync(f.authorityPath);
     try {

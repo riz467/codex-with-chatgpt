@@ -20,7 +20,8 @@ function requireAuthority(condition: unknown): asserts condition {
 /** Production-oriented core, deliberately not wired into production config.
  * Identity is only a lookup/binding constraint; no authority comes from HTTP or
  * a permit. CT702, request, policy, target and signed Human registration are
- * independent persisted records supplied exclusively by trusted host fixtures. */
+ * independent persisted records adopted by the host-installed ingestor (or
+ * explicitly seeded through the test/bootstrap seam). */
 export function createTrustedContextProvider(host: {
   store: TrustedContextStore; trustedHumanKeys: ReadonlyMap<string, KeyObject>; now?: () => number;
 }): TrustedContextProvider {
