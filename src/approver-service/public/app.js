@@ -12,29 +12,40 @@ const post = async (url, body) => {
 const parts = location.pathname.split('/');
 const mode = parts[1];
 const id = parts[2];
-if (mode === 'approve') {
-  const response = await fetch(`/api/approval-requests/${encodeURIComponent(id)}`);
+if (mode === 'approve' || mode === 'approve-typed-action') {
+  const typed = mode === 'approve-typed-action';
+  const requestRoute = typed ? '/api/typed-action-approval-requests' : '/api/approval-requests';
+  const authenticationRoute = typed ? '/api/webauthn/typed-action' : '/api/webauthn/authentication';
+  const identity = typed ? { approvalRequestId: id } : { request_id: id };
+  const response = await fetch(`${requestRoute}/${encodeURIComponent(id)}`);
   if (!response.ok) throw new Error('依頼が見つかりません');
   const { payload, state } = await response.json();
   // Use textContent, never render AI-supplied markup or a free-form goal.
   details.replaceChildren();
-  for (const [label, value] of [['Task ID', payload.task_id], ['Run ID', payload.run_id],
+  const fields = typed ? [
+    ['Action kind', payload.actionKind], ['Target ID', payload.targetId], ['Action ID', payload.actionId],
+    ['Attempt ID', payload.attemptId], ['Attempt sequence', payload.attemptSequence], ['Request hash', payload.requestHash],
+    ['Attempt hash', payload.attemptHash], ['Independent review evidence hash (依頼元の申告)', payload.independentReviewEvidenceHash],
+    ['Target generation', payload.targetGeneration], ['Policy SHA-256', payload.policySha256],
+    ['Maintenance window ID', payload.maintenanceWindowId], ['Approval expiry', payload.expiresAt],
+  ] : [['Task ID', payload.task_id], ['Run ID', payload.run_id],
     ['Review PASS (依頼元の申告・Approver側では独立検証なし)', payload.authoritative_review_id],
     ['Goal summary (SHA-256 digest; 原文は表示しません)', payload.canonical_goal_sha256],
     ['Review evidence SHA-256', payload.review_evidence_hash], ['Bundle manifest SHA-256', payload.bundle_manifest_sha256],
-    ['Approval expiry', payload.expires_at]]) {
+    ['Approval expiry', payload.expires_at]];
+  for (const [label, value] of fields) {
     const row = document.createElement('p'); row.textContent = `${label}: ${value}`; details.append(row);
   }
   action.hidden = state !== 'PENDING';
   action.addEventListener('click', async () => {
     action.disabled = true; error.textContent = '';
     try {
-      const { ceremony, options } = await post('/api/webauthn/authentication/options', { request_id: id });
+      const { ceremony, options } = await post(`${authenticationRoute}/options`, identity);
       const publicKey = { ...options, challenge: decode(options.challenge),
         allowCredentials: options.allowCredentials?.map(c => ({ ...c, id: decode(c.id) })) };
       const c = await navigator.credentials.get({ publicKey });
       if (!c) throw new Error('パスキー認証がキャンセルされました');
-      await post('/api/webauthn/authentication/verify', { request_id: id, ceremony, credential: { id: c.id,
+      await post(`${authenticationRoute}/verify`, { ...identity, ceremony, credential: { id: c.id,
         rawId: encode(c.rawId), type: c.type, response: { clientDataJSON: encode(c.response.clientDataJSON),
           authenticatorData: encode(c.response.authenticatorData), signature: encode(c.response.signature),
           userHandle: c.response.userHandle ? encode(c.response.userHandle) : null },

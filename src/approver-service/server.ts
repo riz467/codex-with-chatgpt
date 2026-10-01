@@ -7,6 +7,11 @@ import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthe
 import type { AuthenticationResponseJSON, RegistrationResponseJSON, AuthenticatorTransportFuture } from "@simplewebauthn/server";
 import { approvalRequestSchema, approvalSigningBytes, type ApprovalRequest, type SignedApproval } from "../human-approval/contract.js";
 import { ApproverStore } from "./storage.js";
+import { idSchema, timestampSchema, typedActionApprovalRequestSchema, typedActionApprovalSigningBytes, type TypedActionApprovalRequest, type SignedTypedActionApproval } from "../typed-action-approval/contract.js";
+import { validTimeRange, withinWindow } from "../typed-action-approval/verifier.js";
+
+/** CT-local trusted window lookup, never populated from HTTP approval proposals. */
+export type TypedActionWindowResolver = (id: string) => { startsAt: string; expiresAt: string } | null;
 
 const publicDir = fileURLToPath(new URL("./public/", import.meta.url));
 const idPattern = /^req-[0-9a-f]{32}$/;
@@ -30,7 +35,8 @@ const validTime = (request: ApprovalRequest, now: number) => {
 };
 
 /** Dependencies are injected for isolated tests; deployment loads the private key only inside the CT. */
-export function createApproverService(config: ApproverConfig, store: ApproverStore, privateKey: KeyObject, now = Date.now) {
+export function createApproverService(config: ApproverConfig, store: ApproverStore, privateKey: KeyObject, now = Date.now,
+  resolveTypedWindow: TypedActionWindowResolver = () => null) {
   if (privateKey.type !== "private" || privateKey.asymmetricKeyType !== "ed25519" ||
       approverConfigSchema.safeParse(config).success === false) throw new Error("INVALID_APPROVER_CONFIGURATION");
   const app = express(); app.disable("x-powered-by"); app.disable("trust proxy");
@@ -48,6 +54,71 @@ export function createApproverService(config: ApproverConfig, store: ApproverSto
     next();
   };
   const reject = (res: express.Response, code = 403) => res.status(code).json({ error: "REJECTED" });
+  const typedTime = (p: TypedActionApprovalRequest, clock: number) => {
+    try {
+      const window = resolveTypedWindow(p.maintenanceWindowId);
+      return validTimeRange(p.issuedAt, p.expiresAt, clock) && !!window &&
+        timestampSchema.safeParse(window.startsAt).success && timestampSchema.safeParse(window.expiresAt).success &&
+        withinWindow(p.issuedAt, p.expiresAt, window.startsAt, window.expiresAt, clock);
+    } catch { return false; }
+  };
+  app.get('/approve-typed-action/:id', (req, res) => {
+    const id = String(req.params.id);
+    if (!idSchema.safeParse(id).success || !store.typedRequest(id)) { reject(res, 404); return; }
+    res.sendFile(path.join(publicDir, 'index.html'));
+  });
+  app.post('/api/typed-action-approval-requests', json, (req, res) => {
+    const parsed = typedActionApprovalRequestSchema.safeParse(req.body), clock = now();
+    if (!parsed.success || !typedTime(parsed.data, clock)) { reject(res, 400); return; }
+    if (!store.createTypedRequest(parsed.data, clock)) { reject(res, 409); return; }
+    res.status(201).json({ approvalRequestId: parsed.data.approvalRequestId, state: 'PENDING' });
+  });
+  app.get('/api/typed-action-approval-requests/:id', (req, res) => {
+    const id = String(req.params.id), item = idSchema.safeParse(id).success ? store.typedRequest(id) : null;
+    if (!item) { reject(res, 404); return; }
+    res.json(item);
+  });
+  app.get('/api/typed-action-approval-evidence/:id', (req, res) => {
+    const id = String(req.params.id), item = idSchema.safeParse(id).success ? store.typedEvidence(id) : null;
+    if (!item) { reject(res, 404); return; }
+    res.json(item);
+  });
+  app.post('/api/webauthn/typed-action/options', browser, json, async (req, res) => {
+    if (!exactly(req.body, ['approvalRequestId']) || !idSchema.safeParse(req.body.approvalRequestId).success) { reject(res, 400); return; }
+    const id = req.body.approvalRequestId as string, item = store.typedRequest(id), credentials = store.credentials();
+    if (!item || item.state !== 'PENDING' || !typedTime(item.payload, now()) || !credentials.length) { reject(res); return; }
+    const options = await generateAuthenticationOptions({ rpID: config.rp_id, challenge: randomBytes(32), userVerification: 'required',
+      timeout: 120_000, allowCredentials: credentials.map(c => ({ id: c.id, transports: c.transports as AuthenticatorTransportFuture[] })) });
+    const ceremony = store.issueTypedAuthentication(id, options.challenge, now());
+    if (!ceremony) { reject(res); return; }
+    res.json({ ceremony, options });
+  });
+  app.post('/api/webauthn/typed-action/verify', browser, json, async (req, res) => {
+    if (!exactly(req.body, ['approvalRequestId', 'ceremony', 'credential']) || !idSchema.safeParse(req.body.approvalRequestId).success ||
+        typeof req.body.ceremony !== 'string') { reject(res, 400); return; }
+    const id = req.body.approvalRequestId as string;
+    const ceremony = store.consumeTypedAuthentication(id, req.body.ceremony, now());
+    const response = req.body.credential as AuthenticationResponseJSON | undefined;
+    const credential = response && typeof response.id === 'string' ? store.credential(response.id) : undefined;
+    if (!ceremony || !credential || !response) { reject(res); return; }
+    try {
+      const result = await verifyAuthenticationResponse({ response, expectedChallenge: ceremony.challenge,
+        expectedOrigin: config.origin, expectedRPID: config.rp_id, requireUserVerification: true,
+        credential: { id: credential.id, publicKey: Buffer.from(credential.publicKey, 'base64url'), counter: credential.counter,
+          transports: credential.transports as AuthenticatorTransportFuture[] } });
+      const clock = now(), item = store.typedRequest(id);
+      if (!result.verified || !result.authenticationInfo.userVerified || result.authenticationInfo.origin !== config.origin ||
+          result.authenticationInfo.rpID !== config.rp_id || !item || item.state !== 'PENDING' ||
+          !typedTime(item.payload, clock) || ceremony.expires <= clock) { reject(res); return; }
+      const approved = store.approveTyped(id, credential, result.authenticationInfo.newCounter, payload => {
+      const unsigned: SignedTypedActionApproval = { schemaVersion: 1, type: 'AI_WORKSPACE_TYPED_ACTION_APPROVAL', payload,
+        approverKeyId: config.key_id, signatureAlgorithm: 'Ed25519', signature: Buffer.alloc(64).toString('base64url') };
+      return { ...unsigned, signature: sign(null, typedActionApprovalSigningBytes(unsigned), privateKey).toString('base64url') };
+      }, clock);
+      if (!approved) { reject(res); return; }
+      res.status(201).json({ approved: true, approvalRequestId: id });
+    } catch { reject(res); }
+  });
   app.get("/health", (_req, res) => res.json({ ok: true, service: "ai-approver" }));
   app.get("/", (_req, res) => res.status(404).end());
   app.get("/app.js", (_req, res) => res.sendFile(path.join(publicDir, "app.js")));
