@@ -593,6 +593,8 @@ Human decisions remaining: **0**。追加質問なし。exact campaignの将来c
 | IR-11 | §13全6 PASSのisolated full E2E＋cutover kill (02/13/14) | real UV/systemd/transport、failure injection、break-glass、old chat/reboot/rollback rejection、same release binding |
 | IR-12 | source evidence bundle/decision provenance、operational exclusions/health/docs templates (01/15) | §1再現性、各include/exclude exact差分、pve-doc既存差分保全、将来正本反映scope/receipt |
 
+IR-01 progress（2026-10-01）: [offline core](bootstrap-campaign-core.md)にstrict fixture manifest/hash、local authorization receipt、SQLite journal/one-shot/DAG、§11準拠のrestart terminal判定と新bounded continuation、cancel/expiry/ceremony、cutover tombstone modelを実装。production subcontractsは閉じたversioned placeholder、operation catalogはoffline test専用。production adapters・独立anchor・live Passkey cutoverは未接続であり、IR-01のproduction freeze gateおよび他IRをclosedとしない。
+
 ### 17.12 PREFLIGHT_REQUIRED register — 11件
 
 全件OPEN/未実施。**freeze直前のfresh read-only live preflight結果**をsource rootへbindする。PR-01はローカル再現性、PR-10は既存test証拠の読取照合も含む。live read-only収集は将来の別作業として独立human-admin PCで行い、filtered AI inventoryだけではPASS不可。freeze時点とexecution直前に各security predicateを再検査、observationMaxAge=300秒。期限超過/差分はSTOPしfreezeし直す。長時間の調査は保存済み証拠を利用して最後にbounded fresh sweep、可能でなければTTLを自動緩和しない。
