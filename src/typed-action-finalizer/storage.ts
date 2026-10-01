@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import type { KeyObject } from "node:crypto";
 import { z } from "zod";
-import { canonicalJson, immutable, jtiSchema, parseStrict, sha256Schema, timestampSchema } from "../typed-action-approval/contract.js";
+import { canonicalJson, idSchema, immutable, jtiSchema, parseStrict, sha256Schema, timestampSchema } from "../typed-action-approval/contract.js";
 import { consumptionNamespaces, signedExecutionPermitSchema, type AtomicExecutionConsumptionStore,
   type ConsumptionKey, type ExecutionGateDecision, type SignedExecutionPermit } from "./contract.js";
 import { consumeExecutionPermit, verifyExecutionPermit } from "./verifier.js";
@@ -270,11 +270,26 @@ export class TypedActionFinalizerStore implements AtomicExecutionConsumptionStor
     return decision;
   }
   recordReconciliation(identity: PermitIdentity, category: ReconciliationCategory): void {
+    this.#recordReconciliation(identity, category, false);
+  }
+  /** Bridge reports require permanent consumption, unlike internal unknown-outcome quarantine. */
+  recordConsumedReconciliation(identity: PermitIdentity, category: ReconciliationCategory): void {
+    this.#recordReconciliation(identity, category, true);
+  }
+  #recordReconciliation(identity: PermitIdentity, category: ReconciliationCategory, requireConsumed: boolean): void {
     const ids = parseStrict(identitySchema, identity), reason = parseStrict(z.enum(reconciliationCategories), category);
     const timestamp = this.#timestamp();
     this.#transaction(() => {
       const row = this.#row(ids.permitJti);
       if (!row || row.attempt_hash !== ids.attemptHash) throw new Error("Unknown reconciliation identity");
+      if (requireConsumed && (row.state === "VERIFIED_NOT_CONSUMED" || ![
+        [consumptionNamespaces.humanApproval, row.human_jti],
+        [consumptionNamespaces.executionPermit, row.permit_jti],
+        [consumptionNamespaces.attempt, row.attempt_hash],
+      ].every(([namespace, value]) => this.#db.prepare(
+        "SELECT 1 FROM consumed_execution_identities WHERE namespace=? AND value=?").get(namespace, value)))) {
+        throw new Error("Unconsumed reconciliation identity");
+      }
       this.#db.prepare("UPDATE finalized_permits SET state='RECONCILE_REQUIRED',reconciliation_category=?,reconciled_at=?,updated_at=? WHERE permit_jti=?")
         .run(reason, timestamp, timestamp, ids.permitJti);
       this.#audit("RECONCILE_REQUIRED", { ...ids, humanJti: row.human_jti }, timestamp, reason);
@@ -300,6 +315,11 @@ export class TypedActionFinalizerStore implements AtomicExecutionConsumptionStor
     return immutable({ envelope, canonicalEnvelope: row.canonical_envelope, state: row.state,
       reconciliationCategory: row.reconciliation_category, reconciledAt: row.reconciled_at,
       executionVerifiedAt: row.execution_verified_at, createdAt: row.created_at, updatedAt: row.updated_at });
+  }
+  permitById(id: string) {
+    const row = this.#db.prepare("SELECT permit_jti FROM finalized_permits WHERE permit_id=?")
+      .get(parseStrict(idSchema, id)) as { permit_jti: string } | undefined;
+    return row ? this.permit(row.permit_jti) : null;
   }
   audit(identity: PermitIdentity): readonly LedgerAuditRow[] {
     const ids = parseStrict(identitySchema, identity);
