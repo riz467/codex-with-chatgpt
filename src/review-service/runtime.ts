@@ -59,6 +59,8 @@ export function createReviewRuntime(host: Readonly<{ store: ReviewStore; private
     store.saveSignature(reviewId, result.envelope);
   };
   return Object.freeze({
+    reserve: (input: unknown) => store.reservation(input),
+    resolveBarrier: (input: unknown) => store.resolveBarrier(input),
     async submit(input: unknown) {
       const candidate = freezeCandidate(input);
       const id = candidate.binding.reviewId;
@@ -99,11 +101,15 @@ export function createReviewRuntime(host: Readonly<{ store: ReviewStore; private
       store.mutate(() => {
         const history = store.history(t.reviewId), last = history.at(-1);
         const detail = canonicalJson(t);
-        if (last?.state === 'PUBLICATION_ACKNOWLEDGED' && last.detail === detail) return;
+        if (history.some(e => e.state === 'PUBLICATION_ACKNOWLEDGED' && e.detail === detail)) return;
         if (last?.seq !== t.expectedSequence || last.state !== 'SIGNED_PENDING_PUBLICATION') throw Error('STALE_PUBLICATION_ACK');
+        store.resolvePublication(t.reviewId, t.expectedSequence, t.acknowledgementId);
         store.event(t.reviewId, 'PUBLICATION_ACKNOWLEDGED', detail, t.acknowledgementId);
       });
-      return status({ reviewId: t.reviewId });
+      const s = status({ reviewId: t.reviewId });
+      const index = s.history.findIndex(e => e.state === 'PUBLICATION_ACKNOWLEDGED' && e.detail === canonicalJson(t));
+      const event = s.history[index];
+      return { ...s, history: s.history.slice(0, index + 1), sequence: event.seq, state: event.state, pendingInvalidation: null };
     },
     invalidate(input: unknown) {
       const t = parseStrict(transitionSchema, input);

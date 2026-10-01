@@ -50,7 +50,7 @@ describe("CT701 startup schema integrity", () => {
     "permits_no_delete", "permits_evidence_immutable", "permits_no_reactivation"];
   const tampering = [
     ["wrong application_id", "PRAGMA application_id=123"],
-    ["wrong user_version", "PRAGMA user_version=2"],
+    ["wrong user_version", "PRAGMA user_version=1"],
     ...["finalized_permits", "consumed_execution_identities", "finalizer_audit"].map(table => [`missing ${table}`, `DROP TABLE ${table}`]),
     ["extra user table", "CREATE TABLE unexpected (id INTEGER)"],
     ["internal-looking user table", "CREATE TABLE sqliteXauthority (id INTEGER)"],

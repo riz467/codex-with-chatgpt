@@ -3,13 +3,14 @@ import { limits } from './material.js';
 import type { ReviewRuntime } from './runtime.js';
 
 export const reviewPort = 7020;
-export type Peer = Readonly<{ identity: string; capabilities: readonly ('submit' | 'status' | 'evidence' | 'acknowledge' | 'invalidate' | 'acknowledgeInvalidation')[] }>;
+export type Peer = Readonly<{ identity: string; capabilities: readonly (keyof ReviewRuntime)[] }>;
 /** This callback must come from authenticated host composition, never a caller header or IP. */
 export function createReviewServer(runtime: ReviewRuntime, authenticate: (request: IncomingMessage) => Peer | null = () => null) {
   const routes = new Map<string, keyof ReviewRuntime>([
     ['/v1/reviews/submit', 'submit'], ['/v1/reviews/status', 'status'], ['/v1/reviews/evidence', 'evidence'],
     ['/v1/reviews/acknowledge', 'acknowledge'], ['/v1/reviews/invalidate', 'invalidate'],
     ['/v1/reviews/acknowledge-invalidation', 'acknowledgeInvalidation'],
+    ['/v1/reviews/reserve', 'reserve'], ['/v1/reviews/resolve-barrier', 'resolveBarrier'],
   ]);
   let active = 0;
   const server = createServer(async (req, res) => {

@@ -1,5 +1,19 @@
 # CT701 Production-oriented Trusted Authority Ingestor Core
 
+## IR-04 update
+
+The current protocol is documented in [CT701 currentness coordinator](ct701-currentness-coordinator.md).
+Authority schema is now **v3**. Host-installed `reviewPeer` makes
+`adoptIndependentReview` asynchronous: durable original publication intent,
+CT702 reservation, CT701 activation COMMIT, then exact publication ACK.
+Without that peer ingestion denies by default. The previous synchronous behavior
+below is available only with explicit `isolatedIngestion: true` for legacy offline
+validation fixtures and cannot establish production consume readiness.
+Revocation uses `admitReviewInvalidation` and exact ACK reconciliation; the live
+consume path requires a durable CT702 barrier. The remaining sections describe
+the underlying verification contract and the earlier v2 implementation history.
+IR-05 transport, IR-09 real adapters and live deployment remain unimplemented.
+
 This in-process core connects CT702 signed review evidence and CT700 signed Human
 Approval to the durable CT701 Trusted Context Store. Production activation is a
 separate task. No HTTP, network, caller paths, deployment configuration, production

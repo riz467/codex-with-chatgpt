@@ -1,5 +1,10 @@
 # CT702 Independent Review Authority — IR-03
 
+IR-04 adds durable publication/readiness reservations and exact resolution in
+schema **7023**. See [CT701 coordinator/barrier](ct701-currentness-coordinator.md).
+CT701 authority COMMIT is the only production activation/revocation linearization
+point. No CT702 status or signature alone establishes production currentness.
+
 Offline implementation. No deployment, generated production identity, provider credential,
 external model transfer, Passkey operation, or live unit activation is part of this change.
 
@@ -61,11 +66,11 @@ replacement fails; exact duplicate submissions retain the original signature/JTI
 
 ## SQLite chronology and reconciliation
 
-Schema version `7022` uses STRICT tables, WAL, FULL synchronous durability, foreign
+Schema version `7023` uses STRICT tables, WAL, FULL synchronous durability, foreign
 keys, trusted_schema=OFF and zero lock retry timeout. Startup compares the exact SQL
 schema with an in-memory reference, checks integrity/foreign keys, and checks every
 frozen material. Missing/old/unknown databases fail. Serving does not initialize,
-migrate, repair or retry uncertain writes. Previous IR-03 schema `7021` is rejected
+migrate, repair or retry uncertain writes. Previous IR-03 schemas `7021`/`7022` are rejected
 without migration; this correction requires a newly provisioned offline database.
 Offline provisioning can explicitly call
 `new ReviewStore(fixedDatabasePath,{initialize:true})` using the reviewed package;
@@ -105,7 +110,7 @@ replacement acceptance/publication and later descendants never erase them. Each 
 bounded status includes `pendingInvalidation: {kind,sequence,intentHash,replacementReviewId}`
 or null. The intent hash is SHA-256 of the exact canonical pending event detail; the
 sequence is that event's global sequence, not the predecessor's earlier publication sequence.
-IR-04 must track these obligations and build its own readiness/currentness barrier.
+IR-04 tracks these obligations in CT701 and implements the durable reservation barrier.
 INVALIDATED and SUPERSEDED are terminal; acknowledgement never reactivates them.
 History and signed evidence remain retrievable after invalidation or expiration.
 Retrieval is historical; consumers must apply freshness and CT701 currentness separately.
@@ -159,6 +164,8 @@ Only POST with `application/json` is accepted:
 | `/v1/reviews/acknowledge` | `{reviewId,expectedSequence,acknowledgementId}` |
 | `/v1/reviews/invalidate` | same sequence/operation fields |
 | `/v1/reviews/acknowledge-invalidation` | `{reviewId,expectedSequence,intentHash,replacementReviewId,acknowledgementId}` |
+| `/v1/reviews/reserve` | `{reviewId,expectedSequence,publicationSequence,materialRoot,evidenceHash,barrierId,kind}` |
+| `/v1/reviews/resolve-barrier` | `{reservation,resolutionId,disposition,handoffHash}` |
 
 Later-attempt submission initiates supersession. No currentness boolean, generic
 signer, shell, admin, SQL, filesystem or provider selector is exported over HTTP.
@@ -223,8 +230,9 @@ is used in the clean room. This is offline evidence, not IR-05 physical isolatio
 
 ## Explicit remaining boundaries
 
-* **IR-04:** CT701 trusted production request registry, remote currentness barrier,
-  durable activation/revocation linearization and Bridge handoff fence.
+* **IR-04 core implemented offline:** CT701 coordinator, durable reservations,
+  activation/revocation and one-shot Bridge fence. Host request/inventory provenance
+  remains a trusted injection seam; no production composition is deployed.
 * **IR-05:** authenticated mTLS/Tailscale ingress, reviewed peer identity binding
   and physical network/egress isolation. Loopback alone is not authentication.
 * **IR-07:** production one-shot key generation/pinning helper. This host only reads

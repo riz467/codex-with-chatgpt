@@ -1,5 +1,14 @@
 # CT701 Trusted Context Provider Core
 
+IR-04 adds the host-installed [currentness coordinator and readiness barrier](ct701-currentness-coordinator.md)
+and [Protected Execution Bridge](protected-execution-bridge.md). Current authority
+schema is **v3**, separate execution ledger **v2**. `withFence` still owns the
+authority lock through remote readiness, durable consume/token allocation, live
+handoff, custody receipt and barrier resolution. The historical core description
+below predates ingestion/coordinator support. Production configuration remains
+deny-all; transport authentication (IR-05), real adapters (IR-09) and live deployment
+are not implemented by this change.
+
 This phase supplies a host-owned provider through the existing
 `FinalizerServiceDependencies.provider` seam. Production configuration remains
 `deny-all`. No network ingestion, HTTP authority API, CT702 client, adapter,

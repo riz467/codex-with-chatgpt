@@ -4,8 +4,9 @@ import { canonicalJson } from '../typed-action-approval/contract.js';
 import { parseStrict } from '../typed-action-approval/contract.js';
 import { hashReviewedEvidence, independentlyVerifiedReviewSchema, reviewBindingFields } from '../typed-action-review/contract.js';
 import { freezeCandidate, hash, type Material } from './material.js';
+import { reservationSchema, resolutionSchema, type ReviewReservation } from './coordination.js';
 
-const tables = ['blobs', 'materials', 'reviews', 'events', 'results', 'signatures'];
+const tables = ['blobs', 'materials', 'reviews', 'events', 'results', 'signatures', 'reservations', 'resolutions'];
 function install(db: DatabaseSync) {
   db.exec(`
     CREATE TABLE blobs (digest TEXT PRIMARY KEY, bytes BLOB NOT NULL) STRICT;
@@ -17,7 +18,9 @@ function install(db: DatabaseSync) {
       detail TEXT NOT NULL, operation_id TEXT UNIQUE, UNIQUE(review_id,state)) STRICT;
     CREATE TABLE results (review_id TEXT PRIMARY KEY REFERENCES reviews(id), evidence_hash TEXT NOT NULL UNIQUE, body TEXT NOT NULL) STRICT;
     CREATE TABLE signatures (review_id TEXT PRIMARY KEY REFERENCES results(review_id), jti TEXT NOT NULL UNIQUE, body TEXT NOT NULL) STRICT;
-    PRAGMA user_version=7022;
+    CREATE TABLE reservations (id TEXT PRIMARY KEY, review_id TEXT NOT NULL REFERENCES reviews(id), body TEXT NOT NULL) STRICT;
+    CREATE TABLE resolutions (id TEXT PRIMARY KEY REFERENCES reservations(id), body TEXT NOT NULL) STRICT;
+    PRAGMA user_version=7023;
   `);
   for (const table of tables) for (const operation of ['UPDATE', 'DELETE']) db.exec(`CREATE TRIGGER ${table}_no_${operation.toLowerCase()} BEFORE ${operation} ON ${table} BEGIN SELECT RAISE(ABORT,'IMMUTABLE_HISTORY'); END;`);
   db.exec(`CREATE TRIGGER event_transition BEFORE INSERT ON events WHEN NOT COALESCE((
@@ -43,6 +46,12 @@ function install(db: DatabaseSync) {
   CREATE TRIGGER signature_phase BEFORE INSERT ON signatures WHEN
     (SELECT state FROM events WHERE review_id=NEW.review_id ORDER BY seq DESC LIMIT 1) != 'RESULT_DURABLE'
     BEGIN SELECT RAISE(ABORT,'RESULT_NOT_DURABLE'); END;`);
+  db.exec(`CREATE TRIGGER reservation_event_fence BEFORE INSERT ON events WHEN EXISTS
+    (SELECT 1 FROM reservations r WHERE NOT EXISTS(SELECT 1 FROM resolutions s WHERE s.id=r.id))
+    BEGIN SELECT RAISE(ABORT,'BARRIER_HELD'); END;`);
+  db.exec(`CREATE TRIGGER reservation_exclusive BEFORE INSERT ON reservations WHEN EXISTS
+    (SELECT 1 FROM reservations r WHERE NOT EXISTS(SELECT 1 FROM resolutions s WHERE s.id=r.id))
+    BEGIN SELECT RAISE(ABORT,'BARRIER_HELD'); END;`);
 }
 const schemaIdentity = (db: DatabaseSync) => canonicalJson(db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").all().map(r => ({ ...r })));
 const reference = new DatabaseSync(':memory:'); install(reference);
@@ -61,7 +70,7 @@ export class ReviewStore {
       if (options.initialize) { this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;'); install(this.db); }
       this.db.exec('PRAGMA synchronous=FULL;');
       const pragma = (name: string) => Object.values(this.db.prepare(`PRAGMA ${name}`).get()!)[0];
-      if (pragma('user_version') !== 7022 || pragma('journal_mode') !== 'wal' || pragma('synchronous') !== 2 || pragma('foreign_keys') !== 1 || pragma('trusted_schema') !== 0 || pragma('busy_timeout') !== 0 ||
+      if (pragma('user_version') !== 7023 || pragma('journal_mode') !== 'wal' || pragma('synchronous') !== 2 || pragma('foreign_keys') !== 1 || pragma('trusted_schema') !== 0 || pragma('busy_timeout') !== 0 ||
           schemaIdentity(this.db) !== expectedSchema || pragma('integrity_check') !== 'ok' || this.db.prepare('PRAGMA foreign_key_check').all().length) throw Error('DATABASE_SCHEMA_OR_INTEGRITY');
       for (const row of this.db.prepare('SELECT * FROM reviews').all()) {
         this.material(row as ReviewRow); this.result(row.id as string);
@@ -70,6 +79,46 @@ export class ReviewStore {
     } catch (e) { this.db.close(); throw e; }
   }
   private afterCommit?: () => void;
+  reservation(input: unknown) {
+    const r = parseStrict(reservationSchema, input);
+    return this.mutate(() => {
+      const old = this.db.prepare('SELECT body FROM reservations WHERE id=?').get(r.barrierId);
+      if (old) {
+        if (old.body !== canonicalJson(r)) throw Error('BARRIER_IDENTITY_MISMATCH');
+        return this.reservationReceipt(r);
+      }
+      if (this.db.prepare('SELECT 1 FROM reservations r WHERE NOT EXISTS(SELECT 1 FROM resolutions s WHERE s.id=r.id)').get()) throw Error('BARRIER_HELD');
+      const row = this.row(r.reviewId), history = this.history(r.reviewId), last = history.at(-1);
+      if (!row || row.root !== r.materialRoot || this.result(r.reviewId)?.snapshot.context.expectedReviewEvidenceHash !== r.evidenceHash ||
+        history.find(e => e.state === 'SIGNED_PENDING_PUBLICATION')?.seq !== r.publicationSequence ||
+        last?.seq !== r.expectedSequence || last.state !== (r.kind === 'READINESS' ? 'PUBLICATION_ACKNOWLEDGED' : 'SIGNED_PENDING_PUBLICATION')) throw Error('READINESS_REJECTED');
+      this.db.prepare('INSERT INTO reservations VALUES(?,?,?)').run(r.barrierId, r.reviewId, canonicalJson(r));
+      return this.reservationReceipt(r);
+    });
+  }
+  private reservationReceipt(r: ReviewReservation) {
+    return { ...r, state: this.db.prepare('SELECT 1 FROM resolutions WHERE id=?').get(r.barrierId) ? 'RESOLVED' as const : 'HELD' as const, pendingInvalidation: null };
+  }
+  resolveBarrier(input: unknown) {
+    const value = parseStrict(resolutionSchema, input), r = value.reservation;
+    if (r.kind !== 'READINESS' || (value.disposition === 'CUSTODY') !== (value.handoffHash !== null)) throw Error('INVALID_RESOLUTION');
+    return this.mutate(() => {
+      const old = this.db.prepare('SELECT body FROM reservations WHERE id=?').get(r.barrierId);
+      if (old?.body !== canonicalJson(r)) throw Error('BARRIER_IDENTITY_MISMATCH');
+      const resolved = this.db.prepare('SELECT body FROM resolutions WHERE id=?').get(r.barrierId);
+      if (resolved && resolved.body !== canonicalJson(value)) throw Error('RESOLUTION_CONFLICT');
+      if (!resolved) this.db.prepare('INSERT INTO resolutions VALUES(?,?)').run(r.barrierId, canonicalJson(value));
+      return { ...value, state: 'RESOLVED' as const };
+    });
+  }
+  /** Called inside the publication ACK transaction; release and event are atomic. */
+  resolvePublication(reviewId: string, expectedSequence: number, acknowledgementId: string) {
+    const row = this.db.prepare('SELECT body FROM reservations WHERE id=?').get(acknowledgementId);
+    if (!row) return; // Historical isolated IR-03 callers have no production activation capability.
+    const r = parseStrict(reservationSchema, JSON.parse(row.body as string));
+    if (r.kind !== 'PUBLICATION' || r.reviewId !== reviewId || r.expectedSequence !== expectedSequence) throw Error('PUBLICATION_IDENTITY_MISMATCH');
+    this.db.prepare('INSERT INTO resolutions VALUES(?,?)').run(r.barrierId, canonicalJson({ reviewId, expectedSequence, acknowledgementId }));
+  }
   available() { if (this.uncertain) throw Error('RECONCILE_REQUIRED'); }
   mutate<T>(fn: () => T): T {
     this.available(); this.db.exec('BEGIN IMMEDIATE');

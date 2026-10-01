@@ -1,5 +1,14 @@
 # CT701 isolated Finalizer HTTP service
 
+IR-04 updates the host-injected consume path to require sequence-bound durable
+readiness and an exact durable Bridge custody receipt. Missing readiness seams
+deny consumption. See [CT701 coordinator](ct701-currentness-coordinator.md) and
+[Protected Execution Bridge core](protected-execution-bridge.md). The handoff
+payload now includes the committed fencing token and full handoff identity;
+`void` acknowledgement is no longer accepted. The API remains isolated/deny-all
+without trusted composition; bearer headers are not production authority.
+IR-05 transport, IR-09 real adapters and live deployment remain outstanding.
+
 This v1 is **isolated loopback/test code**, not a production-exposed listener.
 The offline package and future host procedure are documented in
 [CT701 deployment](ct701-finalizer-deployment.md).

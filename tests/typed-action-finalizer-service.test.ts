@@ -8,6 +8,7 @@ import { createFinalizerService, type FinalizerServiceDependencies, type Trusted
 import { reconciliationCategories, TypedActionFinalizerStore } from "../src/typed-action-finalizer/storage.js";
 import { verifyExecutionPermit } from "../src/typed-action-finalizer/verifier.js";
 import { fixture, hash, jti, now, time } from "./typed-action-fixtures.js";
+import { hashHandoff, type Handoff } from '../src/protected-execution-bridge/contract.js';
 
 const config = {
   host: "127.0.0.1", port: 0, databasePath: "/var/lib/ct701-typed-action-finalizer/ledger.sqlite",
@@ -36,8 +37,13 @@ async function setup(start = true) {
       return { humanContext: f.input.humanContext, independentReview: f.input.independentReview, policyContext: f.input.policyContext };
     }),
     execution: vi.fn(() => { expect(fenceHeld).toBe(true); return structuredClone(f.executionContext); }),
+    readiness: (_identity, barrierId) => ({ reviewId: f.approval.payload.approvalRequestId, expectedSequence: 6, publicationSequence: 5,
+      materialRoot: 'a'.repeat(64), evidenceHash: f.executionContext.independentReviewEvidenceHash, barrierId, kind: 'READINESS' }),
+    acquireReadiness: async reservation => ({ ...reservation, state: 'HELD', pendingInvalidation: null }),
+    resolveReadiness: async resolution => ({ ...resolution, state: 'RESOLVED' }),
   };
-  const handoff = vi.fn(() => { expect(fenceHeld).toBe(true); });
+  const handoff = vi.fn((h: Handoff) => { expect(fenceHeld).toBe(true); return { handoffId: h.handoffId, handoffHash: hashHandoff(h),
+    attemptHash: h.attemptHash, targetId: h.targetId, fencingToken: h.fencingToken, state: 'CUSTODY_DURABLE' as const }; });
   const deps: FinalizerServiceDependencies = { privateKey: f.finalizer.privateKey, humanPublicKey: f.human.publicKey,
     databasePath: path.join(directory, "ledger.sqlite"), bridgeToken: jti(), provider, bridge: { handoff }, now: () => now };
   const services = new Set<ReturnType<typeof createFinalizerService>>();
@@ -190,6 +196,16 @@ describe("CT701 isolated HTTP service", () => {
     const f = await setup(), p = await f.issue(); f.handoff.mockImplementation(() => { throw new Error("handoff lost"); });
     expect((await f.request(route(p.id, "consume"), p.identity)).body.state).toBe("RECONCILE_REQUIRED");
     expect((await f.request(route(p.id, "consume"), p.identity)).body.executionMayStart).toBe(false);
+  });
+  it('outer authority fence failure after durable custody quarantines without redispatch', async () => {
+    const f = await setup(), p = await f.issue(), original = f.provider.withFence;
+    f.provider.withFence = async (identity, operation) => original(identity, async () => {
+      await operation(); throw Error('authority COMMIT outcome unknown');
+    });
+    expect((await f.request(route(p.id, 'consume'), p.identity)).body).toEqual({ state: 'RECONCILE_REQUIRED', executionMayStart: false });
+    expect(f.handoff).toHaveBeenCalledOnce();
+    await f.restart(); expect((await f.request(route(p.id, 'consume'), p.identity)).body.executionMayStart).toBe(false);
+    expect(f.handoff).toHaveBeenCalledOnce();
   });
   it("awaits asynchronous handoff under the fence and quarantines a lost bridge acknowledgement", async () => {
     const f = await setup(), p = await f.issue();

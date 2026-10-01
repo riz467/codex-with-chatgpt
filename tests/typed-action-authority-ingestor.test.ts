@@ -43,7 +43,7 @@ async function setup() {
   const host = { currentAuthority: vi.fn(() => snapshot), trustedReviewKeys: keys, trustedHumanKeys: f.humanKeys, now: () => clock };
   const file = path.join(path.dirname(f.file), "authority.sqlite");
   function open() {
-    const db = new DatabaseSync(file), store = new TrustedContextStore({ database: db, ingestor: host });
+    const db = new DatabaseSync(file), store = new TrustedContextStore({ database: db, ingestor: host, isolatedIngestion: true });
     cleanups.push(() => store.close());
     const api = createTrustedAuthorityIngestor(store);
     return { db, store, api, provider: createTrustedContextProvider({ store, trustedHumanKeys: f.humanKeys, now: () => clock }) };
@@ -199,7 +199,7 @@ describe("production Trusted Authority Ingestor", () => {
       const {DatabaseSync}=require('node:sqlite'); const {createPublicKey}=require('node:crypto');
       const {TrustedContextStore}=require(w.module);
       const db=new DatabaseSync(w.file);
-      const store=new TrustedContextStore({database:db,ingestor:{currentAuthority:()=>w.snapshot,
+      const store=new TrustedContextStore({database:db,isolatedIngestion:true,ingestor:{currentAuthority:()=>w.snapshot,
         trustedReviewKeys:new Map([['ct702-test',createPublicKey(w.key)]]),trustedHumanKeys:new Map(),now:()=>w.now}});
       parentPort.postMessage('ready'); Atomics.wait(new Int32Array(w.barrier),0,0);
       try {parentPort.postMessage(store.adoptIndependentReview(w.input).status);}

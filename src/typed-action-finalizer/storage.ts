@@ -1,10 +1,12 @@
 import { DatabaseSync } from "node:sqlite";
-import type { KeyObject } from "node:crypto";
+import { randomUUID, type KeyObject } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson, idSchema, immutable, jtiSchema, parseStrict, sha256Schema, timestampSchema } from "../typed-action-approval/contract.js";
 import { consumptionNamespaces, signedExecutionPermitSchema, type AtomicExecutionConsumptionStore,
-  type ConsumptionKey, type ExecutionGateDecision, type SignedExecutionPermit } from "./contract.js";
+  hashExecutionPermit, type ConsumptionKey, type ExecutionGateDecision, type SignedExecutionPermit } from "./contract.js";
 import { consumeExecutionPermit, verifyExecutionPermit } from "./verifier.js";
+import { reservationSchema, resolutionSchema, type ReviewReservation, type BarrierResolution } from '../review-service/coordination.js';
+import { handoffSchema, mintLiveHandoff, verifyCustody, type Handoff } from '../protected-execution-bridge/contract.js';
 
 export const reconciliationCategories = [
   "STORE_OUTCOME_UNKNOWN", "EXECUTION_TIMEOUT", "OUTPUT_LIMIT", "MUTATION_INDETERMINATE",
@@ -87,8 +89,16 @@ function createSchema(db: DatabaseSync): void {
           WHEN (OLD.state='RECONCILE_REQUIRED' AND NEW.state!='RECONCILE_REQUIRED')
             OR (OLD.state='CONSUMED_FOR_EXECUTION' AND NEW.state='VERIFIED_NOT_CONSUMED')
           BEGIN SELECT RAISE(ABORT,'terminal consumption'); END;
-        PRAGMA application_id=1413563953; PRAGMA user_version=1;
+        CREATE TABLE execution_barriers (attempt_hash TEXT PRIMARY KEY, barrier_id TEXT NOT NULL UNIQUE, body TEXT NOT NULL) STRICT;
+        CREATE TABLE barrier_resolutions (barrier_id TEXT PRIMARY KEY REFERENCES execution_barriers(barrier_id), body TEXT NOT NULL) STRICT;
+        CREATE TABLE barrier_resolution_acks (barrier_id TEXT PRIMARY KEY REFERENCES barrier_resolutions(barrier_id)) STRICT;
+        CREATE TABLE handoffs (token INTEGER PRIMARY KEY AUTOINCREMENT, handoff_id TEXT NOT NULL UNIQUE,
+          attempt_hash TEXT NOT NULL UNIQUE REFERENCES execution_barriers(attempt_hash), body TEXT NOT NULL) STRICT;
+        CREATE TABLE custody_receipts (handoff_id TEXT PRIMARY KEY REFERENCES handoffs(handoff_id), body TEXT NOT NULL) STRICT;
+        PRAGMA application_id=1413563953; PRAGMA user_version=2;
   `);
+  for (const table of ['execution_barriers', 'barrier_resolutions', 'barrier_resolution_acks', 'handoffs', 'custody_receipts'])
+    for (const op of ['UPDATE', 'DELETE']) db.exec(`CREATE TRIGGER ${table}_no_${op.toLowerCase()} BEFORE ${op} ON ${table} BEGIN SELECT RAISE(ABORT,'permanent protocol obligation'); END;`);
 }
 
 const authorityTables = ["consumed_execution_identities", "finalized_permits", "finalizer_audit"] as const;
@@ -128,7 +138,7 @@ export function verifySchema(db: DatabaseSync): void {
   exact("PRAGMA main.synchronous", [{ synchronous: 2 }]);
   exact("PRAGMA foreign_keys", [{ foreign_keys: 1 }]);
   exact("PRAGMA main.application_id", [{ application_id: 1413563953 }]);
-  exact("PRAGMA main.user_version", [{ user_version: 1 }]);
+  exact("PRAGMA main.user_version", [{ user_version: 2 }]);
   if (db.prepare("SELECT 1 FROM temp.sqlite_schema LIMIT 1").get()
     || schemaManifest(db) !== trustedSchemaManifest) throw new Error("Ledger schema integrity mismatch");
 }
@@ -145,7 +155,9 @@ export class TypedActionFinalizerStore implements AtomicExecutionConsumptionStor
     const databases = this.#db.prepare("PRAGMA database_list").all() as { name: string; file: string }[];
     if (databases.length !== 1 || databases[0].name !== "main" || !databases[0].file) throw new Error("Dedicated durable database required");
     this.#db.exec("PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL");
-    this.#db.exec("PRAGMA journal_mode=WAL");
+    if (!this.#db.prepare('SELECT 1 FROM sqlite_schema LIMIT 1').get() &&
+      this.#db.prepare('PRAGMA user_version').get()!.user_version === 0 && this.#db.prepare('PRAGMA application_id').get()!.application_id === 0)
+      this.#db.exec("PRAGMA journal_mode=WAL");
     this.#transaction(() => {
       const version = this.#db.prepare("PRAGMA user_version").get() as { user_version: number };
       const application = this.#db.prepare("PRAGMA application_id").get() as { application_id: number };
@@ -164,9 +176,11 @@ export class TypedActionFinalizerStore implements AtomicExecutionConsumptionStor
   }
   #transaction<T>(operation: () => T): T {
     this.#db.exec("BEGIN IMMEDIATE");
-    try { const result = operation(); this.#db.exec("COMMIT"); return result; }
+    let committing = false;
+    try { const result = operation(); committing = true; this.#db.exec("COMMIT"); return result; }
     catch (error) {
       try { this.#db.exec("ROLLBACK"); } catch { /* COMMIT may already have completed; never return success. */ }
+      if (committing) throw new LedgerOutcomeUnknownError(null, false);
       throw error;
     }
   }
@@ -247,6 +261,14 @@ export class TypedActionFinalizerStore implements AtomicExecutionConsumptionStor
         }
         this.#db.prepare("UPDATE finalized_permits SET state='CONSUMED_FOR_EXECUTION',updated_at=? WHERE permit_jti=?")
           .run(timestamp, ids.permitJti);
+        const barrier = this.#db.prepare('SELECT body FROM execution_barriers WHERE attempt_hash=?').get(ids.attemptHash);
+        if (barrier) {
+          const envelope = parseStrict(signedExecutionPermitSchema, JSON.parse(row.canonical_envelope));
+          const token = Number(this.#db.prepare('SELECT COALESCE(MAX(token),0)+1 n FROM handoffs').get()!.n);
+          const handoff = parseStrict(handoffSchema, { ...envelope.payload, handoffId: randomUUID(),
+            barrierId: JSON.parse(barrier.body as string).barrierId, fencingToken: token, permitEvidenceHash: hashExecutionPermit(envelope) });
+          this.#db.prepare('INSERT INTO handoffs VALUES(?,?,?,?)').run(token, handoff.handoffId, ids.attemptHash, canonicalJson(handoff));
+        }
         this.#db.exec("RELEASE execution_keys");
         this.#audit("CONSUMPTION_SUCCEEDED", ids, timestamp);
         return true;
@@ -271,6 +293,69 @@ export class TypedActionFinalizerStore implements AtomicExecutionConsumptionStor
   }
   recordReconciliation(identity: PermitIdentity, category: ReconciliationCategory): void {
     this.#recordReconciliation(identity, category, false);
+  }
+  beginReadiness(identity: PermitIdentity, input: ReviewReservation) {
+    const { attemptHash } = parseStrict(identitySchema, identity);
+    const r = parseStrict(reservationSchema, input);
+    if (r.kind !== 'READINESS') throw Error('READINESS_REQUIRED');
+    try { this.#transaction(() => {
+      // Never replace an unknown original reservation, including after restart.
+      if (this.#db.prepare('SELECT 1 FROM execution_barriers WHERE attempt_hash=?').get(attemptHash)) throw Error('RECONCILE_REQUIRED');
+      const permit = this.#row(identity.permitJti);
+      if (!permit || permit.attempt_hash !== attemptHash || permit.state !== 'VERIFIED_NOT_CONSUMED' ||
+        JSON.parse(permit.canonical_envelope).payload.independentReviewEvidenceHash !== r.evidenceHash) throw Error('BARRIER_PERMIT_MISMATCH');
+      this.#db.prepare('INSERT INTO execution_barriers VALUES(?,?,?)').run(parseStrict(sha256Schema, attemptHash), r.barrierId, canonicalJson(r));
+    }); } catch (e) { if (e instanceof LedgerOutcomeUnknownError) throw this.#unknown(identity); throw e; }
+  }
+  barrierObligation(attemptHash: string) {
+    const r = this.#db.prepare('SELECT body FROM execution_barriers WHERE attempt_hash=?').get(parseStrict(sha256Schema, attemptHash));
+    return r ? immutable(parseStrict(reservationSchema, JSON.parse(r.body as string))) : null;
+  }
+  async consumeForHandoff(input: unknown, freshContext: () => unknown) {
+    const envelope = parseStrict(signedExecutionPermitSchema, input);
+    if (this.#row(envelope.payload.jti)?.canonical_envelope !== canonicalJson(envelope)) throw Error('HANDOFF_PERMIT_MISMATCH');
+    if (!this.barrierObligation(envelope.payload.attemptHash)) throw Error('READINESS_REQUIRED');
+    const decision = await this.consumeForExecution(envelope, freshContext);
+    if (!decision.executionMayStart) return { decision, handoff: null };
+    const row = this.#db.prepare('SELECT body FROM handoffs WHERE attempt_hash=?').get(envelope.payload.attemptHash);
+    if (!row) throw new LedgerOutcomeUnknownError({ permitJti: envelope.payload.jti, attemptHash: envelope.payload.attemptHash }, false);
+    return { decision, handoff: mintLiveHandoff(parseStrict(handoffSchema, JSON.parse(row.body as string))) };
+  }
+  handoffEvidence(attemptHash: string): Handoff | null {
+    const row = this.#db.prepare('SELECT body FROM handoffs WHERE attempt_hash=?').get(parseStrict(sha256Schema, attemptHash));
+    return row ? immutable(parseStrict(handoffSchema, JSON.parse(row.body as string))) : null;
+  }
+  recordCustody(handoff: Handoff, input: unknown) {
+    const receipt = verifyCustody(input, handoff);
+    this.#transaction(() => {
+      if (canonicalJson(this.handoffEvidence(handoff.attemptHash)) !== canonicalJson(handoff)) throw Error('HANDOFF_IDENTITY_MISMATCH');
+      const old = this.#db.prepare('SELECT body FROM custody_receipts WHERE handoff_id=?').get(handoff.handoffId);
+      if (old && old.body !== canonicalJson(receipt)) throw Error('CUSTODY_CONFLICT');
+      if (!old) this.#db.prepare('INSERT INTO custody_receipts VALUES(?,?)').run(handoff.handoffId, canonicalJson(receipt));
+    });
+  }
+  recordBarrierResolution(input: BarrierResolution) {
+    const r = parseStrict(resolutionSchema, input);
+    this.#transaction(() => {
+      const barrier = this.#db.prepare('SELECT body FROM execution_barriers WHERE barrier_id=?').get(r.reservation.barrierId);
+      if (barrier?.body !== canonicalJson(r.reservation)) throw Error('BARRIER_IDENTITY_MISMATCH');
+      if (r.disposition === 'CUSTODY') {
+        const receipt = this.#db.prepare('SELECT body FROM custody_receipts WHERE handoff_id=(SELECT handoff_id FROM handoffs WHERE attempt_hash=(SELECT attempt_hash FROM execution_barriers WHERE barrier_id=?))').get(r.reservation.barrierId);
+        if (!receipt || JSON.parse(receipt.body as string).handoffHash !== r.handoffHash) throw Error('DURABLE_CUSTODY_REQUIRED');
+      } else if (this.#db.prepare('SELECT 1 FROM handoffs WHERE attempt_hash=(SELECT attempt_hash FROM execution_barriers WHERE barrier_id=?)').get(r.reservation.barrierId)) throw Error('CUSTODY_RECONCILIATION_REQUIRED');
+      if (r.disposition === 'ABANDONED' && this.#db.prepare('SELECT 1 FROM consumed_execution_identities WHERE namespace=? AND value=(SELECT attempt_hash FROM execution_barriers WHERE barrier_id=?)')
+        .get(consumptionNamespaces.attempt, r.reservation.barrierId)) throw Error('CONSUMED_BARRIER_CANNOT_BE_ABANDONED');
+      const old = this.#db.prepare('SELECT body FROM barrier_resolutions WHERE barrier_id=?').get(r.reservation.barrierId);
+      if (old && old.body !== canonicalJson(r)) throw Error('RESOLUTION_CONFLICT');
+      if (!old) this.#db.prepare('INSERT INTO barrier_resolutions VALUES(?,?)').run(r.reservation.barrierId, canonicalJson(r));
+    });
+  }
+  barrierResolution(barrierId: string): BarrierResolution | null {
+    const row = this.#db.prepare('SELECT body FROM barrier_resolutions WHERE barrier_id=?').get(barrierId);
+    return row ? immutable(parseStrict(resolutionSchema, JSON.parse(row.body as string))) : null;
+  }
+  acknowledgeBarrierResolution(barrierId: string) {
+    this.#transaction(() => { this.#db.prepare('INSERT OR IGNORE INTO barrier_resolution_acks VALUES(?)').run(barrierId); });
   }
   /** Bridge reports require permanent consumption, unlike internal unknown-outcome quarantine. */
   recordConsumedReconciliation(identity: PermitIdentity, category: ReconciliationCategory): void {

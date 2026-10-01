@@ -1,10 +1,14 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
-import { actionBindingShape, canonicalJson, hashTypedActionApproval, idSchema, immutable, parseStrict,
+import { actionBindingShape, canonicalJson, domainHash, hashTypedActionApproval, idSchema, immutable, parseStrict,
   sha256Schema, signedTypedActionApprovalSchema } from "../typed-action-approval/contract.js";
-import { parseHumanRegistration, prepareReviewAdoption, verifyHumanRegistration, type AuthorityIngestorHost } from "./authority-ingestor-validation.js";
+import { parseHumanRegistration, parseReviewAdoption, prepareReviewAdoption, verifyHumanRegistration, type AuthorityIngestorHost } from "./authority-ingestor-validation.js";
 import { policyAuthoritySchema, requestAuthoritySchema, reviewAuthoritySchema } from "./authority-records.js";
+import { type ReviewCoordinatorPeer, type ReviewReservation } from "../review-service/coordination.js";
+import { checkHistory, checkReservation, reviewEvidenceSchema, reviewStatusSchema } from "./coordination-validation.js";
+import { hash } from "../review-service/material.js";
 export { policyAuthoritySchema, requestAuthoritySchema, reviewAuthoritySchema } from "./authority-records.js";
 
 /** Reserved for a future reviewed host bootstrap. This module never opens paths.
@@ -36,7 +40,11 @@ function createSchema(db: DatabaseSync) {
       WHEN NEW.target_id!=OLD.target_id OR NEW.generation<=OLD.generation BEGIN SELECT RAISE(ABORT,'monotonic generation'); END;
     CREATE TRIGGER targets_insert_revision AFTER INSERT ON targets BEGIN UPDATE authority_revision SET revision=revision+1 WHERE id=1; END;
     CREATE TRIGGER targets_update_revision AFTER UPDATE ON targets BEGIN UPDATE authority_revision SET revision=revision+1 WHERE id=1; END;
-    PRAGMA application_id=1413563954; PRAGMA user_version=2;
+    PRAGMA application_id=1413563954; PRAGMA user_version=3;
+    CREATE TABLE coordination_intents (id TEXT PRIMARY KEY, review_id TEXT NOT NULL, kind TEXT NOT NULL,
+      body TEXT NOT NULL, UNIQUE(review_id,kind)) STRICT;
+    CREATE TABLE coordination_commits (id TEXT PRIMARY KEY REFERENCES coordination_intents(id), body TEXT NOT NULL) STRICT;
+    CREATE TABLE coordination_acks (id TEXT PRIMARY KEY REFERENCES coordination_commits(id), body TEXT NOT NULL) STRICT;
     CREATE TABLE review_adoptions (attempt_hash TEXT PRIMARY KEY, review_id TEXT NOT NULL UNIQUE,
       review_jti TEXT NOT NULL UNIQUE, evidence_hash TEXT NOT NULL UNIQUE, envelope_hash TEXT NOT NULL UNIQUE) STRICT;
     CREATE TABLE human_registrations (evidence_hash TEXT PRIMARY KEY, human_jti TEXT NOT NULL UNIQUE) STRICT;
@@ -54,7 +62,7 @@ function createSchema(db: DatabaseSync) {
       CREATE TRIGGER ${table}_update_revision AFTER UPDATE ON ${table} BEGIN UPDATE authority_revision SET revision=revision+1 WHERE id=1; END;
     `);
   }
-  for (const table of ["review_adoptions", "human_registrations"]) {
+  for (const table of ["review_adoptions", "human_registrations", "coordination_intents", "coordination_commits", "coordination_acks"]) {
     db.exec(`
       CREATE TRIGGER ${table}_no_delete BEFORE DELETE ON ${table} BEGIN SELECT RAISE(ABORT,'permanent identity'); END;
       CREATE TRIGGER ${table}_immutable BEFORE UPDATE ON ${table} BEGIN SELECT RAISE(ABORT,'immutable identity'); END;
@@ -73,7 +81,7 @@ function verify(db: DatabaseSync) {
   const scalar = (pragma: string, expected: unknown) => {
     if (Object.values(db.prepare(pragma).get() ?? {})[0] !== expected) throw new Error("Authority schema integrity mismatch");
   };
-  scalar("PRAGMA main.application_id", 1413563954); scalar("PRAGMA main.user_version", 2);
+  scalar("PRAGMA main.application_id", 1413563954); scalar("PRAGMA main.user_version", 3);
   scalar("PRAGMA main.quick_check", "ok"); scalar("PRAGMA main.journal_mode", "wal");
   scalar("PRAGMA main.synchronous", 2); scalar("PRAGMA foreign_keys", 1);
   if (manifest(db) !== reference || db.prepare("SELECT 1 FROM temp.sqlite_schema LIMIT 1").get()) throw new Error("Authority schema integrity mismatch");
@@ -92,7 +100,11 @@ export class TrustedContextStore {
   #failed = false;
   #ingestor: AuthorityIngestorHost | undefined;
   #writing = false;
-  constructor(host: { database: DatabaseSync; ingestor?: AuthorityIngestorHost }) {
+  #peer?: ReviewCoordinatorPeer;
+  #isolatedIngestion: boolean;
+  constructor(host: { database: DatabaseSync; ingestor?: AuthorityIngestorHost; reviewPeer?: ReviewCoordinatorPeer; isolatedIngestion?: true }) {
+    this.#peer = host.reviewPeer;
+    this.#isolatedIngestion = host.isolatedIngestion === true;
     if (host.ingestor) {
       const source = host.ingestor;
       this.#ingestor = Object.freeze({ currentAuthority: source.currentAuthority.bind(source), now: source.now.bind(source),
@@ -169,24 +181,143 @@ export class TrustedContextStore {
   /** Production route: only lookup constraints and a strict signed CT702 envelope.
    * Host authority acquisition and verification happen AFTER BEGIN IMMEDIATE. */
   adoptIndependentReview(input: unknown) {
-    return this.#write(() => {
+    if (this.#peer) return this.#activate(input);
+    if (!this.#isolatedIngestion) throw Error('Coordinator peer unavailable');
+    return this.#write(() => this.#adopt(input));
+  }
+  #adopt(input: unknown) {
+    const value = prepareReviewAdoption(input, this.#host());
+    const old = this.#db.prepare("SELECT * FROM review_adoptions WHERE attempt_hash=?").get(value.request.attemptHash);
+    if (old && (old.review_id !== value.reviewId || old.review_jti !== value.jti
+      || old.evidence_hash !== value.reviewEvidenceHash || old.envelope_hash !== value.envelopeHash)) throw new Error("Review already adopted");
+    // Bootstrap rows cannot be promoted into production adoptions.
+    if (!old && this.#db.prepare("SELECT 1 FROM reviews WHERE attempt_hash=?").get(value.request.attemptHash)) throw new Error("Existing review authority");
+    const target = this.#db.prepare("SELECT generation FROM targets WHERE target_id=?").get(value.request.targetId);
+    if (target && target.generation !== value.generation) throw new Error("Target generation conflict");
+    if (!target) this.#db.prepare("INSERT INTO targets VALUES(?,?)").run(value.request.targetId, value.generation);
+    this.#adoptRecord("requests", value.request.attemptHash, value.request);
+    this.#adoptRecord("reviews", value.request.attemptHash, value.review);
+    this.#adoptRecord("policies", value.policy.policySha256, value.policy);
+    if (!old) this.#db.prepare("INSERT INTO review_adoptions VALUES(?,?,?,?,?)").run(value.request.attemptHash,
+      value.reviewId, value.jti, value.reviewEvidenceHash, value.envelopeHash);
+    return immutable({ status: old ? "already-adopted" as const : "adopted" as const,
+      attemptHash: value.request.attemptHash, envelopeHash: value.envelopeHash });
+  }
+  async #coordinatorWrite<T>(operation: () => Promise<T>): Promise<T> {
+    this.#ready();
+    if (this.#active || this.#writing) throw Error('Authority fence busy');
+    this.#db.exec('BEGIN IMMEDIATE'); this.#writing = true;
+    try {
+      verify(this.#db); const result = await operation(); verify(this.#db);
+      try { this.#db.exec('COMMIT'); } catch { this.#failed = true; throw Error('RECONCILE_REQUIRED'); }
+      return result;
+    } catch (error) { try { this.#db.exec('ROLLBACK'); } catch { this.#failed = true; } throw error; }
+    finally { this.#writing = false; }
+  }
+  #intent(reviewId: string, kind: string) {
+    const row = this.#db.prepare('SELECT id,body FROM coordination_intents WHERE review_id=? AND kind=?').get(reviewId, kind);
+    return row ? immutable({ id: row.id as string, body: JSON.parse(row.body as string) }) : undefined;
+  }
+  async #activate(input: unknown) {
+    input = immutable(parseReviewAdoption(input));
+    const peer = this.#peer!;
+    // Persist the exact remote operation BEFORE sending it. Crash/restart cannot
+    // manufacture a replacement UUID, even if the reservation response is lost.
+    const intent = immutable(await this.#coordinatorWrite(async () => {
       const value = prepareReviewAdoption(input, this.#host());
-      const old = this.#db.prepare("SELECT * FROM review_adoptions WHERE attempt_hash=?").get(value.request.attemptHash);
-      if (old && (old.review_id !== value.reviewId || old.review_jti !== value.jti
-        || old.evidence_hash !== value.reviewEvidenceHash || old.envelope_hash !== value.envelopeHash)) throw new Error("Review already adopted");
-      // Bootstrap rows cannot be promoted into production adoptions.
-      if (!old && this.#db.prepare("SELECT 1 FROM reviews WHERE attempt_hash=?").get(value.request.attemptHash)) throw new Error("Existing review authority");
-      const target = this.#db.prepare("SELECT generation FROM targets WHERE target_id=?").get(value.request.targetId);
-      if (target && target.generation !== value.generation) throw new Error("Target generation conflict");
-      if (!target) this.#db.prepare("INSERT INTO targets VALUES(?,?)").run(value.request.targetId, value.generation);
-      this.#adoptRecord("requests", value.request.attemptHash, value.request);
-      this.#adoptRecord("reviews", value.request.attemptHash, value.review);
-      this.#adoptRecord("policies", value.policy.policySha256, value.policy);
-      if (!old) this.#db.prepare("INSERT INTO review_adoptions VALUES(?,?,?,?,?)").run(value.request.attemptHash,
-        value.reviewId, value.jti, value.reviewEvidenceHash, value.envelopeHash);
-      return immutable({ status: old ? "already-adopted" as const : "adopted" as const,
-        attemptHash: value.request.attemptHash, envelopeHash: value.envelopeHash });
+      const old = this.#intent(value.reviewId, 'PUBLICATION');
+      if (old) {
+        if (old.body.envelopeHash !== value.envelopeHash) throw Error('PUBLICATION_CONFLICT');
+        if (this.#db.prepare('SELECT 1 FROM coordination_commits WHERE id=?').get(old.id)) this.#readCurrent('reviews', value.request.attemptHash, reviewAuthoritySchema);
+        return old;
+      }
+      for (const r of this.#db.prepare("SELECT attempt_hash,body FROM reviews WHERE state='current'").all()) {
+        if (r.attempt_hash !== value.request.attemptHash && JSON.parse(r.body as string).targetId === value.request.targetId) throw Error('PREDECESSOR_REVOCATION_REQUIRED');
+      }
+      const evidence = parseStrict(reviewEvidenceSchema, await peer.evidence({ reviewId: value.reviewId }));
+      checkHistory(evidence);
+      if (evidence.reviewId !== value.reviewId || evidence.state !== 'SIGNED_PENDING_PUBLICATION' || evidence.history.length !== 5 ||
+        evidence.history[1].detail !== evidence.materialRoot || evidence.history[3].detail !== value.reviewEvidenceHash ||
+        !evidence.envelope || canonicalJson(evidence.envelope) !== canonicalJson((input as { evidence: unknown }).evidence) || evidence.pendingInvalidation) throw Error('PUBLICATION_REJECTED');
+      const id = randomUUID();
+      const reservation: ReviewReservation = { reviewId: value.reviewId, expectedSequence: evidence.sequence,
+        publicationSequence: evidence.sequence, materialRoot: evidence.materialRoot, evidenceHash: value.reviewEvidenceHash,
+        barrierId: id, kind: 'PUBLICATION' };
+      const body = { reservation, envelopeHash: value.envelopeHash, attemptHash: value.request.attemptHash };
+      this.#db.prepare('INSERT INTO coordination_intents VALUES(?,?,?,?)').run(id, value.reviewId, 'PUBLICATION', canonicalJson(body));
+      return { id, body };
+    }));
+    await this.#coordinatorWrite(async () => {
+      if (this.#db.prepare('SELECT 1 FROM coordination_commits WHERE id=?').get(intent.id)) return;
+      const value = prepareReviewAdoption(input, this.#host());
+      // A replacement cannot activate until predecessor production revocation.
+      for (const r of this.#db.prepare("SELECT attempt_hash,body FROM reviews WHERE state='current'").all()) {
+        if (r.attempt_hash !== value.request.attemptHash && JSON.parse(r.body as string).targetId === value.request.targetId) throw Error('PREDECESSOR_REVOCATION_REQUIRED');
+      }
+      checkReservation(await peer.reserve(intent.body.reservation), intent.body.reservation);
+      this.#adopt(input);
+      this.#db.prepare('INSERT INTO coordination_commits VALUES(?,?)').run(intent.id, canonicalJson({ state: 'ACTIVE', ...intent.body }));
     });
+    await this.reconcileReviewAcknowledgement(intent.body.reservation.reviewId, 'PUBLICATION');
+    return immutable({ status: 'adopted' as const, attemptHash: intent.body.attemptHash, envelopeHash: intent.body.envelopeHash });
+  }
+  async admitReviewInvalidation(reviewId: string) {
+    parseStrict(idSchema, reviewId);
+    if (!this.#peer) throw Error('Coordinator peer unavailable');
+    await this.#coordinatorWrite(async () => {
+      if (this.#intent(reviewId, 'REVOCATION')) return;
+      const publication = this.#intent(reviewId, 'PUBLICATION');
+      const ack = publication && this.#db.prepare('SELECT body FROM coordination_acks WHERE id=?').get(publication.id);
+      if (!publication || !ack) throw Error('PUBLICATION_ACK_RECONCILIATION_REQUIRED');
+      const previous = JSON.parse(ack.body as string);
+      const s = parseStrict(reviewEvidenceSchema, await this.#peer!.evidence({ reviewId })); checkHistory(s);
+      const pending = s.pendingInvalidation, event = s.history.at(-1)!;
+      if (s.reviewId !== reviewId || !pending || event.seq !== pending.sequence || event.state !== pending.kind ||
+        s.history.length !== 7 || canonicalJson(s.history.slice(0, 6)) !== canonicalJson(previous.history) ||
+        s.materialRoot !== publication.body.reservation.materialRoot || !s.envelope ||
+        domainHash('AI_WORKSPACE_CT701_REVIEW_ADOPTION_ENVELOPE_V1', s.envelope) !== publication.body.envelopeHash ||
+        hash(event.detail) !== pending.intentHash || JSON.parse(event.detail).expectedSequence !== previous.sequence ||
+        JSON.parse(event.detail).replacementReviewId !== pending.replacementReviewId) throw Error('REVOCATION_SEQUENCE_MISMATCH');
+      const id = randomUUID(), body = { reviewId, expectedSequence: pending.sequence, intentHash: pending.intentHash,
+        replacementReviewId: pending.replacementReviewId, acknowledgementId: id };
+      this.#db.prepare('INSERT INTO coordination_intents VALUES(?,?,?,?)').run(id, reviewId, 'REVOCATION', canonicalJson(body));
+      const state = pending.kind === 'SUPERSESSION_PENDING' ? 'superseded' : 'stale';
+      this.#db.prepare("UPDATE reviews SET state=? WHERE attempt_hash=? AND state='current'").run(state, publication.body.attemptHash);
+      this.#db.prepare('INSERT INTO coordination_commits VALUES(?,?)').run(id, canonicalJson({ state, ...body }));
+    });
+    return this.reconcileReviewAcknowledgement(reviewId, 'REVOCATION');
+  }
+  async reconcileReviewAcknowledgement(reviewId: string, kind: 'PUBLICATION' | 'REVOCATION') {
+    if (!this.#peer) throw Error('Coordinator peer unavailable');
+    return this.#coordinatorWrite(async () => {
+      const intent = this.#intent(parseStrict(idSchema, reviewId), kind);
+      if (!intent || !this.#db.prepare('SELECT 1 FROM coordination_commits WHERE id=?').get(intent.id)) throw Error('NO_DURABLE_ADMISSION');
+      const old = this.#db.prepare('SELECT body FROM coordination_acks WHERE id=?').get(intent.id);
+      if (old) return JSON.parse(old.body as string);
+      const request = immutable(kind === 'PUBLICATION' ? { reviewId, expectedSequence: intent.body.reservation.publicationSequence, acknowledgementId: intent.id } : intent.body);
+      const s = parseStrict(reviewStatusSchema, await (kind === 'PUBLICATION' ? this.#peer!.acknowledge(request) : this.#peer!.acknowledgeInvalidation(request)));
+      checkHistory(s);
+      const last = s.history.at(-1)!;
+      const detail = JSON.parse(last.detail);
+      const publication = kind === 'PUBLICATION' ? intent : this.#intent(reviewId, 'PUBLICATION')!;
+      if (s.materialRoot !== publication.body.reservation.materialRoot || s.result !== 'PASS' ||
+        s.history[4].seq !== publication.body.reservation.publicationSequence ||
+        s.history[3].detail !== publication.body.reservation.evidenceHash) throw Error('ACKNOWLEDGEMENT_MISMATCH');
+      if (s.reviewId !== reviewId || (kind === 'PUBLICATION' ? s.state !== 'PUBLICATION_ACKNOWLEDGED' || s.history.length !== 6 :
+        s.state !== (request.replacementReviewId ? 'SUPERSEDED' : 'INVALIDATED') || s.history.length !== 8) ||
+        Object.entries(request).some(([key, value]) => detail[key] !== value) || s.sequence <= request.expectedSequence) throw Error('ACKNOWLEDGEMENT_MISMATCH');
+      this.#db.prepare('INSERT INTO coordination_acks VALUES(?,?)').run(intent.id, canonicalJson(s));
+      return s;
+    });
+  }
+  readinessReservation(attemptHash: string, barrierId: string): ReviewReservation {
+    this.assertFence();
+    const adoption = this.#db.prepare('SELECT review_id FROM review_adoptions WHERE attempt_hash=?').get(attemptHash);
+    const publication = adoption && this.#intent(adoption.review_id as string, 'PUBLICATION');
+    const ack = publication && this.#db.prepare('SELECT body FROM coordination_acks WHERE id=?').get(publication.id);
+    if (!publication || !ack || this.#intent(adoption!.review_id as string, 'REVOCATION')) throw Error('READINESS_UNAVAILABLE');
+    return { ...publication.body.reservation, kind: 'READINESS', barrierId,
+      expectedSequence: JSON.parse(ack.body as string).sequence };
   }
   /** Registration authenticates evidence; it never issues an execution permit. */
   registerHumanApproval(input: unknown) {

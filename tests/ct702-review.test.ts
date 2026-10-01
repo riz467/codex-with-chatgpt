@@ -130,7 +130,7 @@ describe('CT702 durable review chronology', () => {
     const invalid = f.runtime.acknowledgeInvalidation(receipt);
     expect(invalid.state).toBe('INVALIDATED'); expect(f.runtime.acknowledgeInvalidation(receipt)).toEqual(invalid);
     expect(f.runtime.invalidate(invalidation)).toEqual(invalid);
-    expect(() => f.runtime.acknowledge(ack)).toThrow();
+    expect(f.runtime.acknowledge(ack)).toEqual(acknowledged);
     expect((await f.runtime.submit(c)).state).toBe('INVALIDATED');
     const next = nextCandidate(c); const second = await f.runtime.submit(next);
     const last = nextCandidate(next); await f.runtime.submit(last);
@@ -422,7 +422,7 @@ describe('CT702 bounded provider and service', () => {
       } finally { await new Promise<void>(r => server.close(() => r())); }
     };
     await test(false); await test(true);
-    expect(Object.keys(f.runtime).sort()).toEqual(['acknowledge', 'acknowledgeInvalidation', 'evidence', 'invalidate', 'status', 'submit']);
+    expect(Object.keys(f.runtime).sort()).toEqual(['acknowledge', 'acknowledgeInvalidation', 'evidence', 'invalidate', 'reserve', 'resolveBarrier', 'status', 'submit']);
   });
 });
 

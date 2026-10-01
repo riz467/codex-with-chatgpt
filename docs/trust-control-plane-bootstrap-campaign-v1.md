@@ -299,13 +299,13 @@ CT分離後の最大の未実装gateは**署名検証と同時性の違い**。r
 v1推奨はCT701を **target/request/policy/review activation generationの唯一のcoordinator** とする新protocol:
 
 1. CT701がbounded candidateをfreezeし、trusted inventory/policyからrequest/attemptをauthorする。CT702はそのexact packetで独立reviewを実行・署名する。review runtime/profile/model credentialはCT702管理、AIから書換不能。AIが持参したPASSやsession IDを再署名しない。
-2. CT702のreviewはCT701 activation commit前は`PENDING_PUBLICATION`。CT701→CT702のauthenticated pollingで取得し、signature/integrity/chronologyを検証したうえでCT701所有snapshotへadoptする。ack後に初めてproduction-currentと表示する。
+2. CT702のreviewはCT701 activation commit前は`SIGNED_PENDING_PUBLICATION`。CT701→CT702のhost-owned peerで取得し、signature/integrity/chronologyを検証したうえでpublication reservationを取り、CT701所有snapshotへadoptする。production-currentの線形化点はCT701 durable COMMITであり、publication ACKはその後のdurable obligation。ACK未確定中のconsumeは禁止。transport authenticationはIR-05。
 3. CT702はreview authorでありproduction-currentnessの別writerではない。supersede/revokeはCT701のserialized admissionへ提出し、**CT701 authority DBのdurable COMMIT** をactivation/revocationの線形化点とする。CT702ローカルのpendingは「失効済み」を意味しない。新規consumeごとにCT701がsequence-bound readiness barrierをpollし、CT702は未提出invalidationがあれば拒否、応答後はそのbarrierの決着まで新publicationを保留する。CT701は失効要求を受けた時点で新規handoffを閉じ、既存handoffの確定/unknown記録と順序を付けてcommitする。応答喪失、sequence欠落、CT702不通はfail closed。「最後にpollできた」だけではdispatchしない。
 4. host compositionはCT701 authority DBの`BEGIN IMMEDIATE`と同じ所有権でcurrentAuthority snapshotを固定する。current generationの別ファイル・AI supplied boolean・独立更新remote DBをcoreへ直結しない。
 5. 既存authority-first→ledger lock順を保持し、consumeとBridge live handoffまでfenceを維持。Bridgeにはaction/target/attempt・fencing token・期限にbindした**live一回handoff**が必要。GETしたpermit/HTTP 200/cached JSONは実行capabilityではない。
 6. Bridgeはdurable attempt tombstone、target executorのexclusive fence、最新generation照合、receiptを持つ。切断/lease expiryだけでlockを解放して再実行しない。remote handoff acknowledgement喪失、consume後失敗、clock rollbackはRECONCILE_REQUIRED。
 
-HD-09=B。既存ingestorのauthority-first lock/host-owned snapshot条件に整合する単一coordinator設計で、distributed consensusは不要。CT702は独立内容判断を行い、CT701はその署名を偽造/変更できない。通信不能でも進むavailabilityは要求しない。remote admission/barrierとtarget fenceはIR-04で未実装、既存coreだけで実現済とはしない。失効はcommitより前の不可逆dispatchを取り消さない。CT702の局所時刻で即時失効する別authorityを後から導入するのはscope変更。concurrency/crash/partition試験で証明できるまでproduction packageを作動させない。
+HD-09=B。既存ingestorのauthority-first lock/host-owned snapshot条件に整合する単一coordinator設計で、distributed consensusは不要。CT702は独立内容判断を行い、CT701はその署名を偽造/変更できない。通信不能でも進むavailabilityは要求しない。remote admission/barrierとtarget fenceのoffline coreはIR-04 progress欄を参照。失効はcommitより前の不可逆dispatchを取り消さない。CT702の局所時刻で即時失効する別authorityを後から導入するのはscope変更。production transport/adapters/packageの別gateを満たすまでproduction packageを作動させない。
 
 ## 11. Campaign state machine
 
@@ -596,6 +596,8 @@ Human decisions remaining: **0**。追加質問なし。exact campaignの将来c
 IR-01 progress（2026-10-01）: [offline core](bootstrap-campaign-core.md)にstrict fixture manifest/hash、local authorization receipt、SQLite journal/one-shot/DAG、§11準拠のrestart terminal判定と新bounded continuation、cancel/expiry/ceremony、cutover tombstone modelを実装。production subcontractsは閉じたversioned placeholder、operation catalogはoffline test専用。production adapters・独立anchor・live Passkey cutoverは未接続であり、IR-01のproduction freeze gateおよび他IRをclosedとしない。
 
 IR-02 progress（2026-10-01）: [production-oriented CT700 package](ct700-production-approver.md)にHuman/Peer別app（loopback 48768/48769）、legacy route隔離、host-verifier default deny-all、immutable trusted presentation永続化・window/currentness再検証・trusted display、production schema fail-closed検査、runtime closure/manifestとcheckout外software-WebAuthn検証を実装。IR-04 remote currentnessおよびIR-05 authenticated ingress/mTLSは未接続。live配備・鍵生成・Human enrollment・7443実機検証は未実施で、production freeze/cutover完了とはしない。
+
+IR-04 progress（2026-10-01）: [CT701 coordinator/barrier](ct701-currentness-coordinator.md)と[Protected Execution Bridge core](protected-execution-bridge.md)をoffline実装。authority v3 / ledger v2 / CT702 7023 / Bridge v1、既存DBのmigration/repairなし。CT701 durable COMMITによるactivation/revocation、exact ACK reconciliation、CT702 durable publication/readiness reservation、authority-first live one-shot handoff、durable fencing token/attempt tombstone/target fence/custody receiptを追加。restart/partition/ack loss/worker競合のoffline testsを追加。IR-05 mTLS/Tailscale transport、IR-06 production artifact freeze、IR-07 key helper、IR-09 real adaptersは未実装。live deployment・production cutover・鍵/TLS/systemd/Passkey操作は未実施。IR registerのproduction freeze gateをclosedとはしない。
 
 ### 17.12 PREFLIGHT_REQUIRED register — 11件
 

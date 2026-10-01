@@ -12,6 +12,7 @@ const lookupSchema = z.object({ actionId: idSchema, targetId: idSchema, requestH
 export type AuthorityLookup = z.infer<typeof lookupSchema>;
 const adoptionSchema = z.object({ identity: lookupSchema, evidence: signedIndependentReviewSchema }).strict();
 const registrationSchema = z.object({ identity: lookupSchema, evidence: signedTypedActionApprovalSchema }).strict();
+export function parseReviewAdoption(input: unknown) { return parseStrict(adoptionSchema, input); }
 const hostSnapshotSchema = z.object({
   request: z.object({ current: z.literal(true), body: requestAuthoritySchema }).strict(),
   policy: z.object({ current: z.literal(true), body: policyAuthoritySchema }).strict(),

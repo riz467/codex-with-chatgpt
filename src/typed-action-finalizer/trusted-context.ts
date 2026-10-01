@@ -7,6 +7,7 @@ import { verifyTypedActionApproval, withinWindow, validTimeRange } from "../type
 import { trustedExecutionContextSchema, trustedIndependentReviewSchema, trustedPolicyContextSchema } from "./contract.js";
 import type { ContextIdentity, TrustedContextProvider } from "./server.js";
 import { TrustedContextStore } from "./trusted-context-storage.js";
+import type { ReviewCoordinatorPeer, ReviewReservation, BarrierResolution } from '../review-service/coordination.js';
 
 const identitySchema = z.object({
   actionId: idSchema, targetId: idSchema, requestHash: sha256Schema, attemptId: idSchema,
@@ -23,7 +24,7 @@ function requireAuthority(condition: unknown): asserts condition {
  * independent persisted records adopted by the host-installed ingestor (or
  * explicitly seeded through the test/bootstrap seam). */
 export function createTrustedContextProvider(host: {
-  store: TrustedContextStore; trustedHumanKeys: ReadonlyMap<string, KeyObject>; now?: () => number;
+  store: TrustedContextStore; trustedHumanKeys: ReadonlyMap<string, KeyObject>; now?: () => number; reviewPeer?: ReviewCoordinatorPeer;
 }): TrustedContextProvider {
   const scope = new AsyncLocalStorage<{ identity: ContextIdentity; open: boolean; lastTime: number }>();
   const now = host.now ?? Date.now;
@@ -91,5 +92,20 @@ export function createTrustedContextProvider(host: {
     },
     finalization(identity: ContextIdentity) { return contexts(identity).finalization; },
     execution(identity: ContextIdentity) { return contexts(identity).execution; },
+    readiness(identity: ContextIdentity, barrierId: string) {
+      contexts(identity);
+      if (!host.reviewPeer) throw Error('Review peer unavailable');
+      return host.store.readinessReservation(identity.attemptHash, barrierId);
+    },
+    async acquireReadiness(reservation: ReviewReservation) {
+      host.store.assertFence();
+      if (!host.reviewPeer) throw Error('Review peer unavailable');
+      const result = await host.reviewPeer.reserve(reservation); host.store.assertFence(); return result;
+    },
+    async resolveReadiness(resolution: BarrierResolution) {
+      host.store.assertFence();
+      if (!host.reviewPeer) throw Error('Review peer unavailable');
+      const result = await host.reviewPeer.resolveBarrier(resolution); host.store.assertFence(); return result;
+    },
   });
 }

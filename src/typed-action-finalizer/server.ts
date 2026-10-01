@@ -6,9 +6,12 @@ import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import { hashTypedActionApproval, immutable, idSchema, jtiSchema, keyIdSchema, parseStrict, sha256Schema } from "../typed-action-approval/contract.js";
-import { finalizerInputSchema, hashExecutionPermit, type ExecutionPermitPayload, type FinalizerInput } from "./contract.js";
+import { finalizerInputSchema, hashExecutionPermit, type FinalizerInput } from "./contract.js";
 import { createTypedActionPermitSigningKernel } from "./signer.js";
 import { LedgerOutcomeUnknownError, reconciliationCategories, TypedActionFinalizerStore } from "./storage.js";
+import type { ReviewReservation, BarrierResolution } from '../review-service/coordination.js';
+import type { Handoff, CustodyReceipt } from '../protected-execution-bridge/contract.js';
+import { consumeWithReadiness } from './execution-coordinator.js';
 
 /** v1 is isolated loopback only. These fixed paths are CT701-owned bootstrap
  * configuration, never HTTP selectors. Deployment/authentication is a later phase. */
@@ -36,11 +39,14 @@ export interface TrustedContextProvider {
   withFence<T>(identity: ContextIdentity, operation: () => Promise<T>): Promise<T>;
   finalization(identity: ContextIdentity): Pick<FinalizerInput, "humanContext" | "independentReview" | "policyContext">;
   execution(identity: ContextIdentity): unknown;
+  readiness?(identity: ContextIdentity, barrierId: string): ReviewReservation;
+  acquireReadiness?(reservation: ReviewReservation): Promise<unknown>;
+  resolveReadiness?(resolution: BarrierResolution): Promise<unknown>;
 }
 export interface IsolatedExecutionBridge {
   /** Live, in-process one-shot notification under the provider fence. No JSON
    * response/evidence can invoke this. v1 must not invoke any real adapter. */
-  handoff(permit: Readonly<ExecutionPermitPayload>): void | Promise<void>;
+  handoff(permit: Readonly<Handoff>): CustodyReceipt | Promise<CustodyReceipt>;
 }
 export type FinalizerServiceDependencies = {
   privateKey?: KeyObject; humanPublicKey?: KeyObject; databasePath?: string;
@@ -148,18 +154,22 @@ export function createFinalizerService(rawConfig: unknown, host: FinalizerServic
     }
     const identity = immutable({ actionId: p.actionId, targetId: p.targetId, requestHash: p.requestHash,
       attemptId: p.attemptId, attemptHash: p.attemptHash, humanApprovalJti: p.humanApprovalJti, humanApprovalEvidenceHash: p.humanApprovalEvidenceHash });
-    const decision = await provider.withFence(identity, async () => {
-      const result = await store.consumeForExecution(row.envelope, () => provider.execution(identity));
-      if (result.executionMayStart) {
-        try { await host.bridge!.handoff(result.permit); }
-        catch {
-          try { store.recordConsumedReconciliation(ids, "MUTATION_INDETERMINATE"); }
-          catch { throw new LedgerOutcomeUnknownError(ids, false); }
-          return { state: "RECONCILE_REQUIRED", executionMayStart: false };
-        }
-      }
-      return result;
-    });
+    let decision;
+    try {
+      decision = await provider.withFence(identity, async () => {
+        return consumeWithReadiness({ store, provider, bridge: host.bridge! }, row.envelope, identity);
+      });
+    } catch (error) {
+      if (error instanceof LedgerOutcomeUnknownError) throw error;
+      // The outer authority fence can fail after custody (expiry, poisoned fence,
+      // or unknown authority COMMIT). Never report a retryable pre-consume denial.
+      const persisted = store.permit(p.jti);
+      if (persisted?.state === 'CONSUMED_FOR_EXECUTION' || persisted?.state === 'RECONCILE_REQUIRED') {
+        try { store.recordReconciliation(ids, 'GATE_RECHECK_FAILED'); }
+        catch { throw new LedgerOutcomeUnknownError(ids, false); }
+        decision = { state: 'RECONCILE_REQUIRED', executionMayStart: false };
+      } else throw error;
+    }
     // Deliberately omit the gate's permit payload: this is a notification of a
     // completed live handoff, not a portable execution capability.
     res.status(decision.executionMayStart ? 200 : 409).json({ state: decision.state, executionMayStart: decision.executionMayStart });
