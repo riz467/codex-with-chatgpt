@@ -1,0 +1,8 @@
+{
+  "rp_id": "human-approver-700.tail2f618d.ts.net",
+  "origin": "https://human-approver-700.tail2f618d.ts.net",
+  "key_id": "REPLACE_WITH_REVIEWED_DOMAIN_KEY_ID",
+  "db_path": "/var/lib/ai-approver/approver.db",
+  "signing_key_path": "/var/lib/ai-approver/signing.key",
+  "port": 48768
+}

@@ -36,7 +36,9 @@ const validTime = (request: ApprovalRequest, now: number) => {
 
 /** Dependencies are injected for isolated tests; deployment loads the private key only inside the CT. */
 export function createApproverService(config: ApproverConfig, store: ApproverStore, privateKey: KeyObject, now = Date.now,
-  resolveTypedWindow: TypedActionWindowResolver = () => null) {
+  resolveTypedWindow: TypedActionWindowResolver = () => null, profile: 'historical' | 'human-production' = 'historical') {
+  const production = profile === 'human-production';
+  if (production !== (store.profile === 'production')) throw Error('STORE_PROFILE_MISMATCH');
   if (privateKey.type !== "private" || privateKey.asymmetricKeyType !== "ed25519" ||
       approverConfigSchema.safeParse(config).success === false) throw new Error("INVALID_APPROVER_CONFIGURATION");
   const app = express(); app.disable("x-powered-by"); app.disable("trust proxy");
@@ -56,6 +58,7 @@ export function createApproverService(config: ApproverConfig, store: ApproverSto
   const reject = (res: express.Response, code = 403) => res.status(code).json({ error: "REJECTED" });
   const typedTime = (p: TypedActionApprovalRequest, clock: number) => {
     try {
+      if (production) return !!store.currentPresentation(p.approvalRequestId, clock);
       const window = resolveTypedWindow(p.maintenanceWindowId);
       return validTimeRange(p.issuedAt, p.expiresAt, clock) && !!window &&
         timestampSchema.safeParse(window.startsAt).success && timestampSchema.safeParse(window.expiresAt).success &&
@@ -67,7 +70,7 @@ export function createApproverService(config: ApproverConfig, store: ApproverSto
     if (!idSchema.safeParse(id).success || !store.typedRequest(id)) { reject(res, 404); return; }
     res.sendFile(path.join(publicDir, 'index.html'));
   });
-  app.post('/api/typed-action-approval-requests', json, (req, res) => {
+  if (!production) app.post('/api/typed-action-approval-requests', json, (req, res) => {
     const parsed = typedActionApprovalRequestSchema.safeParse(req.body), clock = now();
     if (!parsed.success || !typedTime(parsed.data, clock)) { reject(res, 400); return; }
     if (!store.createTypedRequest(parsed.data, clock)) { reject(res, 409); return; }
@@ -76,16 +79,23 @@ export function createApproverService(config: ApproverConfig, store: ApproverSto
   app.get('/api/typed-action-approval-requests/:id', (req, res) => {
     const id = String(req.params.id), item = idSchema.safeParse(id).success ? store.typedRequest(id) : null;
     if (!item) { reject(res, 404); return; }
+    if (production) {
+      const record = store.presentation(id);
+      if (!record) { reject(res, 404); return; }
+      res.json({ payload: record.presentation.request, presentation: record.presentation,
+        state: item.state, current: !!store.currentPresentation(id, now()) }); return;
+    }
     res.json(item);
   });
-  app.get('/api/typed-action-approval-evidence/:id', (req, res) => {
+  if (!production) app.get('/api/typed-action-approval-evidence/:id', (req, res) => {
     const id = String(req.params.id), item = idSchema.safeParse(id).success ? store.typedEvidence(id) : null;
     if (!item) { reject(res, 404); return; }
     res.json(item);
   });
   app.post('/api/webauthn/typed-action/options', browser, json, async (req, res) => {
-    if (!exactly(req.body, ['approvalRequestId']) || !idSchema.safeParse(req.body.approvalRequestId).success) { reject(res, 400); return; }
+    if (!exactly(req.body, production ? ['approvalRequestId', 'presentationHash'] : ['approvalRequestId']) || !idSchema.safeParse(req.body.approvalRequestId).success) { reject(res, 400); return; }
     const id = req.body.approvalRequestId as string, item = store.typedRequest(id), credentials = store.credentials();
+    if (production && store.currentPresentation(id, now())?.presentationHash !== req.body.presentationHash) { reject(res); return; }
     if (!item || item.state !== 'PENDING' || !typedTime(item.payload, now()) || !credentials.length) { reject(res); return; }
     const options = await generateAuthenticationOptions({ rpID: config.rp_id, challenge: randomBytes(32), userVerification: 'required',
       timeout: 120_000, allowCredentials: credentials.map(c => ({ id: c.id, transports: c.transports as AuthenticatorTransportFuture[] })) });
@@ -94,10 +104,11 @@ export function createApproverService(config: ApproverConfig, store: ApproverSto
     res.json({ ceremony, options });
   });
   app.post('/api/webauthn/typed-action/verify', browser, json, async (req, res) => {
-    if (!exactly(req.body, ['approvalRequestId', 'ceremony', 'credential']) || !idSchema.safeParse(req.body.approvalRequestId).success ||
+    if (!exactly(req.body, production ? ['approvalRequestId', 'presentationHash', 'ceremony', 'credential'] : ['approvalRequestId', 'ceremony', 'credential']) || !idSchema.safeParse(req.body.approvalRequestId).success ||
         typeof req.body.ceremony !== 'string') { reject(res, 400); return; }
     const id = req.body.approvalRequestId as string;
     const ceremony = store.consumeTypedAuthentication(id, req.body.ceremony, now());
+    if (production && store.currentPresentation(id, now())?.presentationHash !== req.body.presentationHash) { reject(res); return; }
     const response = req.body.credential as AuthenticationResponseJSON | undefined;
     const credential = response && typeof response.id === 'string' ? store.credential(response.id) : undefined;
     if (!ceremony || !credential || !response) { reject(res); return; }
@@ -121,8 +132,8 @@ export function createApproverService(config: ApproverConfig, store: ApproverSto
   });
   app.get("/health", (_req, res) => res.json({ ok: true, service: "ai-approver" }));
   app.get("/", (_req, res) => res.status(404).end());
-  app.get("/app.js", (_req, res) => res.sendFile(path.join(publicDir, "app.js")));
-  app.get("/approve/:id", (req, res) => {
+  app.get("/app.js", (_req, res) => res.sendFile(path.join(publicDir, production ? 'production.js' : "app.js")));
+  if (!production) app.get("/approve/:id", (req, res) => {
     if (!idPattern.test(String(req.params.id)) || !store.request(String(req.params.id))) { reject(res, 404); return; }
     res.sendFile(path.join(publicDir, "index.html"));
   });
@@ -130,6 +141,7 @@ export function createApproverService(config: ApproverConfig, store: ApproverSto
     if (!store.enrollmentOpen(String(req.params.token), now())) { reject(res, 404); return; }
     res.sendFile(path.join(publicDir, "index.html"));
   });
+  if (!production) {
   app.get("/api/approval-requests/:id", (req, res) => {
     const id = String(req.params.id);
     const item = idPattern.test(id) ? store.request(id) : null;
@@ -183,6 +195,7 @@ export function createApproverService(config: ApproverConfig, store: ApproverSto
     if (!value) { reject(res, 404); return; }
     res.json(value);
   });
+  }
   // Enrollment is only possible with a secret, one-use token opened by a CT-local CLI.
   app.post("/enrollment/options", browser, json, async (req, res) => {
     if (!exactly(req.body, ["token"]) || typeof req.body.token !== "string" || !store.enrollmentOpen(req.body.token, now())) { reject(res); return; }

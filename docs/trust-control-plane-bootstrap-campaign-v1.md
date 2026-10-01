@@ -595,6 +595,8 @@ Human decisions remaining: **0**。追加質問なし。exact campaignの将来c
 
 IR-01 progress（2026-10-01）: [offline core](bootstrap-campaign-core.md)にstrict fixture manifest/hash、local authorization receipt、SQLite journal/one-shot/DAG、§11準拠のrestart terminal判定と新bounded continuation、cancel/expiry/ceremony、cutover tombstone modelを実装。production subcontractsは閉じたversioned placeholder、operation catalogはoffline test専用。production adapters・独立anchor・live Passkey cutoverは未接続であり、IR-01のproduction freeze gateおよび他IRをclosedとしない。
 
+IR-02 progress（2026-10-01）: [production-oriented CT700 package](ct700-production-approver.md)にHuman/Peer別app（loopback 48768/48769）、legacy route隔離、host-verifier default deny-all、immutable trusted presentation永続化・window/currentness再検証・trusted display、production schema fail-closed検査、runtime closure/manifestとcheckout外software-WebAuthn検証を実装。IR-04 remote currentnessおよびIR-05 authenticated ingress/mTLSは未接続。live配備・鍵生成・Human enrollment・7443実機検証は未実施で、production freeze/cutover完了とはしない。
+
 ### 17.12 PREFLIGHT_REQUIRED register — 11件
 
 全件OPEN/未実施。**freeze直前のfresh read-only live preflight結果**をsource rootへbindする。PR-01はローカル再現性、PR-10は既存test証拠の読取照合も含む。live read-only収集は将来の別作業として独立human-admin PCで行い、filtered AI inventoryだけではPASS不可。freeze時点とexecution直前に各security predicateを再検査、observationMaxAge=300秒。期限超過/差分はSTOPしfreezeし直す。長時間の調査は保存済み証拠を利用して最後にbounded fresh sweep、可能でなければTTLを自動緩和しない。

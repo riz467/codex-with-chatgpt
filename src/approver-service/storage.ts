@@ -1,8 +1,11 @@
 import { DatabaseSync } from "node:sqlite";
+import { existsSync } from 'node:fs';
 import { createHash, randomBytes } from "node:crypto";
 import type { ApprovalRequest, SignedApproval } from "../human-approval/contract.js";
 import { canonicalJson, parseStrict, typedActionApprovalRequestSchema, signedTypedActionApprovalSchema, type TypedActionApprovalRequest, type SignedTypedActionApproval } from "../typed-action-approval/contract.js";
 import { validTimeRange } from "../typed-action-approval/verifier.js";
+import { installProductionSchema, schemaIdentity } from './production-schema.js';
+import { parsePresentation, presentationCurrent, sameRequest, type TrustedTypedActionPresentation } from './presentation.js';
 
 export type Credential = { id: string; publicKey: string; counter: number; transports: string[]; enabled: boolean; revision?: number };
 type RequestRow = { payload: string; state: string; challenge: string | null; ceremony: string | null; challenge_expires: number | null };
@@ -11,10 +14,25 @@ const digest = (value: string) => createHash("sha256").update(value).digest("hex
 /** All mutations are local synchronous SQLite transactions; no request-controlled SQL. */
 export class ApproverStore {
   readonly db: DatabaseSync;
-  constructor(file: string) {
+  constructor(file: string, readonly profile: 'historical' | 'production' = 'historical') {
+    const existed = file !== ':memory:' && existsSync(file);
     this.db = new DatabaseSync(file);
     try {
     const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(r => r.name);
+    if (profile === 'production' && tables.length) {
+      const reference = new ApproverStore(':memory:');
+      try {
+        installProductionSchema(reference.db);
+        if (schemaIdentity(this.db) !== schemaIdentity(reference.db) || this.db.prepare('PRAGMA user_version').get()?.user_version !== 7001 ||
+            this.db.prepare('PRAGMA journal_mode').get()?.journal_mode !== 'wal' ||
+            this.db.prepare('PRAGMA quick_check').get()?.quick_check !== 'ok') throw Error('INVALID_PRODUCTION_APPROVER_DATABASE');
+        this.db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000');
+        if (this.db.prepare('PRAGMA foreign_key_check').all().length) throw Error('INVALID_PRODUCTION_APPROVER_DATABASE');
+      } finally { reference.close(); }
+      return;
+    }
+    if (profile === 'production' && (existed || this.db.prepare('PRAGMA user_version').get()?.user_version !== 0 ||
+        this.db.prepare('SELECT 1 FROM sqlite_master').get())) throw Error('INVALID_PRODUCTION_APPROVER_DATABASE');
     const legacy = ['webauthn_credentials', 'approval_requests', 'approval_evidence', 'consumed_jti', 'audit', 'enrollment_window', 'enrollment_challenges'];
     if (tables.length && (legacy.some(name => !tables.includes(name)) || tables.some(name => ![...legacy, 'typed_action_approval_requests', 'typed_action_approval_evidence'].includes(String(name))))) {
       throw new Error('FOREIGN_APPROVER_SCHEMA');
@@ -79,9 +97,55 @@ export class ApproverStore {
         approval_request_id,canonical_payload,jti,action_id,request_hash,attempt_hash,issued_at,expires_at
         ON typed_action_approval_requests BEGIN SELECT RAISE(ABORT,'IMMUTABLE_APPROVAL'); END;`);
     });
+    if (profile === 'production') this.transaction(() => installProductionSchema(this.db));
     } catch (error) { this.db.close(); throw error; }
   }
   close() { this.db.close(); }
+  registerPresentation(input: TrustedTypedActionPresentation, now: number): boolean {
+    if (this.profile !== 'production') return false;
+    try {
+      const p = parsePresentation(input);
+      if (!presentationCurrent(p, now)) return false;
+      return this.transaction(() => {
+        const existing = this.presentation(p.request.approvalRequestId);
+        if (existing) return existing.state === 'CURRENT' && sameRequest(existing.presentation, p);
+        const r = p.request;
+        if (this.db.prepare('SELECT 1 FROM consumed_jti WHERE jti=?').get(r.jti)) return false;
+        this.db.prepare(`INSERT INTO typed_action_approval_requests
+          (approval_request_id,canonical_payload,jti,action_id,request_hash,attempt_hash,issued_at,expires_at,state)
+          VALUES(?,?,?,?,?,?,?,?,'PENDING')`).run(r.approvalRequestId, canonicalJson(r), r.jti, r.actionId, r.requestHash, r.attemptHash, r.issuedAt, r.expiresAt);
+        this.db.prepare("INSERT INTO trusted_presentations VALUES(?,?,?,?,'CURRENT')")
+          .run(r.approvalRequestId, p.presentationId, p.presentationHash, canonicalJson(p));
+        this.audit('TRUSTED_PRESENTATION', r.approvalRequestId, 'CURRENT', now);
+        return true;
+      });
+    } catch { return false; }
+  }
+  presentation(id: string): { presentation: TrustedTypedActionPresentation; state: string } | null {
+    if (this.profile !== 'production') return null;
+    try {
+      const row = this.db.prepare('SELECT * FROM trusted_presentations WHERE approval_request_id=?').get(id);
+      if (!row) return null;
+      const p = parsePresentation(JSON.parse(String(row.body))), request = this.typedRequest(id);
+      if (!request || !sameRequest(request.payload, p.request) || canonicalJson(p) !== row.body ||
+          p.presentationId !== row.presentation_id || p.presentationHash !== row.presentation_hash) return null;
+      return { presentation: p, state: String(row.state) };
+    } catch { return null; }
+  }
+  currentPresentation(id: string, now: number): TrustedTypedActionPresentation | null {
+    const item = this.presentation(id);
+    return item?.state === 'CURRENT' && presentationCurrent(item.presentation, now) ? item.presentation : null;
+  }
+  /** Host-only monotonic invalidation seam; no HTTP setter or reactivation. */
+  invalidatePresentation(id: string, expectedHash: string, state: 'STALE' | 'SUPERSEDED', now: number): boolean {
+    if (this.profile !== 'production' || !['STALE', 'SUPERSEDED'].includes(state)) return false;
+    return this.transaction(() => {
+      const changed = this.db.prepare("UPDATE trusted_presentations SET state=? WHERE approval_request_id=? AND presentation_hash=? AND state='CURRENT'")
+        .run(state, id, expectedHash).changes;
+      if (changed) this.audit('PRESENTATION_INVALIDATION', id, state, now);
+      return changed === 1;
+    });
+  }
   private transaction<T>(action: () => T): T {
     this.db.exec("BEGIN IMMEDIATE");
     try { const result = action(); this.db.exec("COMMIT"); return result; }
@@ -197,6 +261,7 @@ export class ApproverStore {
     return row ? JSON.parse(row.envelope) as SignedApproval : null;
   }
   createTypedRequest(input: TypedActionApprovalRequest, now: number): boolean {
+    if (this.profile === 'production') return false;
     try {
       const p = parseStrict(typedActionApprovalRequestSchema, input);
       if (!validTimeRange(p.issuedAt, p.expiresAt, now)) return false;
@@ -223,6 +288,7 @@ export class ApproverStore {
   }
   issueTypedAuthentication(id: string, challenge: string, now: number): string | null {
     return this.transaction(() => {
+      if (this.profile === 'production' && !this.currentPresentation(id, now)) return null;
       const item = this.typedRequest(id);
       if (!item || item.state !== 'PENDING' || !validTimeRange(item.payload.issuedAt, item.payload.expiresAt, now)) return null;
       const ceremony = `typed-${randomBytes(32).toString('base64url')}`;
@@ -244,6 +310,7 @@ export class ApproverStore {
   approveTyped(id: string, credential: Credential, newCounter: number,
     issueEvidence: (payload: TypedActionApprovalRequest) => SignedTypedActionApproval, now: number): boolean {
     return this.transaction(() => {
+      if (this.profile === 'production' && !this.currentPresentation(id, now)) return false;
       const item = this.typedRequest(id);
       if (!item || item.state !== 'PENDING' || !validTimeRange(item.payload.issuedAt, item.payload.expiresAt, now) ||
           !Number.isSafeInteger(newCounter) || newCounter < 0 || ((credential.counter !== 0 || newCounter !== 0) && newCounter <= credential.counter) ||

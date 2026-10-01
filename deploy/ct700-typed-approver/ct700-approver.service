@@ -1,0 +1,32 @@
+[Unit]
+Description=CT700 Typed Action Human Approver (IR-02, peer deny-all)
+After=network.target
+
+[Service]
+Type=simple
+User=ai-approver
+Group=ai-approver
+WorkingDirectory=/opt/ct700-approver
+ExecStart=/usr/bin/node /opt/ct700-approver/runtime/approver-service/production-cli.js serve
+Restart=no
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ai-approver
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

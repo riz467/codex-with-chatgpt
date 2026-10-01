@@ -18,6 +18,8 @@
     "human-approver": "node dist/human-approver/server.js",
     "human-approver:dev": "tsx src/human-approver/server.ts",
     "approver:pack": "pnpm build && node scripts/pack-ai-approver.mjs",
+    "ct700:pack": "pnpm build && node scripts/pack-ct700-approver.mjs",
+    "ct700:verify-package": "node scripts/verify-ct700-approver-package.mjs",
     "finalizer:pack": "pnpm build && node scripts/pack-ct701-finalizer.mjs",
     "finalizer:verify-package": "node --jitless scripts/verify-ct701-package.mjs",
     "test": "vitest run",
