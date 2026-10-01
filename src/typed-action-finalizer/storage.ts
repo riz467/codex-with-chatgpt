@@ -119,7 +119,7 @@ const trustedSchemaManifest = (() => {
   finally { reference.close(); }
 })();
 
-function verifySchema(db: DatabaseSync): void {
+export function verifySchema(db: DatabaseSync): void {
   const exact = (sql: string, expected: unknown) => {
     if (canonicalJson(JSON.parse(JSON.stringify(db.prepare(sql).all()))) !== canonicalJson(expected)) throw new Error("Ledger schema integrity check failed");
   };

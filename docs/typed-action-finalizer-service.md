@@ -1,6 +1,8 @@
 # CT701 isolated Finalizer HTTP service
 
 This v1 is **isolated loopback/test code**, not a production-exposed listener.
+The offline package and future host procedure are documented in
+[CT701 deployment](ct701-finalizer-deployment.md).
 It performs no adapter execution. Deployment, mTLS/reverse proxy, Tailscale
 policy and the production Execution Bridge are separate phases.
 

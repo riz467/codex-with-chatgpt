@@ -1,0 +1,11 @@
+{
+  "host": "127.0.0.1",
+  "port": 7010,
+  "databasePath": "/var/lib/ct701-typed-action-finalizer/ledger.sqlite",
+  "signingKeyPath": "/etc/ct701-typed-action-finalizer/signing-key.pem",
+  "finalizerKeyId": "ct701-finalizer-v1",
+  "trustedHumanKeyPath": "/etc/ct701-typed-action-finalizer/ct700-public.pem",
+  "trustedHumanKeyId": "ct700-human-v1",
+  "bridgeTokenPath": "/etc/ct701-typed-action-finalizer/bridge-token",
+  "trustedContextProvider": { "kind": "deny-all" }
+}

@@ -1,0 +1,38 @@
+[Unit]
+Description=CT701 Typed Action Finalizer (fail-closed standalone)
+After=local-fs.target
+
+[Service]
+Type=simple
+User=ct701-finalizer
+Group=ct701-finalizer
+UMask=0077
+WorkingDirectory=/opt/ct701-typed-action-finalizer/current
+Environment=NODE_ENV=production
+ExecStartPre=/usr/bin/node --jitless /opt/ct701-typed-action-finalizer/current/runtime/typed-action-finalizer/deployment-cli.js startup-check
+ExecStart=/usr/bin/node --jitless /opt/ct701-typed-action-finalizer/current/runtime/typed-action-finalizer/cli.js /opt/ct701-typed-action-finalizer/current/config.json
+Restart=no
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressDeny=any
+IPAddressAllow=127.0.0.1/32
+ReadWritePaths=/var/lib/ct701-typed-action-finalizer
+
+[Install]
+WantedBy=multi-user.target
