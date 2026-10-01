@@ -2,7 +2,7 @@
 
 **設計草案 / NOT EXECUTABLE / NOT AUTHORIZED — 2026-10-01**
 
-本書は机上調査と設計のみ。実行可能なcampaign manifest、bootstrap script、承認証跡ではない。`HUMAN_DECISION_REQUIRED` が残る間は承認募集・実行不可。今回の依頼をbootstrap実行承認に転用しない。
+本書は机上調査と設計のみ。実行可能なcampaign manifest、bootstrap script、承認証跡ではない。2026-10-01 decision-resolution passと後続HumanのHD-13決定により旧HD 16件を **A=4 / B=11 / C=1 / D=0** に分離した（§17）。Human判断解消だけでは実行可能にならず、implementation・preflight・exact manifest authorizationの全gateを要求する。今回の依頼・custodian決定をbootstrap実行承認に転用しない。
 
 推奨は **AIがimmutable campaignを準備し、独立human-admin PCの固定executorが実行するhybrid**。CT701/702を新規候補、CT700を既存資源への明示的な追加配備対象、CT703をreservedとする。production mutationの全面Passkey化までを完了条件に含める。CT作成だけ、またはhealth-only service起動だけではCOMPLETEにならない。
 
@@ -12,7 +12,7 @@
 
 | 対象 | 調査時点 |
 | --- | --- |
-| `C:\work\codex-with-chatgpt` | branch `ai-workspace`、HEAD `3c6bbe6e1a6c88f7ae4675446f43b86dbf1db880` (`Add trusted authority ingestor`)、編集前working tree clean |
+| `C:\work\codex-with-chatgpt` | decision-resolution基準: branch `ai-workspace`、HEAD `8a9bef37eceddb5190afc297e4d596e33e61f002` (`Design trust control plane bootstrap campaign`)、編集前working tree clean。初回コード調査基準は `3c6bbe6e1a6c88f7ae4675446f43b86dbf1db880` |
 | `C:\work\pve-doc` | branch `main`、HEAD `6bb1b298fd2d3df9601989e38c9f4fab66ea8976`。下記4文書に既存変更、未追跡 `.ai/` あり。既存変更は保持 |
 
 `pve-doc` の読取根拠（このcloneと隣接する配置でのリンク）:
@@ -34,7 +34,17 @@
 | `security-ct700-tailnet-flow-candidates.md` | `b6b23426525c8b7af93f6a8daf307b685c436398c493b5cab81ff91e8a397857` |
 | `security-ct700-tailnet-policy-migration.md` | `77b4066ff4e72551df00b14e2f4850ea8ee69487d81c950a5fdada777c3bb828` |
 
-**HEADだけでは読んだ全内容を再現できない。** 将来のauthorization用releaseは、humanが既存差分の扱いを決めたcleanなpve-doc commitと必要証拠bundleを固定する。本書のhash記録を未承認差分の採用に使わない。この作業ではcommitしない。
+**HD-01=B: HEADをbase source、4差分を非実行dirty evidence bundleとしてfreezeする。別clean commitは不要。** 2026-10-01にdiff全体をread-only照合し、4 raw hashesは上表と一致、index差分なし、tracked差分は137 additions/45 deletionsと確認した。変更は9/28のv4選択的観測・2-PC membership・VPN/Exit KEEP・Funnel/selector設計履歴の補足/訂正であり、既にHEADにある9/30 verified先頭節を変更していない。古い本文中のCURRENT/PARTIAL/allow-allを9/30より優先しない。
+
+| 既存差分 | 分類 / campaignへの影響 |
+| --- | --- |
+| readonly-evidence-pack | 観測provenance/collector制約の履歴補足。live evidenceや実行payloadではない |
+| stage2a-plan | 旧allow-all/2-PC/tagの履歴訂正。9/30 PASSのscopeとDNS/inbound/lifecycle未確認を維持 |
+| tailnet-flow-candidates | KEEP 22/REMOVE 9/UNKNOWN 6とHuman VPN要求の根拠。未確認trafficを必要性の否定に使わない |
+| tailnet-policy-migration | category-level最小権限案とselector制約の補足。旧HuJSON skeletonは非実行資料、live policyとして採用不可 |
+| untracked `.ai/` | task/baseline/audit等の作業成果物。campaign source allowlist外、内容を実行・正本化しない。削除/変更不要 |
+
+HEAD単独で9/30 CURRENTとinventoryは引用できるが、今回読んだ根拠全体の再現には不足する。freeze時はbase full commit/tree ID、allowlisted 4文書のraw bytes/size/hash、HEADとの差分と各blob ID、由来・時点・CURRENT/HISTORY区分を含む非実行bundle rootを固定する。元dirty checkoutからscriptを起動せず、実行artifactは別のclean reviewed sourceからbuildする。将来のpve-doc方針反映はIR-12の文書化dependencyで、既存差分を先にcommitする必須条件ではない。hash一致は承認そのものではなく、bundleも最終manifest review対象。今回bundle生成・commit・pve-doc編集はしていない。
 
 ## 2. Current architectureと実装境界
 
@@ -70,10 +80,10 @@ CT700の現行packerは`approver-service`とlegacy `human-approval/contract`の�
 
 | 項目 | 既存方針との関係 | v1での扱い |
 | --- | --- | --- |
-| 一度のchat承認でmulti-stage実行 | CT700の過去手順は段階ごとの別human-admin承認・typed confirmation。namespace予約も個別allocation許可ではない | **方針拡張案**。旧手順を再実行/confirmation省略しない。新campaignにexact CT701/702 allocationとCT700追加stageを個別列挙し、one-shot modelの採用自体をhumanが承認してpve-docへ反映するまでBLOCKED |
+| 一度のchat承認でmulti-stage実行 | CT700の過去手順は段階ごとの別human-admin承認・typed confirmation。namespace予約も個別allocation許可ではない | **Human方針確定（HD-02=A）**。新campaignにexact CT701/702 allocationとCT700追加stageを列挙し、一回のhash-bound authorization対象にする。旧手順再実行なし。正本文書反映はIR-12、実際のauthorizationは将来の一回activation gate |
 | CT701→CT700 | 現行は2台のhuman PCのみ443許可。server/CTはapproval client除外 | **境界変更案**。CT701はhuman clientに追加せず、独立service-only ingressを追加する別policy差分として固定。未承認なら通信不可 |
 | CT701/702保護 | 現行tailnetはCT700のみexception | CT701/702 direct/LAN IPv4/IPv6をnormal destination setsから除外する拡張が必要。自動的な通常CT扱いは禁止 |
-| Tailnet joinの完全無人化 | CT700ではhuman interactive loginを採用、admin credentialはAI/CTに置かない | CT701/702のjoin方式は未決。現行モデルならHumanによるlogin/device確認が必要。一度の実行承認と操作上のhuman ceremonyを混同しない |
+| Tailnet joinの完全無人化 | CT700ではhuman interactive loginを採用、admin credentialはAI/CTに置かない | interactive loginを継承。HD-06のidentity観測はC、loginはHuman ceremony、policy rendererはIR-05。追加の方式選択は不要 |
 | CT700 app packageと旧設計のAI submit | 旧`ai-approver-ct.md`はAI直接submitを想定、pve-docはAI→CT700 deny | pve-doc優先。submitはCT701からの限定ingressへ移す。AI直接grantは作らない |
 | protected CTのupgrade/reboot backup | Coreの一部requestは`backup.snapshotId/hash/generation`必須、signerにはprivate-key-restorable image禁止 | 架空snapshotを入れない。非秘密checkpoint/rebuild evidenceを表現するversioned契約とadapterが必要。未実装ならprotected targetの該当actionをBLOCKED |
 
@@ -116,9 +126,9 @@ nonceはmanifest準備時に固定。receiptにはconversation/message ID（入�
 | `schemaVersion`, `kind` | `1`, `SecurityTrustBootstrapCampaign` |
 | `campaignId`, `authorizationNonce`, `trustDomainId` | 一意の非再利用ID。再試行campaignは別ID、`reconcilesCampaignId`で履歴連結 |
 | `validity` | `notBefore`, `authorizeBefore`, `expiresAt`、UTCミリ秒精度、maxClockSkew、observationMaxAge。具体値は承認前必須 |
-| `sources` | pve-doc/codex commit full hash、source tree identity、承認済evidence bundle root/hash。dirty execution checkout禁止 |
+| `sources` | pve-doc base/codex build commit full hash、source tree identity、§1の非実行dirty evidence bundle root/hash、policy decision provenance。dirty execution checkout禁止 |
 | `executor` | 固定artifact ID/hash、全payload hash、runtime/OS identity、host identity、operator identity、host-key pins、step catalog version/hash |
-| `policyAdoptions` | §3の差分ごとのhuman decision ID、正本文書commit、承認scope、before/after policy digest |
+| `policyAdoptions` | §3/17の既存Human decisionまたはtechnical resolution ID、source commit＋evidence root、承認scope、before/after policy digestまたは固定renderer/binding contract hash |
 | `ctManifests` | CT700 `existing-update-only`、CT701/702 `create-once`。§6の全field、base identity/absence条件とstage別期待値 |
 | `artifacts` | CT別package ID、manifest raw SHA256、file inventory root、archive hash/size、build provenance、lock/toolchain/runtime hash、unit/config hashes、OS template/deb hashes |
 | `network` | before policy version/hash、approved candidate hash、compiler/test evidence hash、selectors、all allowed flows、LAN/IPv6/exit exclusions、DNS/HTTPS/RP、join method、identity binding rules |
@@ -144,37 +154,38 @@ artifact hashは別途raw bytesに対するSHA-256。LF正規化が必要ならb
 
 private/public key、CT生成volume ID、Tailscale device ID等は事前に値を捏造しない。manifestには **生成先と検証predicateと一度だけのcapture規則** を固定し、結果はappend-only `CampaignBindingReceipt` に保存する。receiptはcampaign/hash、step、CT/node identity、key role/key ID、public fingerprint、previous receipt hashにbindする。これはmanifest編集ではない。
 
-ただし動的値を許すのは明示fieldのみ。node/IP/storage/resourceの代替候補やpackage version解決は出力ではなくscope変更。Tailscale policyが新IPを必要とする場合、承認済deterministic renderer＋固定device bindingで最終bytesを決める方式を別途検証するか、先にidentity準備を別campaignで完了しpolicy bytesを固定する。任意のpost-approval HuJSON編集は不可。v1は後者の**事前identity確定**を推奨し、完全一括joinを要求する場合はHUMAN_DECISION_REQUIRED。
+ただし動的値を許すのは明示fieldのみ。node/IP/storage/resourceの代替候補やpackage version解決は出力ではなくscope変更。HD-06解消案は **hash固定deterministic renderer＋typed device binding receipt** とする（IR-05）。未作成CTのdevice ID/IPをfresh preflightで得られると偽らない。freezeするのはrenderer、before-policy、固定role/CT/name/owner条件、出力slot、test predicates。join ceremony後に管理側inventoryとCT内観測の一致を一度captureし、そのslotだけを埋める。既存deviceのselector変更、normal集合への自動追加、owner変更、余分なgrantを拒否する。最終bytes/hashをreceiptへbind、compiler/union testsとbefore-state CAS後だけinstall可能。任意のpost-approval HuJSON編集は不可。renderer未実装ならIR-05でBLOCKEDとし、追加Human判断や別identity campaignを既定にしない。
 
 ## 6. CT manifests（提案、allocation未承認）
 
-台帳にCT701/702の実割当はない。以下はCT700 isolation patternを再導出する候補値であり、空き資源・安全性のlive確認ではない。`HUMAN_DECISION_REQUIRED` の値はcandidateを明示採用し、fresh evidenceを添えるまで固定manifestへ昇格できない。
+台帳にCT701/702の実割当はない。以下をHD-03=Bのtechnical candidateとして採用する。好みのnode/IP選択をHumanへ求めない。空き資源・安全性のlive確認ではなく、PR-02/03失敗時はSTOP。freeze前の再設計は可能だが、freeze後の代替node/IPへの自動変更は禁止。
 
 | field | CT701候補 | CT702候補 | 根拠・承認条件 |
 | --- | --- | --- | --- |
-| VMID / role | 701 / Approval Finalizer | 702 / Independent Review Authority | 正式reserved role。exact allocationはHUMAN_DECISION_REQUIRED |
-| node | `pve2` | `pve5` | HUMAN_DECISION_REQUIRED。pve2はCT700運用pattern、pve5はhost障害分離候補。free RAM/disk/CPU未観測、別nodeでもcluster-root共通trust |
-| hostname | `approval-finalizer-701` | `independent-review-702` | HUMAN_DECISION_REQUIRED。permanent unique名、DNS/tailnet collision検査 |
-| LAN IP | `192.168.0.53/24` | `192.168.0.54/24` | HUMAN_DECISION_REQUIRED。台帳`.53–.69`空きのみ。DHCP/static/ARP/全guest衝突と独立human確認が必要 |
-| gateway / bridge / VLAN | `.1` / `vmbr0` / untagged | `.1` / `vmbr0` / untagged | HUMAN_DECISION_REQUIRED。CT700 precedent、各node実bridgeとphysical ingress/egress設計を検証。自動VLAN変更なし |
-| CPU / RAM / swap | 1 vCPU / 1024 MiB / **0 MiB** | 2 vCPU / 2048 MiB / **0 MiB** | HUMAN_DECISION_REQUIRED。load未測定。reviewは外部model client前提、local modelを同居させない。secretのswap排出を避ける。host swap/core/hibernationも別途防止 |
-| rootfs | 8 GiB raw、専用protected storage | 16 GiB raw、専用protected storage | HUMAN_DECISION_REQUIRED。ledger/evidence retentionを容量算定、path/format実証 |
-| OS / runtime | Debian 13、Node 24.16.0を初期検証候補 | 同左 | HUMAN_DECISION_REQUIRED。CT700 template `debian-13-standard_13.6-1_amd64.tar.zst`の既知hashは§1リンク参照。将来releaseでversion/hashを再固定、古い値を無条件採用しない |
+| VMID / role | 701 / Approval Finalizer | 702 / Independent Review Authority | 正式reserved role。実allocation許可は将来のexact campaign承認内 |
+| node | `pve2` | `pve5` | pve2のCT700運用patternを再利用、pve5でreview host障害を分離。両16GBの記録。cluster-rootは共通TCB |
+| hostname | `approval-finalizer-701` | `independent-review-702` | role/VMIDから一意生成。PR-02でcollision検査 |
+| LAN IP | `192.168.0.53/24` | `192.168.0.54/24` | 台帳空き連番、DHCP `.101–.200`外。PR-02で予約/static/全guest/ARP照合、無応答だけを空き証明にしない |
+| gateway / bridge / VLAN | `192.168.0.1` / `vmbr0` / untagged | 同左 | CT700 precedent、PR-03でbridge実体/physical境界確認 |
+| CPU / RAM / swap | 1 vCPU / 1024 MiB / **0 MiB** | 2 vCPU / 2048 MiB / **0 MiB** | reviewは外部model client、local modelなし。IR-06のbounded load試験で検証、host pagingもPR-07で確認 |
+| rootfs | 8 GiB raw、専用protected storage | 16 GiB raw、専用protected storage | 初期予算: OS/release 4/6 GiB、state 2/6 GiB、余裕2/4 GiB。超過は停止し無断拡張なし |
+| OS / runtime | Debian 13、Node 24.16.0を初期検証候補 | 同左 | `debian-13-standard_13.6-1_amd64.tar.zst` precedent。exact supported versions/deb/hashはIR-06でrelease固定、PR-03で配置確認。Human入力ではない |
 | unprivileged / features | `1` / nesting=0, keyctl=0, other features disabled | 同左 | v1提案必須。TUN/device passthrough/shared mount/Docker/privileged化なし。実kernel compatibility失敗でSTOP |
-| protection / onboot / initial power | `1` / `0` / stopped | 同左 | v1提案必須。OS bootstrap時のCT startは別step。production自動起動はHUMAN_DECISION_REQUIRED、無断onboot変更なし |
-| Pool | `security-finalizer-701` | `security-review-702` | HUMAN_DECISION_REQUIRED。each CT only、AI user/token direct/inherited positive rights=0 |
-| storage | `finalizer-701-private`、pve2-only `rootdir` | `review-702-private`、pve5-only `rootdir` | HUMAN_DECISION_REQUIRED。候補backing `/var/lib/vz/<storage-id>` root:root 0700。`local`/`local-lvm`のAI-readable content権限を継承しない |
+| protection / onboot / initial power | `1` / `0` / stopped | 同左 | v1全期間onboot=0。Passkey maintenanceのbounded start/recoveryを用いる。OS bootstrap CT startは別step |
+| Pool | `security-finalizer-701` | `security-review-702` | each CT only、AI user/token direct/inherited positive rights=0 |
+| storage | `finalizer-701-private`、pve2-only `rootdir` | `review-702-private`、pve5-only `rootdir` | backing `/var/lib/vz/<storage-id>` root:root 0700。`local`/`local-lvm`のAI-readable content権限を継承しない。PR-03/04 |
 | backup | PVE/PBS full image/snapshot/replication除外 | 同左 | v1必須。通常PBS jobへ追加しない。非秘密audit exportは§8 |
-| DNS | exact resolver/persistent設定 | exact resolver/persistent設定 | HUMAN_DECISION_REQUIRED。CT700 runtime DNSを設定済と転記しない |
-| Tailscale role/tag | finalizer node、候補`tag:trust-finalizer-701` | reviewer node、候補`tag:trust-review-702` | HUMAN_DECISION_REQUIRED。未作成tag、human-only owner/admin audit、join/reauth方法、exact ID/IP/IPv6固定。route/exit/RunSSH/Funnel off |
-| service ports | loopback `7010`、service mTLS ingress候補`7443` | loopback候補`7020`、service mTLS ingress候補`7443` | 7010は現行契約、その他HUMAN_DECISION_REQUIRED。LAN/wildcard bind禁止 |
-| service user | `ct701-finalizer`、nologin、専用group | 候補`ct702-review`、nologin、専用group | CT702はHUMAN_DECISION_REQUIRED。proxy別user、root所有code/config、state 0700/key 0600 |
-| package identity | future production host-composition package + approved manifest SHA256 | future CT702 service/package + approved manifest SHA256 | **HUMAN_DECISION_REQUIRED / NOT BUILT**。現行CT701 deny-all packageでは完了不可 |
-| audit/monitoring | human-only secret-free health/receipt | human-only secret-free health/receipt | HUMAN_DECISION_REQUIRED。通常AI監視にprotected filesystem/tokenを渡さない |
+| DNS | persistent `1.1.1.1` | 同左 | CT700 runtime precedentを継承、fallback resolverなし。CT700も追加stageで永続化。PR-03/05 |
+| Tailscale role/tag | finalizer / tag未使用 | reviewer / tag未使用 | 個別IPv4/IPv6 selector＋device ID binding。将来tag候補`tag:trust-finalizer-701` / `tag:trust-review-702`は新設不要。route/exit/RunSSH/Funnel off |
+| service ports | loopback `127.0.0.1:7010`、tailnet-only mTLS `7443` | loopback `127.0.0.1:7020`、tailnet-only mTLS `7443` | 固定technical design。LAN/wildcard bind禁止、PR-06のlistener衝突とIR-05検証 |
+| service user | `ct701-finalizer`、nologin、専用group | `ct702-review`、nologin、専用group | proxy別user、root所有code/config、state 0700/key 0600 |
+| package identity | future production host-composition package + approved manifest SHA256 | future CT702 service/package + approved manifest SHA256 | **IMPLEMENTATION_REQUIRED / NOT BUILT (IR-03/06)**。現行CT701 deny-all packageでは完了不可 |
+| PVE tags | `security;trust-control-plane;finalizer;no-image-backup` | `security;trust-control-plane;review;no-image-backup` | labelのみ。ACL/backup exclusionの実効証明にしない |
+| audit/monitoring | human-only secret-free health/receipt | 同左 | §17 HD-12/15。通常AI監視にprotected filesystem/tokenを渡さない |
 
-CT700は新規manifestに**既存target**として記載し、生成/Stage1/repairなし。追加scope候補はverified app package、trusted window/display host、local key generation、public export、service ingress、Serve text→appのexact mapping、enrollment、service start、必要なら明示的DNS/swap変更。既存swap=512 MiBなので、署名鍵生成前にguest/host secret paging防止策を固定する必要がある。現在値との相違を隠して「既に安全」としない。
+CT700は新規manifestに**既存target**として記載し、CT生成/Stage1/repair再実行なし。追加scopeは§17.2のverified app package、trusted window/display host、local key generation、public export、service ingress、Serve text→appのexact mapping、enrollment、service start、明示的DNS/swap変更。既存swap=512 MiBなので、署名鍵生成前にguest/host secret paging防止策を固定する。現在値との相違を隠して「既に安全」としない。
 
-各CTのmanifestにはPVE tag（未決）、MAC/IPv6設定、rootfs volume binding、mounts/devices空集合、guest SSH不使用、各unitのenabled/active期待値も含める。作成時はPool/storage/CTを各々独立stepとして記録し、rootdirのvolume実体・node scope・permissionを検証する。Pool所属だけでstorage隔離を推定しない。AIのuserとprivilege-separated token両方についてdirect/inherited roleとeffective privilegesを照合し、config/status/snapshot/Pool/storage/PBS contentのGET拒否を確認する。console/power/backup/restore/migrate/delete/ACL変更は権限評価と隔離fixtureで検証し、liveに危険なmutationを投げるnegative testは禁止。
+各CTのmanifestには上表のPVE tags、MAC（701=`02:00:00:00:07:01`、702=`02:00:00:00:07:02`、PR-02で重複検査）、physical IPv6 address/RA無効・Tailnet IPv6保持、rootfs volume binding、mounts/devices空集合、guest SSH不使用、各unitのenabled/active期待値も含める。作成時はPool/storage/CTを各々独立stepとして記録し、rootdirのvolume実体・node scope・permissionを検証する。Pool所属だけでstorage隔離を推定しない。AIのuserとprivilege-separated token両方についてdirect/inherited roleとeffective privilegesを照合し、config/status/snapshot/Pool/storage/PBS contentのGET拒否を確認する。console/power/backup/restore/migrate/delete/ACL変更は権限評価と隔離fixtureで検証し、liveに危険なmutationを投げるnegative testは禁止。
 
 ### CT703 decision
 
@@ -221,7 +232,7 @@ PVE/cluster rootはCT private keyを技術的には取得できる。CT-local no
 
 各key IDは役割・trustDomain・epochを固定。現行package既定`ct700-human-v1`/`ct701-finalizer-v1`を複数domainで使い回さないため、将来packageの契約変更・testが必要。署名鍵をSSH/TLS/transport authenticationに流用しない。
 
-transport用CT-local keyは別生成、各CTの外へexportしない。Execution Bridgeのclient private keyは**Bridge host内**、human PCの既存admin keyはPC内。v1候補はhuman-adminがpublic SPKIをcross-pinするmTLSで、CA private keyをcontrollerへ新設して配布する方式を必須としない。certificate identity/SAN/SPKI/validity/renewalを固定したprofileを実装前に承認する。Tailscale node stateとTLS private keyもbackup/log禁止対象。
+transport用CT-local keyは別生成、各CTの外へexportしない。Execution Bridgeのclient private keyは**Bridge host内**、human PCの既存admin keyはPC内。v1はhuman-admin境界でpublic SPKIをcross-pinするmTLSを採用し、CA private keyをcontrollerへ新設して配布する方式を必須としない。certificate identity/SAN/SPKI/validity/renewalは§17.5のtechnical profileをIR-07で実装・検証し、最終manifestへbindする。Tailscale node stateとTLS private keyもbackup/log禁止対象。
 
 CT701→CT700の表示用packageはCT701のauthenticated channelから提供し、CT702原本evidenceとrequest hashをCT701で検証済みとして結合する。CT700がCT702の公開鍵を直接使う必要はv1では設けない。別display signing keyを必要とする実装を選ぶなら用途を明示追加し、新manifestへbindする。
 
@@ -267,7 +278,7 @@ Execution Bridgeのcandidate submission経路は非authority入力として別�
 - service transportは相互TLSのpinned client/server identity、期限、role、method/pathを検証。TLS termination proxyからbackendへのidentity headerは外部入力を除去し、root-owned local channelだけを信頼する。loopbackはlocal user認証ではないためpeer制限も必要。
 - authorityはCT700/702署名、expected key ID、domain、request/attempt/review/policy/generation/window、fresh currentness、anti-replayにより判定。署名が正しくてもstale/revokedなら拒否。
 - CT701現行bearer bridge-tokenはisolated authenticationでありproduction認証とはしない。future host gatewayがmTLSを検証してCT-local credentialへ変換するならtokenはCT701内のみ。既存tokenをAI/Bridgeへコピーする方式を既定にしない。
-- production BridgeはAI Workspaceに置かず、AIがbinary/config/credential/inventory/target filesを書けないprotected execution hostに置く。CT701にはPVE mutation credentialを置かない。配置・権限はHUMAN_DECISION_REQUIRED。
+- production BridgeはAI Workspaceに置かず、AIがbinary/config/credential/inventory/target filesを書けないprotected execution hostに置く。CT701にはPVE mutation credentialを置かない。HD-08=Bとしてhuman-admin PC `hqo-039-13`をcandidate採用、PR-08で独立性/capabilityを検証する。
 
 ### 9.3 Network policy installation
 
@@ -289,12 +300,12 @@ v1推奨はCT701を **target/request/policy/review activation generationの唯�
 
 1. CT701がbounded candidateをfreezeし、trusted inventory/policyからrequest/attemptをauthorする。CT702はそのexact packetで独立reviewを実行・署名する。review runtime/profile/model credentialはCT702管理、AIから書換不能。AIが持参したPASSやsession IDを再署名しない。
 2. CT702のreviewはCT701 activation commit前は`PENDING_PUBLICATION`。CT701→CT702のauthenticated pollingで取得し、signature/integrity/chronologyを検証したうえでCT701所有snapshotへadoptする。ack後に初めてproduction-currentと表示する。
-3. CT702のsupersede/revoke要求もこのcoordinatorでcommitする。CT701がpolling不可能、CT702にunacknowledged invalidationがある、または履歴連続性を確認できない場合は新しいfinalize/consumeをfail closedにする。pending invalidationとconsumeの順序をtransaction/fence protocolで定義し、単なる「直近poll済」にはしない。
+3. CT702はreview authorでありproduction-currentnessの別writerではない。supersede/revokeはCT701のserialized admissionへ提出し、**CT701 authority DBのdurable COMMIT** をactivation/revocationの線形化点とする。CT702ローカルのpendingは「失効済み」を意味しない。新規consumeごとにCT701がsequence-bound readiness barrierをpollし、CT702は未提出invalidationがあれば拒否、応答後はそのbarrierの決着まで新publicationを保留する。CT701は失効要求を受けた時点で新規handoffを閉じ、既存handoffの確定/unknown記録と順序を付けてcommitする。応答喪失、sequence欠落、CT702不通はfail closed。「最後にpollできた」だけではdispatchしない。
 4. host compositionはCT701 authority DBの`BEGIN IMMEDIATE`と同じ所有権でcurrentAuthority snapshotを固定する。current generationの別ファイル・AI supplied boolean・独立更新remote DBをcoreへ直結しない。
 5. 既存authority-first→ledger lock順を保持し、consumeとBridge live handoffまでfenceを維持。Bridgeにはaction/target/attempt・fencing token・期限にbindした**live一回handoff**が必要。GETしたpermit/HTTP 200/cached JSONは実行capabilityではない。
 6. Bridgeはdurable attempt tombstone、target executorのexclusive fence、最新generation照合、receiptを持つ。切断/lease expiryだけでlockを解放して再実行しない。remote handoff acknowledgement喪失、consume後失敗、clock rollbackはRECONCILE_REQUIRED。
 
-これは新protocolの設計要件で、現coreで実現済とはしない。CT702が独自に即時currentnessを変更する運用を選ぶなら、代わりにdistributed fencing/commit protocolが必要。coordinatorの意味とrevocation線形化点をHumanが承認し、concurrency/crash試験で証明できるまでproduction packageを作動させない。
+HD-09=B。既存ingestorのauthority-first lock/host-owned snapshot条件に整合する単一coordinator設計で、distributed consensusは不要。CT702は独立内容判断を行い、CT701はその署名を偽造/変更できない。通信不能でも進むavailabilityは要求しない。remote admission/barrierとtarget fenceはIR-04で未実装、既存coreだけで実現済とはしない。失効はcommitより前の不可逆dispatchを取り消さない。CT702の局所時刻で即時失効する別authorityを後から導入するのはscope変更。concurrency/crash/partition試験で証明できるまでproduction packageを作動させない。
 
 ## 11. Campaign state machine
 
@@ -432,40 +443,176 @@ break-glassはchat authorization endpointを再有効化しない。Human-admin�
 
 | phase | 成果物 | exit criterion |
 | --- | --- | --- |
-| 0: policy/design resolution | §3/17のHuman判断、pve-docの新CURRENT方針、source snapshot整合 | one-shot authority、service-only CT700 ingress、CT manifests/backup/controller承認 |
+| 0: policy/design resolution | §17のHuman判断は解消済み、technical resolutions、pve-doc方針反映とsource evidence整合 | 既存Human方針を再質問せず、IR/PRを別registerで追跡 |
 | 1: offline contracts | strict manifest/receipt/canonical hash validator、state/journal semantics、maintenance/new action schemas | unknown/duplicate field、manifest変更、expiry/replay、crash位置ごとのfixture PASS |
 | 2: production authority composition | CT700 trusted UI/window feed、CT702 protected runtime/API/package、CT701 ingestion/coordinator、Bridge protocol | same-principal AI forgery不可、revocation/currentness concurrency、remote handoff unknown tests PASS |
 | 3: immutable release packaging | complete import/dependency closure、offline exact packages、runtime/unit hashes、key helper/public-only transport | clean-room Linux load、systemd/DAC/sandbox、no secret/artifact余剰、current schemas PASS |
 | 4: fixed executor | human PC専用、701/702固定create/guards、CT700 existing-only steps、key/pin/network journal | fake-PVE/SSH/transport failure injection、partial/key uncertainty/replay STOP、no root RPC |
 | 5: production operations/repair | 全normal adapter、maintenance/recovery executor、self-maintenance、break-glass procedure | §13全rowとaudit/state continuity検証 |
 | 6: isolated campaign rehearsal | disposable環境、real browser UV、full campaign/failure/cutover E2E | 6 mandatory PASS、test evidence release hashes固定 |
-| 7: freeze and authorization | clean reviewed commits、exact packages/policy/identity、closed immutable manifest、human-readable summary | HUMAN_DECISION_REQUIRED=0、Human chat binding＋独立PC一回activation |
+| 7: freeze and authorization | clean build commits＋非実行evidence bundle、exact packages/policy renderer、freeze直前fresh read-only preflight、closed manifest | HD=0、IR exit証拠、PR baseline PASS、Human chat binding＋独立PC一回activation |
 | 8: future live bootstrap | fresh preflight→create→isolation→OS→key/pin→deploy→start→verify | mismatch/partialでSTOP、正常系のみREADYへ |
 | 9: Passkey cutover/closure | Passkey-only admission、chat kill、audit/documentation receipts | old-chat replay denied、maintenance/repair/recovery復帰確認、COMPLETE |
 
 将来の実行後文書更新はpve-doc `00_overview.md`、空きIP、サービス入口、platform実行一覧、backup/monitoring/Ansible/朝次/startupへの追加または明示除外、execution evidenceとtombstoneを対象とする。exact編集範囲と承認方式もcampaignへbindする。Git commit/pushはbootstrapの暗黙操作に含めない。必要なら別のPasskey Git actionとして実施する。
 
-## 17. HUMAN_DECISION_REQUIRED register
+## 17. Decision-resolution pass / three registers
 
-| ID | 決定・入力が必要な内容 | 未解決時 |
+### 17.1 HD-01〜HD-16 disposition（2026-10-01）
+
+A=`RESOLVED_BY_EXISTING_DECISION`、B=`AUTO_RESOLVABLE`、C=`PREFLIGHT_RESOLVABLE`、D=`TRUE_HUMAN_DECISION_REQUIRED`。主分類は各IDにつき一つ。Bはtechnical candidateを本書で決定した意味で、実装済み・live検証済み・mutation承認済みではない。A/BにもPR evidenceが必要な場合がある。Cはfreeze直前のfresh read-only evidenceを採用し、過去観測で代用しない。未構築componentはDへ戻さない。
+
+| ID / 元の内容 | 分類 | 根拠 | 決定した具体値/方針 | manifest freeze前evidence | Human再質問 / 残す一問 |
+| --- | --- | --- | --- | --- | --- |
+| HD-01 source state/4差分 | B | §1の全diffとraw hash照合。変更は歴史補足、9/30 CURRENT不変 | HEAD＋4文書の非実行dirty evidence bundle。`.ai/`除外。別clean commit不要 | PR-01、IR-12: base/tree/blob/bytes/差分/bundle root、CURRENT優先規則 | 不要 / なし |
+| HD-02 one-shot authorization | A | 本会話でfinite immutable campaign、一回chat＋独立PC activation、unknown STOP確定 | §4を採用。scope/hash変更は新authorization。6 PASS前にcutoverしない | IR-01/11のreceipt/state/cutover試験、PR-09のclock/期限 | 不要 / 将来のexact manifest authorizationは未実施の必須ceremony |
+| HD-03 CT701/702 allocation | B | namespace正式予約、inventoryの空き帯、CT700専用storage precedent | §6の全candidateを採用。701=pve2/.53、702=pve5/.54 | PR-02/03/04: unfiltered inventory、IP/MAC/name、capacity、storage/ACL。IR-06 load/容量 | 不要 / なし。availabilityはC型PRへ分離 |
+| HD-04 CT700 baseline/追加scope | B | Stage1/repair完了、9/30 network-only CURRENT。未配備app/keyを追加するだけ | §17.2のdelta stages。新create/旧Stage1/Stage2A再実行なし | PR-05のfresh exact baseline、IR-02/05/07、PR-07 paging/backup | 不要 / なし。baseline driftはSTOP |
+| HD-05 network flows/ports | B | 2-PC UI、AI deny、additive grants、service-only分離で必要最小に導出可能 | §9＋§17.3。443 UI、7443 mTLS、7444 bounded proposal、7445 audit。physical LANアプリingressゼロ | PR-06の全policy/route/IPv6/forwarding、IR-05 compiler/union/fixture検証 | 不要 / 新境界は最終campaign scopeで承認、個別のport選択不要 |
+| HD-06 fresh identities/join/selectors | C | 名前や過去IPだけでは現在のdevice/owner/adminを確定できない | 個別device selectors、interactive enrollment、tag新設なし。新CT IDは§5 typed output、既存IDはPR-06 | freeze直前の2-PC/CT700/AI/全normal node ID・owner・両IP family・admin/tagOwners・policy。新CT不在とrenderer証拠 | 技術選択は不要 / login本人操作はHD-13 custodianのceremony |
+| HD-07 controller/receipt/budgets | B | hybridはHuman方針済み。v4 collection実績を持つ独立PCをtechnical候補化できる | `hqo-039-13`固定executor、human-only staging/receipt。§17.4 budgets | PR-08のhost identity/OS/DAC/pins/AI非管理、PR-09、IR-01 | 不要 / operatorはHD-13で現在のHuman本人に確定 |
+| HD-08 Bridge/recovery host | B | 既存AI guest/通常runnerは特権境界を増やす。独立PCは既存root credential境界 | `hqo-039-13`に専用service principalとfixed Bridge/recovery。比較は§17.4 | PR-08のAI書込/remote-control/elevation排除、IR-04/09 target enforcement、credential scope | 不要 / 新CTの好みを聞かない |
+| HD-09 currentness coordinator | B | ingestorのhost-owned snapshot/authority-first lock契約と整合 | CT701 authority DB COMMITが唯一のactivation/revocation線形化点。§10 barrier/fence | IR-04のrace/crash/partition/revocation順序証拠、PR-09のclock/state | 不要 / protocol未実装はIR-04 |
+| HD-10 packages/hashes/contracts | B | package hashはbuild出力、Humanが選ぶidentityではない | closure完全なclean buildのcontent-addressed release。package ID=`role-sha256:<archive raw hash>` | IR-02/03/06/09/10/11、PR-10のexact release/test照合 | 不要 / NOT BUILTはimplementation dependency |
+| HD-11 key topology/IDs | A | 本会話の3-role、transport分離、non-export、SPKI cross-pin、loss時new domain方針済み | §8＋§17.5の自動ID/path/profile。現時点で鍵を生成しない | IR-07のpublic-only/one-shot/loss試験、PR-07、domain/ID既使用照合 | 不要 / なし |
+| HD-12 backup/audit anchor | B | full image禁止固定、通常PBS/NASは共有障害/管理domain | g-tune0719独立anchorを最小候補。§17.6のappend-only/high-watermark、非秘密のみ | PR-07/08のbackup/ACL/容量、IR-08 whole-store rollback/anchor-loss試験 | 不要 / 可用性不足はSTOP、CT703自動作成なし |
+| HD-13 Passkey/人員/UX | A | 本会話の後続Human回答で選択肢A（本人単独・主/予備別保管）を明示採用。RPは一意、UXは実装 | 承認・Tailnet enrollment・break-glass custodianは現在のHuman本人。将来追加はPasskey/監査付き独立trust-change。§17.7 | Human決定記録、PR-06/08、IR-02/10/11のfixture UV/repair証拠。production enrollmentは後続ceremony | 不要 / 決定済み。bootstrap実行承認ではない |
+| HD-14 E2E fixtures/operator/coverage | B | namespaceは900台temporary、security ID再利用/fixture昇格禁止。§13のcoverage既定 | §17.8のdisposable nested lab、一つのtest topology。operatorはHD-13本人 | IR-11 full suite/release binding、PR-02/03 fixture reservation/capability、PR-10 expiry | 不要 / test topologyを選ばせない |
+| HD-15 monitoring/startup/docs | B | CT121/700の通常PBS/監視/朝次除外、document-map更新責任 | §17.9の明示include/exclude、onboot=0、human-only health/receipt、bounded maintenance更新 | IR-12 inclusion/exclusion差分、PR-11のselector/static list/動的検出照合 | 不要 / なし |
+| HD-16 CT703 | A | 本会話でreserved、独立anchorで足りる限り作成不要 | create/deploy/key/ACLなし。anchor不成立はcutover BLOCKED | IR-08/PR-08の独立anchor証拠、manifest forbiddenMutations | 不要 / なし |
+
+### 17.2 HD-04 — CT700に追加するstageのみ
+
+CURRENTは§2.1/9月30日先頭節を採用し、inventoryの古いtailscaled inactive記録で上書きしない。PR-05でhostname/node/config、Stage1 repaired files、dpkg audit、Serve fixed text、tailscale identity、app/key不在、既存filter/unit hashesを再照合する。予期しないapp/keyやdriftは採用せずSTOP。
+
+1. **追加isolation hardening:** physical LAN inboundとboot露出防止を新規scopeで実装、既存egressを保持/検証。persistent nameserverを`1.1.1.1`へ、guest swapを512→0 MiBへ変更するexact deltaをmanifest化。host swap/dump/hibernation防止の対象・before/afterも明示し、鍵生成前に検証。安全なhost変更が別guestへ影響するなら無断実施せずfreeze前に再設計。
+2. **app/key/pin:** 完全closureのCT700 package、trusted request/review/window表示resolver、dedicated user/unit/proxyを追加。CT-local Human Approval/transport keyを一度生成し公開SPKIだけcross-pin。keyless/currentなCT700を新規CTとして扱わない。
+3. **ingress/Serve:** CT701専用tailnet mTLS 7443を新設。既存443のexact text mappingだけを`127.0.0.1:48768`のUIへ置換。enrollment/UV/admin APIを7443から拒否。FQDN維持、既存tailscale stateのreset/rejoinなし。
+4. **activation:** exact service start、Human Passkey enrollment/UV、isolated E2Eとproduction acceptance。Stage1、atomic repair、旧Stage2A/Serve resumeを呼ばない。通常OS一括upgradeはこの追加stageへ混入しない。
+
+### 17.3 HD-05/06 — minimal network profile
+
+§9の4 authority flowsを採用し、欠けていたproposal/audit flowを以下で閉じる。すべて新設候補であり現在のlisten/grantとは主張しない。`TS(x)`はPR-06またはtyped bindingでdevice ID/ownerに結び付けた**個別**IPv4/IPv6の集合で、account/group/wildcardではない。
+
+| initiator selector → destination | TCP / scope | role制限 |
 | --- | --- | --- |
-| HD-01 | pve-doc既存4差分の正本化/除外判断、clean reviewed source commitsとevidence root | manifest freeze不可 |
-| HD-02 | 段階別承認からfinite campaign一回承認への方針拡張、exact allowance、期限/nonce/本人確認/取消方法 | AUTHORIZED不可 |
-| HD-03 | CT701/702 exact allocation、node/IP/hostname/bridge/VLAN/CPU/RAM/swap/rootfs/storage/Pool/PVE tags、capacity | CREATING不可 |
-| HD-04 | CT700既存状態のfresh baseline、DNS永続化/secret paging防止、app/key/enrollment/Serve変更のexact scope | CT700 key/start不可 |
-| HD-05 | CT701→CT700 service-only ingress追加、CT701/702 exception拡張、ports/selectors/physical boundary | network policy freeze不可 |
-| HD-06 | trusted PC 2台のfresh identity、tailnet admin/tagOwners、service tagsまたはindividual selectors、join/reauth方法、dynamic output方針 | identity/policy install不可 |
-| HD-07 | human-admin execution host/operatorとlocal receipt確認方式、host pins、audit storage、TTL/step budgets | executor activation不可 |
-| HD-08 | production Bridge/recovery executor配置、target credentials/inventory/ACL、AI書込/Elevation排除 | production action/repair不可 |
-| HD-09 | authority coordinator/currentness/revocation線形化点、distributed fence/handoff profile | finalization/consume production不可 |
-| HD-10 | immutable CT700/701/702/Bridge package identities、OS/runtime/deb hashes、新契約version、release test証拠 | DEPLOYING不可 |
-| HD-11 | trustDomain/epoch/key IDs、固定paths、transport identity/renewal、public pin consumers、loss/re-enrollment方針 | KEYING不可 |
-| HD-12 | PVE/PBS/image exclusion、host swap/core/backup対策、非秘密audit/consumption anchor保存先・retention・容量・復旧 | secret生成/cutover不可 |
-| HD-13 | Passkey RP/origin/credential enrollmentとrecovery人員、trusted display、normal全actions＋maintenance self-repair UX | Passkey cutover不可 |
-| HD-14 | normal/repair/break-glass/isolated full E2Eのexact fixture targets、実施者、期限、coverage | READY不可 |
-| HD-15 | onboot/監視/朝次/Ansible/startupの明示除外・追加、実行後docs update scope/責任 | COMPLETE不可 |
-| HD-16 | CT703 reserved＋human-only独立audit anchorでv1要件を満たす判断 | 不成立なら新audit設計。自動CT703作成なし |
+| TS(hqo-039-13), TS(g-tune0719) → TS(CT700) | 443 UIのみ | WebAuthn UV、既存2-PC membership保持 |
+| TS(CT701) → TS(CT700), TS(CT702) | 7443 | service-only mTLS、request/evidenceのみ |
+| TS(hqo-039-13 Bridge) → TS(CT701) | 7443 | finalize/consume/handoff/result、target registry固定 |
+| TS(ai-workspace-win) → TS(hqo-039-13 proposal gateway) | 7444 | bounded uploadのみ、最大64 MiB、path/URL/shell/authority booleanなし、mTLS submission専用keyは非特権。admin/dispatch/recovery APIなし |
+| TS(hqo-039-13 audit relay) → TS(g-tune0719 anchor) | 7445 | append/checkpoint/readbackのみ、mTLS別role。既存recordの削除/更新権なし |
+| hqo-039-13 fixed executor/Bridge → 固定PVE node IPs `.20–.24` | 22、pinned human-admin SSH | bootstrapまたはPasskey一回capability検証済みfixed catalogのみ。AI起動root RPCではない |
+
+CT700は新規outbound authority接続なし、CT702はCT701へのpushなし。CT701が両authorityの非秘密receiptを収集しBridgeがanchorへrelayする。relayはauthority署名を作れず、chain sequence欠落で停止。これらのservice PC portsもhost firewallで明示sourceを制限する（通常VPNの広いPC到達権だけで開けない）。backendはloopback＋local peer制約、CT700 UIとservice ingressは別route table。
+
+normal-tailnet集合からCT700/701/702の両familyを除外し、normal-LAN集合は`192.168.0.0/24`から`.52/.53/.54`を除外。both CT100/101 subnet/Exit capabilityとmember-self SSHを保持。protected CTをordinary **source**集合からも除外してoutbound broad grantを防ぐ。physical eth0のapp ingress全deny、physical IPv6/RA deny、tailscale IPv6保持。必要なunderlay outboundはDNS `1.1.1.1` UDP/TCP53、approved control/DERP HTTPS TCP443、必要なSTUN UDP3478に限定するcandidate、peer UDP直結はv1不要（DERP経路を検証）。宛先集合はreleaseの固定egress profileへbindし、無制限public IPv4への既存許可を新CTへcopyしない。CT内timeはPVE hostから継承、NTPの新guest flowなし。
+
+CT702の外部review modelはruntimeが必要とするproviderのexact HTTPS endpoint/credential用途/送信data classをIR-03で固定し、無制限Internet/AI持参URLを禁止。既存権限を超える新たなデータ外部送信や課金が必要と判明した場合は別scopeとして止める。今回provider契約を承認したとは扱わない。
+
+joinはHuman interactive、service tags新設なし。人間PCの既存tag/ownerはPR-06で観測し変更しない。tag候補名を選べることとassign可能なadmin principalの安全性を混同しない。freeze直前に全admin/network-admin/tagOwnersをread-only監査し、AIがidentityを付替えられるならSTOP。unjoined CTはquarantineからcontrol enrollmentのみ許可し、unknown identityへservice grantしない。IR-05 rendererと管理inventory一致を証明してからauthority通信を開く。
+
+### 17.4 HD-07/08 — controller / Bridge placementとbudgets
+
+| inventory候補 | security/capability比較 | 結論 |
+| --- | --- | --- |
+| `hqo-039-13` | v4で独立human-admin collection/pinned PVE SSH実績、CT700 UIの既存trusted member。AI非管理の証明はPR-08で更新 | **bootstrap controller＋production Bridge/recovery候補として採用**。既存credential境界を拡散しない |
+| `g-tune0719` | 第2の既存trusted PC。primaryのdisk/OSと分離できる | independent receipt anchorに採用。read-only capability確認前に稼働済みとはしない |
+| CT120 / NAS / CT200 / PVE host | CT120は通常PBS/Ansible管理、NASは共通backup、CT200は特権PBS、PVE rootは全authorityへ到達 | 新privileged Bridgeを同居させない。AI管理・secret-restorable backup・共有TCBの面で劣る |
+| VM111 / CT700/701/702 | VM111はAI、authority CTへのtarget credential同居はrole分離を壊す | 不採用 |
+| 新専用CT/host | 新identity、credential配布、隔離/backup例外と自身のbootstrapが増える。PVE CTではcluster-rootから独立しない | v1で不要。既存PCのcapability不足ならSTOPして再設計、黙って新CTへfallbackしない |
+
+primary PCではproposal gateway（非特権）、Bridge verifier、fixed target executor、bootstrap executorを別principal/ACLにする。AIはcode/config/registry/staging/SSH agentを変更・invokeできず、gatewayからexecutorはvalid one-use live handoff以外で起動不可。credentialsは既存human-only store内、必要target/operationだけfixed adapterで利用。無制限command RPCは設けない。productionはPasskey承認後自動進行し、毎回Human SSH操作を要求しない。primaryがsleep/offlineならSTOP。起動は一回activationとOSによる固定service lifecycleであり、AIの任意service startではない。将来の新package/設定/permission変更はPasskey管理action。
+
+非秘密配置candidate: primary `C:\ProgramData\TrustPlane\{releases,registry,journal}`、anchorは別PCの `C:\ProgramData\TrustPlane\audit-anchor`。AI/RDP共有・同期folder・repo checkout外、service ACLをPR-08で検査。PC名だけをtrusted証明にしない。Windows service runtime/OS対応はIR-06/09、現在利用可能とは未確認。
+
+bounded既定値（B、必要ならfreeze前のoffline測定で再設計）: `authorizeBefore = freezeAt + 1 hour`、`expiresAt = freezeAt + 8 hours`、maxClockSkew=5秒、observationMaxAge=300秒、step数上限256、各mutation max attempts=1、並列mutation=1。exact step timeoutはIR-11実測から導出し上限30分、全DAG critical path＋ceremony待ちを8時間内に収める。収まらなければfreeze不可。nonce/campaign IDは将来CSPRNG UUIDv4、既使用IDをanchorで拒否。cancelはlocal human-only receipt→new dispatch停止、期限/unknown failureも同じSTOP規則。cutover未達を理由に期限を延長しない。
+
+### 17.5 HD-11 — automatic ID/path/transport profile
+
+既定topologyは§8のまま。将来のdomain準備でCSPRNG UUIDv4を生成し、production=`tp-prod-<uuid>`、fixture=`tp-fixture-<別uuid>`、bootstrap campaign domainは別IDとする。非秘密IDのみmanifestへ固定し、anchorのever-used registryと重複したらfreeze拒否。epoch初期値1、key ID=`<trustDomainId>:<role>:e0001`、roleは`ct700-human` / `ct701-finalizer` / `ct702-review`。loss時はepochだけ増やして同domain再使用せず新domain/new ID、旧IDはretired履歴検証専用。
+
+private path候補はCT700 `/var/lib/ai-approver/signing.key`、CT701 `/var/lib/ct701-finalizer/signing.key`、CT702 `/var/lib/ct702-review/signing.key`。consumer public mapは各 `/etc/<service>/trust-map.json`、transportは各service state下`transport/`、所有専用user、directory 0700/file 0600。path変更はpackage contractとしてIR-07で固定、private bytesはexport/log/backupしない。
+
+transportは独立鍵＋直接SPKI cross-pin、TLS1.3、client/server EKUとrole別SAN URI `urn:trust-plane:<domain>:<role>:transport:e0001`、365日validity、期限30日前にbounded rotation action、expiredはSTOP。CA秘密鍵配布不要。cert validityだけで認可せず、SPKI/domain/role/endpointを照合。rotationはnew ID、old/new transition windowと全consumer receiptを別Passkey actionでbindする。Human Approval/Finalizer/Review Ed25519鍵をTLS/SSHへ流用しない。今回ID/鍵/certは生成しない。
+
+### 17.6 HD-12 — minimum independent audit anchor
+
+**primary hqo-039-13 durable journal＋second PC g-tune0719 append-only anchor** を採用候補とする。primaryと別OS/disk/principalで、PVE/PBS credentialをanchorへ渡さない。NAS/CT200/PBSは共通backup経路/通常管理下、CT701同diskは同時rollback可能なので単独anchorに不適。新CT703は不要。これはTCB内human-adminによる悪意ある全置換からの暗号学的独立を主張しない。
+
+anchor serviceはauthority署名、campaign/action sequence、previous hash、domain/generation high-watermark、consumed attempt/JTI、retirementを検証しexclusive append＋fsync後ack。writerにはtruncate/delete/overwrite/既存sequence再使用権なし。mutation前intent/consume tombstoneをanchorへdurable記録し、mutation後outcomeを追加、ack不明なら次mutation禁止・RECONCILE_REQUIRED。primary/CT DB全体を古い状態へ戻してもanchor high-watermarkで拒否する。anchor自体喪失/巻戻し/両PC同時喪失でcontinuity不明ならfail closed、新domain recovery。古いanchor backupを現authorityへ昇格しない。
+
+allowlisted compact receipt/public registryはdomain存続期間中保持、retired IDs/tombstone/high-watermarkは自動削除なし。詳細sanitized diagnostic evidenceは90日、review source archiveはCT702 protected store内の最小期間のみ（v1最大90日）、anchorへはhashのみ。非秘密でも秘密source本文を自動exportしない。anchor予算32 GiB: 上限1000 receipts/day×16 KiB×365=約5.57 GiB/year、diagnostic上限100 MiB/day×90=約8.79 GiB、残りはindex/high-watermark/余裕。残容量20%未満またはrate/size上限でSTOP、tombstoneをpruneして継続しない。容量はPR-08で確認、retentionはPBSの日7/週4/月1と無関係。
+
+CT700/701/702のprivate-key-restorable image/rootfs snapshot/replicationは禁止。CT key/Tailscale state/TLS/model credentials、Bridge transport/target credentialsもfull-PC image/同期/backupから除外する。host/guest swap、Windows pagefile/hibernation/crash dumpまでPR-07/08で対象を明示。設定が安全でなければ鍵生成不可。通常backupを無差別に停止せず、reviewed exact exclusionをIR-07/12で実装する。
+
+### 17.7 HD-13 — technical Passkey profileと確定済みcustodian方針
+
+RP ID=`human-approver-700.tail2f618d.ts.net`、origin=`https://human-approver-700.tail2f618d.ts.net`（末尾dot/追加portなし）、UI=443/backend=48768、UV required、cross-origin/任意RP/AI submit不可。PR-06でMagicDNS/SAN/ownerをfresh確認し、一意性不成立ならSTOP、別FQDNへ勝手に変更しない。trusted displayはexact request/attempt/target/policy/review/windowを非HTMLで表示するIR-02。Normal/Maintenance/Repair/self-repair contractやUX欠落はIR-09/10でありHuman判断ではない。
+
+**Human決定（2026-10-01、本会話の後続回答）: HD-13の選択肢Aを採用、分類D→A。** 承認・Tailnet enrollment・break-glassのcustodianは現在のHuman本人とし、主認証器と予備認証器を別保管する単独体制とする。将来別custodianを追加する場合は、既存権限の暗黙共有ではなく、**独立したtrust-changeとしてPasskey承認・監査付きで追加**する。この決定はbootstrap campaignの実行承認ではない。
+
+独立trusted PCからUVを行う。2台のPC membershipは認証器2個の存在/独立性を証明しない。複数人/同期アカウントを暗黙追加しない。主/予備の具体的credential IDは将来Human enrollment出力でprivate bytesではなくbinding receiptに記録。機器capability/UVとrecovery exerciseはIR-11/PR-08で検証し、方針決定をenrollment完了証拠にしない。
+
+### 17.8 HD-14 — disposable fixture topology
+
+technical candidateは **pve5上のtemporary VM930 `trust-e2e-lab-930`（4 vCPU / 8192 MiB / swap=0 / 64 GiB / onboot=0 / production backup除外）内のnested PVE lab**。外側VM930にはproduction bridge/LAN NIC・PVE credential・host mountを与えず、console経由でhash固定image/bundleを渡す。内側だけにuplinkなし `10.203.0.0/24` と `fd42:7470:930::/64` を持ち、CT931=Human Approval `.31`、CT932=Finalizer `.32`、CT933=Review `.33`、CT934=systemd disposable target `.34`、VM935=independent browser/Bridge fixture `.35`を作る計画。inner専用admin鍵/domain/ledger/auditを使用、外側PVE権限へ到達不可。931–935は外側clusterへ作成しない。既存VM921/922やCT121を流用せず、700–749も使用しない。
+
+このlabでcreate/isolation/OS/key/pin、real Linux/systemd、Git bare remote、package/config/service/guest/node actions、repair/dpkg partial、offline capability、crash/replay/cutoverを通す。browser UVはHuman操作を伴う独立device/認証器redirectの適合性を検証し、mock WebAuthnで代用しない。real Tailscale/HTTPS境界試験にはproductionから分離したtest tailnetと限定egress gatewayをIR-11の別fixture phaseでhash固定し、production identity/ACLへ触れない。networkなしのlabだけでTailscale PASSを主張しない。
+
+PR-02/03でVM930未使用、nested virtualization/console/UV capability、RAM/disk余裕を確認。不足はSTOPしてfreeze前に再設計する（PVE5の余裕を台帳から捏造しない）。E2E実施者はHD-13 custodian、fixture自動処理はfixed executor。fixtureはproduction昇格不可、cleanupも別bounded approved scope。rehearsal evidenceは同build/configでfreeze前7日以内、変更があれば失効。将来のfixture creation/keygen/service startはIR-11作業であり今回未実施。
+
+### 17.9 HD-15 — operations/documentation include/exclude
+
+- **include:** inventory/空きIP/namespace reservation、各service CURRENT/OPERATIONS、platform実行一覧、Human-only sanitized health/expiry/anchor-capacity/receipt-gap通知、Passkeyによるbounded OS/app保守、dependency-aware start/recovery runbook。
+- **exclude:** 通常PBS/image/replication、一般Ansible `homelab`/update-all、朝次のroot/SSH probe、Pulse/Kumaへのprotected credential、一般CT tier/cluster-startup/shutdownの自動起動停止。onboot=0を維持。動的全guest検出も明示除外する。監視「対象外」を正常稼働PASSと数えない。
+- 通常監視には必要なら非秘密の最終成功時刻/状態だけをhuman-only exporter経由で提供し、v1では新しいprotected CT向け監視grantを作らない。expected countは通常guest分と別に表示する。
+- AIが文書差分を準備しHuman-adminが将来campaignのexact docs scopeで検証。配置=00_overview、共通規則=platform、サービス=子入口、未実施=TODO、証跡=日付記録（document-map準拠）。設定適用receiptと文書receiptを区別、git commit/pushは別明示action。本passではpve-docを編集しない。
+
+### 17.10 HUMAN_DECISION_REQUIRED register — 0件
+
+未解決項目なし。HD-13は§17.7の明示Human決定によりclosed、`RESOLVED_BY_EXISTING_DECISION`へ移動した。本人のbindingは後続ceremony receiptで検証する。
+
+Human decisions remaining: **0**。追加質問なし。exact campaignの将来chat authorization、一回local activation、Passkey/Tailscale enrollment/UVは、設計選択数とは別の必須ceremony。今回回答をもって実行authorizationとしない。
+
+### 17.11 IMPLEMENTATION_REQUIRED register — 12件
+
+全件OPEN。本passで未実装のものを完成扱いしない。以下のexit証拠が揃うまでproduction campaign freeze不可。将来実装中にpolicy矛盾が見つかればSTOPし、単なる未実装をHumanの選択へ転嫁しない。
+
+| ID | 未実装の成果物 / 関連HD | freeze前exit evidence |
+| --- | --- | --- |
+| IR-01 | manifest/receipt validator、fixed executor/DAG/journal、activation/cancel/expiry (02/07) | unknown/duplicate/変更/replay/crash/partial拒否、全stepのfixed enum/hash/timeout、nonce one-use |
+| IR-02 | CT700 complete typed package、trusted display/window resolver、UI/service API分離 (04/10/13) | clean closure、UV/request/review/window binding、7443 enrollment拒否、legacy AI直接submitなし |
+| IR-03 | CT702 daemon/API/protected runtime/content store、bounded model profile/egress (05/09/10) | source独立性、signed review chronology、bounded provider config、pending publication/invalidation sequence |
+| IR-04 | CT701 single coordinator/barrier＋Bridge live handoff/target fence (08/09) | authority-first lock、commit線形化、partition/race/consume-before-revoke/revoke-before-consume/ack loss試験 |
+| IR-05 | mTLS gateway、policy deterministic renderer/CAS、physical quarantine/persistence (04/05/06) | real compiler/union tests、両family/routers/portsのfixture検証、typed outputs以外編集拒否、boot露出なし |
+| IR-06 | CT700/701/702/Bridge/anchor/executor immutable packaging、OS/deb/runtime closure (03/10) | archive/file/manifest/lock/toolchain hashes、clean-room Linux/Windows load、resources/retention budgets/sandbox |
+| IR-07 | CT-local one-shot key helper、ID/profile/pin/loss、paging/backup exclusion (04/11/12) | public-only export、exclusive/fsync/PoP、uncertain生成でSTOP、non-exportとfresh isolation gates |
+| IR-08 | independent anchor/receipt export/high-watermark (12/16) | append権限、disk-full/anchor-loss/whole-store rollback、intent-before-dispatch、secret redaction |
+| IR-09 | production Bridge/target credential enforcement、§13.1全normal action adapters (08/10/13) | Git/deploy/apt/restart/start-stop/reboot/configのexact registry/UI/review/receipt、arbitrary root RPCなし |
+| IR-10 | versioned Maintenance/Repair/offline self-maintenance＋break-glass (10/13) | bounded scope/revoke/expiry、trust-plane停止前handoff、local one-use、chat fallbackなし、復旧手順 |
+| IR-11 | §13全6 PASSのisolated full E2E＋cutover kill (02/13/14) | real UV/systemd/transport、failure injection、break-glass、old chat/reboot/rollback rejection、same release binding |
+| IR-12 | source evidence bundle/decision provenance、operational exclusions/health/docs templates (01/15) | §1再現性、各include/exclude exact差分、pve-doc既存差分保全、将来正本反映scope/receipt |
+
+### 17.12 PREFLIGHT_REQUIRED register — 11件
+
+全件OPEN/未実施。**freeze直前のfresh read-only live preflight結果**をsource rootへbindする。PR-01はローカル再現性、PR-10は既存test証拠の読取照合も含む。live read-only収集は将来の別作業として独立human-admin PCで行い、filtered AI inventoryだけではPASS不可。freeze時点とexecution直前に各security predicateを再検査、observationMaxAge=300秒。期限超過/差分はSTOPしfreezeし直す。長時間の調査は保存済み証拠を利用して最後にbounded fresh sweep、可能でなければTTLを自動緩和しない。
+
+| ID | read-onlyで解決する項目 / 関連HD | PASS条件 / fresh evidence |
+| --- | --- | --- |
+| PR-01 | source identity/dirty bytes (01/10) | base full commit/tree、4 raw hashes/blob/diff、allowlist evidence root、build clean provenanceがreviewしたbytesに一致 |
+| PR-02 | unfiltered allocation/name/IP/MAC (03/14) | 全cluster guest/retired ID/storage/Pool、DHCP/static予約/ARP/他LAN台帳/DNS照合。701/702とVM930候補未使用、重複/unknownなし。ARP無応答だけでは不可 |
+| PR-03 | node/storage/bridge/template/resources (03/14) | pve2/pve5 quorum、CPU/kernel/runtime、node-scope dir/raw/rootdir容量、bridge/VLAN、固定image hash、nested capability。割当後RAM余裕2 GiB以上、diskは割当＋同FS20%余裕、同時fixture最大負荷も含む |
+| PR-04 | PVE ACL/root boundary (03/11) | AI user/token direct/inherited/effective rights、Pool/storage/PBS/config/status/snapshot deny、human-host pins/cluster identity。作成後権限は事前のpolicy proof＋各stage read-only postcheck |
+| PR-05 | CT700 exact CURRENT baseline (04) | 9/30 scopeのfresh identity/config/Serve/filter/unit/DNS/swap/app/key absence、Stage1 repair証拠と不整合なし。稼働やpermissionを過去PASSから推定しない |
+| PR-06 | complete network/identity/compiler baseline (05/06/13) | 全device/owner/IP/IPv6/admin/tagOwners、全grant/ACL/SSH/nodeAttrs/route/exit/forwarding、2-PC/CT700 RP/SAN、listener/port collision、両router exposure、normal service regression evidence。新CT IDは出力slotのまま |
+| PR-07 | backup/paging/key isolation (04/11/12) | 全PVE/PBS/manual/all/Pool job/replication/host backup、guest/host swap/dump/hibernation、除外計画と現在設定の一致条件。新生成先の不在・ever-used ID registry |
+| PR-08 | PC controller/Bridge/anchor/ceremony capability (07/08/12/13) | hqo/g-tuneのdevice/OS/DAC/admin/recovery/pins、AI書込/remote-control排除、service principal/credential custody、disk32GiB/独立high-watermark、UV認証器能力、pagefile/image/同期除外。未配備機能はIR証拠＋予定差分で扱う |
+| PR-09 | clocks/authority/locks/budgets (02/07/09) | clock skew≤5秒、exact TTL/critical path/256 steps、journal/nonce未使用、no unresolved reconcile、host locksとcurrent generations/high-watermark一致 |
+| PR-10 | release/fixture acceptance freshness (10/13/14) | IRの署名/hash/test evidenceをread-only検証、同build/config/OSと7日以内E2E。systemd testをpreflight中に起動せず既存rehearsal証拠を確認 |
+| PR-11 | operations/include-exclude/docs baseline (15/16) | PBS/朝次/Ansible/監視/startupのstatic/dynamic selectors、onboot、expected counts、docs before hash、CT703 reserved、post-execution docs scope一致 |
+
+**Preflightとstage acceptanceの区別:** 未作成CTのeffective rights、join出力、生成鍵SPKI、配備後service listen、production Human enrollment、live lifecycle越しの永続性はfreeze前read-onlyだけでは証明できない。freezeにはIR fixture proof＋現在のbefore-state＋閉じたmutation/postconditionを要求し、実行後のfresh read-only verificationをDAG gateにする。PVE reboot等のmutationをPRに紛れ込ませない。freeze前に「未作成CTのlive PASS」を必須としてdeadlockにしない一方、postcheckまで無条件PASSを発行しない。
 
 ## 18. この設計作業の終了状態
 
-設計文書のみをworking treeへ追加。live PVE/Tailscaleへの接続・mutation、CT creation、deploy、鍵生成、service activation、commit、pushは実施しない。設計のaccepted status、manifestSha256、production PASSは発行していない。次の入口はHD registerの判断とoffline実装依頼であり、本書を実行承認として扱わない。
+指定設計文書のみをworking treeへ更新。HDはA=4/B=11/C=1/D=0、HUMAN_DECISION_REQUIRED=0、IMPLEMENTATION_REQUIRED=12、PREFLIGHT_REQUIRED=11。live PVE/Tailscaleへの接続・mutation、CT creation、deploy、鍵生成、service activation、pve-doc変更、commit、pushは未実施。manifestSha256、production PASSは発行していない。次の入口はIR registerに沿う別offline実装作業。本書およびHD-13の本人/custody決定を実行承認として扱わない。
