@@ -28,6 +28,9 @@
     "finalizer:pack": "pnpm build && node scripts/pack-ct701-finalizer.mjs",
     "finalizer:verify-package": "node --jitless scripts/verify-ct701-package.mjs",
     "test": "vitest run",
+    "verify:fast": "node scripts/verify-ai-workspace.mjs FAST",
+    "verify:review": "node scripts/verify-ai-workspace.mjs REVIEW",
+    "verify:full": "node scripts/verify-ai-workspace.mjs FULL",
     "test:rc01:a": "node scripts/verify-rc01-phase-a.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
