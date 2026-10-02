@@ -63,7 +63,7 @@ describe("CT701 offline deployment", () => {
     expect(config.databasePath).toBe(`${P.ledger}/ledger.sqlite`);
   });
   it("unit constrains network, writes, account and hardening; scripts never start/restart", () => {
-    const unit = fs.readFileSync(path.join(template, unitName), "utf8");
+    const unit = fs.readFileSync(path.join(template, unitName), "utf8").replaceAll("\r\n", "\n");
     for (const name of ["NoNewPrivileges", "PrivateTmp", "PrivateDevices", "ProtectHome", "ProtectKernelTunables", "ProtectKernelModules", "ProtectKernelLogs", "ProtectControlGroups", "RestrictNamespaces", "RestrictSUIDSGID", "LockPersonality", "MemoryDenyWriteExecute"])
       expect(unit).toContain(`${name}=yes`);
     for (const directive of ["ProtectSystem=strict", "CapabilityBoundingSet=\n", "AmbientCapabilities=\n", "User=ct701-finalizer", "Group=ct701-finalizer", "UMask=0077", "IPAddressDeny=any", "IPAddressAllow=127.0.0.1/32", "RestrictAddressFamilies=AF_UNIX AF_INET", `ReadWritePaths=${P.ledger}`, "ExecStart=/usr/bin/node --jitless"])

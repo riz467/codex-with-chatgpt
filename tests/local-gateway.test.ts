@@ -18,7 +18,12 @@ vi.mock("node:child_process", async (importOriginal) => {
 
 const roots: string[] = [];
 const temp = () => { const root = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-test-")); roots.push(root); return root; };
-afterEach(() => { vi.mocked(spawn).mockReset(); vi.mocked(spawnSync).mockClear(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); vi.mocked(spawn).mockReset(); vi.mocked(spawnSync).mockClear(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+const runtimeFiles = ["C:\\Users\\workspace\\.local\\bin\\ai-run.ps1", "C:\\Program Files\\PowerShell\\7\\pwsh.exe"];
+function runtimeAvailable() {
+  const exists = fs.existsSync.bind(fs);
+  vi.spyOn(fs, "existsSync").mockImplementation(file => runtimeFiles.includes(String(file)) || exists(file));
+}
 const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 function bundle(root: string) {
   const dir = path.join(root, "reviews", "demo");
@@ -237,8 +242,16 @@ describe("bounded actions", () => {
     expect(fs.readdirSync(root)).toEqual([]);
     expect(spawn).not.toHaveBeenCalled();
   });
+  it.each(runtimeFiles)("fails closed before spawning or writing when runtime %s is missing", missing => {
+    const root = temp(), exists = fs.existsSync.bind(fs);
+    vi.spyOn(fs, "existsSync").mockImplementation(file => runtimeFiles.includes(String(file)) ? String(file) !== missing : exists(file));
+    expect(() => startOrchestration("pve-doc", "Review a narrow change", "change", root)).toThrow(expect.objectContaining({ code: "RUNTIME_UNAVAILABLE" }));
+    expect(spawn).not.toHaveBeenCalled();
+    expect(fs.readdirSync(root)).toEqual([]);
+  });
   it("starts only the fixed ai-run executable with separate arguments and returns a job immediately", () => {
     const root = temp();
+    runtimeAvailable();
     const child = Object.assign(new EventEmitter(), { pid: process.pid, unref: vi.fn() });
     vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
     const goal = "Review a narrow change; do not execute arbitrary shell";
@@ -276,6 +289,7 @@ describe("bounded actions", () => {
   });
   it("change with explicit EditPaths passes a JSON array through only the fixed ai-run wrapper", () => {
     const root = temp();
+    runtimeAvailable();
     const child = Object.assign(new EventEmitter(), { pid: process.pid, unref: vi.fn() });
     vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
     const goal = "README.mdに1行追記してください";
@@ -456,7 +470,7 @@ describe("bounded actions", () => {
     const proposal = { task_id: task, state: "EXECUTING", approval_required: true, message: "Repository read timed out; insufficient evidence",
       proposed_command: "", edits: [] as { path: string }[] };
     const existsOriginal = fs.existsSync.bind(fs), readOriginal = fs.readFileSync.bind(fs);
-    const exists = vi.spyOn(fs, "existsSync").mockImplementation((file) => [statusFile, proposalFile].includes(String(file)) || existsOriginal(file));
+    const exists = vi.spyOn(fs, "existsSync").mockImplementation((file) => [statusFile, proposalFile, ...runtimeFiles].includes(String(file)) || existsOriginal(file));
     const read = vi.spyOn(fs, "readFileSync").mockImplementation(((file: string, encoding?: string) =>
       String(file) === statusFile ? JSON.stringify(status) : String(file) === proposalFile ? Buffer.from(JSON.stringify(proposal)) : readOriginal(file, encoding as BufferEncoding)) as typeof fs.readFileSync);
     const child = Object.assign(new EventEmitter(), { pid: process.pid, unref: vi.fn() });

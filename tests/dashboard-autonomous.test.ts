@@ -71,7 +71,7 @@ describe("read-only autonomous dashboard projection", () => {
       await new Promise<void>((resolve, reject) => { server.once("listening", resolve); server.once("error", reject); });
       const address = server.address(); if (!address || typeof address === "string") throw new Error("no listener");
       const response = await fetch(`http://127.0.0.1:${address.port}/api/status?reviewProfiles=${encodeURIComponent(JSON.stringify({ [fixture.repoKey]: { workspace: scratch.resolve("other") } }))}`,
-        { headers: { "x-review-workspace": scratch.resolve("other") } });
+        { headers: { "x-review-workspace": encodeURIComponent(scratch.resolve("other")) } });
       expect(response.status).toBe(200);
       expect((await response.json()).autonomous_runs).toMatchObject([{ run_id: fixture.runId, done: true }]);
       expect(Reflect.get(new Collector(), "autonomousReviewProfiles")).toBe(reviewProfiles);

@@ -1,12 +1,14 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { probeBridge } from "../src/bridge/runtime.js";
 import { bridgeHealth, normalizeOsHealth, verifiedHealth } from "../src/dashboard/verified-health.js";
 import { Collector } from "../src/dashboard/collector.js";
 import { testPowerShellExecutable } from "./support/powershell.js";
+import { createWindowsTaskFixture } from "./support/windows-task-fixture.js";
 
-const script = fileURLToPath(new URL("../scripts/observe-ai-workspace-health.ps1", import.meta.url));
+const taskFixture = createWindowsTaskFixture();
+afterAll(() => taskFixture.dispose());
+const script = taskFixture.script("observe-ai-workspace-health.ps1");
 function ps(code: string) {
   return JSON.parse(execFileSync(testPowerShellExecutable(), ["-NoProfile", "-NonInteractive", "-Command", `. '${script}'; ${code}`],
     { encoding: "utf8", timeout: 12000, windowsHide: true, shell: false })) as Record<string, any>;
@@ -78,6 +80,7 @@ describe.skipIf(process.platform !== "win32")("fixed PowerShell OS verifier", ()
     ["session mismatch", "$script:processes[0].SessionId=2"],
     ["wrong user", "$script:sessions[0].User='OTHER\\workspace'"],
     ["wrong SID", "$script:ownerSid='S-1-5-18'"],
+    ["resolved account SID mismatch", "$FixtureWorkspaceSid='S-1-5-21-1-2-3-1000'"],
     ["non-interactive session", "$script:sessions[0].State='Other'"],
     ["S4U task", "$script:taskOK=$false"],
     ["wrong executable", "$script:processes[0].ExecutablePath='C:\\other\\node.exe'"]

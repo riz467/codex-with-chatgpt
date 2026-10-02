@@ -66,4 +66,13 @@ describe.skipIf(process.platform !== 'win32')('autologon preflight pinned worker
       expect(check('', dir)).toBe(false);
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
+  it.each(['LF', 'CRLF'])('accepts the exact fixed VBS with %s line endings', ending => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'c2c-preflight-lines-'));
+    try {
+      const source = fs.readFileSync(path.join(scripts, 'launch-codex-interactive-worker.vbs'), 'utf8').replaceAll('\r\n', '\n');
+      fs.writeFileSync(path.join(dir, 'launch-codex-interactive-worker.vbs'), ending === 'CRLF' ? source.replaceAll('\n', '\r\n') : source);
+      fs.copyFileSync(path.join(scripts, 'start-codex-interactive-worker.ps1'), path.join(dir, 'start-codex-interactive-worker.ps1'));
+      expect(check('', dir)).toBe(true);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
 });

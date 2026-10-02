@@ -2,12 +2,15 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
+import { createWindowsTaskFixture } from './support/windows-task-fixture.js';
 import { createDashboard } from '../src/dashboard/server.js';
 import { Collector } from '../src/dashboard/collector.js';
 
 const scripts = fileURLToPath(new URL('../scripts/', import.meta.url));
-const common = fileURLToPath(new URL('../scripts/ai-workspace-dashboard-task.ps1', import.meta.url));
+const taskFixture = createWindowsTaskFixture();
+afterAll(() => taskFixture.dispose());
+const common = taskFixture.script('ai-workspace-dashboard-task.ps1');
 const launcher = fileURLToPath(new URL('../scripts/run-ai-workspace-dashboard.mjs', import.meta.url));
 const ps = (code: string) => spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 15000 });
 const dot = `. '${common.replaceAll("'", "''")}'`;
@@ -43,7 +46,7 @@ describe.skipIf(process.platform !== 'win32')('dashboard Scheduled Task prefligh
   it.each([
     "$task.Principal.UserId = 'workspace'",
     '$task.Principal.UserId = $DashboardAccount',
-    '$task.Principal.UserId = ([Security.Principal.NTAccount]::new($DashboardAccount)).Translate([Security.Principal.SecurityIdentifier]).Value',
+    '$task.Principal.UserId = $FixtureWorkspaceSid',
   ])('accepts same workspace SID regardless of account representation: %s', variation => expect(config(variation)).toBe(true));
   it('accepts HighestAvailable XML representation and equivalent ISO durations', () => {
     expect(config("$task.Principal = [pscustomobject]@{ UserId=$DashboardAccount; LogonType='S4U'; RunLevel='HighestAvailable' }; $task.Settings.ExecutionTimeLimit = 'PT00H00M00S'; $task.Settings.RestartInterval = 'PT60S'")).toBe(true);
@@ -51,6 +54,8 @@ describe.skipIf(process.platform !== 'win32')('dashboard Scheduled Task prefligh
   it.each([
     ["$task.Principal.UserId = 'S-1-5-18'", 'Principal.UserId'],
     ["$task.Principal.UserId = 'OTHER\\workspace'", 'Principal.UserId'],
+    ["$task.Principal.UserId = 'missing-fixture-account'", 'Principal.UserId'],
+    ["$task.Principal.UserId = 'S-1-invalid'", 'Principal.UserId'],
     ["$task.Principal.LogonType = 'Password'", 'Principal.LogonType'],
     ["$task = [pscustomobject]@{ TaskName='AI-Workspace-Dashboard'; Actions=$task.Actions; Triggers=$task.Triggers; Settings=$task.Settings; Principal=[pscustomobject]@{ UserId=$DashboardAccount; LogonType='InteractiveToken'; RunLevel='Highest' } }", 'Principal.LogonType'],
     ["$task.Settings.RestartInterval = 'PT5M'", 'Settings.RestartInterval'],
@@ -99,15 +104,16 @@ describe.skipIf(process.platform !== 'win32')('dashboard Scheduled Task prefligh
     expect(fs.readFileSync(`${scripts}/stop-ai-workspace-dashboard.ps1`, 'utf8')).not.toMatch(/Stop-Process|AI-Workspace-Gateway|AI-Workspace-Codex-InteractiveWorker/);
   });
   it('parses task, process, port, health and API without printing response bodies', () => {
-    const statusScript = fileURLToPath(new URL('../scripts/status-ai-workspace-dashboard.ps1', import.meta.url));
-    const run = (pid: number, command: string) => ps(`
+    const statusScript = taskFixture.script('status-ai-workspace-dashboard.ps1');
+    const run = (pid: number, command: string, historyAvailable = true) => ps(`
 function Get-ScheduledTask { $task = New-ScheduledTask -Action (New-ScheduledTaskAction -Execute 'C:\\Users\\workspace\\AppData\\Local\\Author Software\\nvm\\installs\\v24.16.0\\node.exe' -Argument '"C:\\work\\codex-with-chatgpt\\scripts\\run-ai-workspace-dashboard.mjs"' -WorkingDirectory 'C:\\work\\codex-with-chatgpt') -Trigger (New-ScheduledTaskTrigger -AtStartup) -Principal (New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\\workspace" -LogonType S4U -RunLevel Highest) -Settings (New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries); [pscustomobject]@{ TaskName='AI-Workspace-Dashboard'; State='Running'; Actions=$task.Actions; Triggers=$task.Triggers; Principal=$task.Principal; Settings=$task.Settings } }
-function Get-ScheduledTaskInfo { [pscustomobject]@{ LastTaskResult=0 } }
+function Get-ScheduledTaskInfo { ${historyAvailable ? '[pscustomobject]@{ LastTaskResult=0 }' : "throw 'history access unavailable'"} }
 function Get-CimInstance { [pscustomobject]@{ ProcessId=${pid}; ExecutablePath='C:\\Users\\workspace\\AppData\\Local\\Author Software\\nvm\\installs\\v24.16.0\\node.exe'; CommandLine='${command}' } }
 function Get-NetTCPConnection { [pscustomobject]@{ LocalAddress='127.0.0.1'; OwningProcess=42 } }
 function Invoke-WebRequest { param($Uri) [pscustomobject]@{ StatusCode=200; Content='{"ok":true,"service":"ai-workspace-dashboard"}' } }
 & '${statusScript.replaceAll("'", "''")}'`);
-    const valid = run(42, '"C:\\Users\\workspace\\AppData\\Local\\Author Software\\nvm\\installs\\v24.16.0\\node.exe" "C:\\work\\codex-with-chatgpt\\scripts\\run-ai-workspace-dashboard.mjs"');
+    const fixedCommand = '"C:\\Users\\workspace\\AppData\\Local\\Author Software\\nvm\\installs\\v24.16.0\\node.exe" "C:\\work\\codex-with-chatgpt\\scripts\\run-ai-workspace-dashboard.mjs"';
+    const valid = run(42, fixedCommand);
     expect(valid.status, valid.stderr).toBe(0);
     expect(valid.stdout).toContain('Registered: YES');
     expect(valid.stdout).toContain('Config valid: YES');
@@ -119,12 +125,17 @@ function Invoke-WebRequest { param($Uri) [pscustomobject]@{ StatusCode=200; Cont
     expect(valid.stdout).toContain('Dashboard serving: True');
     expect(valid.stdout).toContain('Dashboard readiness: True');
     expect(valid.stdout).not.toContain('"service"');
+    const unavailableHistory = run(42, fixedCommand, false);
+    expect(unavailableHistory.status, unavailableHistory.stderr).toBe(0);
+    expect(unavailableHistory.stderr).not.toContain('/*');
+    expect(unavailableHistory.stdout).toContain('LastTaskResult=unknown');
+    expect(unavailableHistory.stdout).toContain('Dashboard readiness: True');
     const malicious = run(42, 'node.exe "C:\\work\\codex-with-chatgpt\\scripts\\run-ai-workspace-dashboard.mjs" --port 80');
     expect(malicious.status, malicious.stderr).toBe(0);
     expect(malicious.stdout).toContain('Dashboard readiness: False');
   });
   it('accepts fixed S4U service as Serving when process metadata is unavailable without weakening Ready', () => {
-    const statusScript = fileURLToPath(new URL('../scripts/status-ai-workspace-dashboard.ps1', import.meta.url));
+    const statusScript = taskFixture.script('status-ai-workspace-dashboard.ps1');
     const result = ps(`
 function Get-ScheduledTask { $task = New-ScheduledTask -Action (New-ScheduledTaskAction -Execute 'C:\\Users\\workspace\\AppData\\Local\\Author Software\\nvm\\installs\\v24.16.0\\node.exe' -Argument '"C:\\work\\codex-with-chatgpt\\scripts\\run-ai-workspace-dashboard.mjs"' -WorkingDirectory 'C:\\work\\codex-with-chatgpt') -Trigger (New-ScheduledTaskTrigger -AtStartup) -Principal (New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\\workspace" -LogonType S4U -RunLevel Highest) -Settings (New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries); [pscustomobject]@{ TaskName='AI-Workspace-Dashboard'; State='Running'; Actions=$task.Actions; Triggers=$task.Triggers; Principal=$task.Principal; Settings=$task.Settings } }
 function Get-ScheduledTaskInfo { [pscustomobject]@{ LastTaskResult=267009 } }
@@ -169,7 +180,7 @@ function Invoke-WebRequest { param($Uri) [pscustomobject]@{ StatusCode=200; Cont
       }`,
     ],
   ])('fails Serving closed when %s', (_name, override) => {
-    const statusScript = fileURLToPath(new URL('../scripts/status-ai-workspace-dashboard.ps1', import.meta.url));
+    const statusScript = taskFixture.script('status-ai-workspace-dashboard.ps1');
     const result = ps(`
 function Get-ScheduledTask { $task = New-ScheduledTask -Action (New-ScheduledTaskAction -Execute 'C:\\Users\\workspace\\AppData\\Local\\Author Software\\nvm\\installs\\v24.16.0\\node.exe' -Argument '"C:\\work\\codex-with-chatgpt\\scripts\\run-ai-workspace-dashboard.mjs"' -WorkingDirectory 'C:\\work\\codex-with-chatgpt') -Trigger (New-ScheduledTaskTrigger -AtStartup) -Principal (New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\\workspace" -LogonType S4U -RunLevel Highest) -Settings (New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries); [pscustomobject]@{ TaskName='AI-Workspace-Dashboard'; State='Running'; Actions=$task.Actions; Triggers=$task.Triggers; Principal=$task.Principal; Settings=$task.Settings } }
 function Get-ScheduledTaskInfo { [pscustomobject]@{ LastTaskResult=0 } }
@@ -184,7 +195,7 @@ ${override}
     expect(result.stdout).toContain('Dashboard readiness: False');
   });
   it('reports a mismatch reason without hiding task state, listener and health', () => {
-    const statusScript = fileURLToPath(new URL('../scripts/status-ai-workspace-dashboard.ps1', import.meta.url));
+    const statusScript = taskFixture.script('status-ai-workspace-dashboard.ps1');
     const result = ps(`
 function Get-ScheduledTask { $task = New-ScheduledTask -Action (New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '"C:\\work\\codex-with-chatgpt\\scripts\\run-ai-workspace-dashboard.mjs"' -WorkingDirectory 'C:\\work\\codex-with-chatgpt') -Trigger (New-ScheduledTaskTrigger -AtStartup) -Principal (New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\\workspace" -LogonType S4U -RunLevel Highest) -Settings (New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries); [pscustomobject]@{ TaskName='AI-Workspace-Dashboard'; State='Ready'; Actions=$task.Actions; Triggers=$task.Triggers; Principal=$task.Principal; Settings=$task.Settings } }
 function Get-ScheduledTaskInfo { [pscustomobject]@{ LastTaskResult=17 } }

@@ -16,7 +16,7 @@ WScript.Quit code
     if (-not (Test-Path -LiteralPath $launcher -PathType Leaf) -or -not (Test-Path -LiteralPath $entrypoint -PathType Leaf)) { return $false }
     # Do not accept a task that points at a modified VBS with an additional command.
     $actualVbs = [IO.File]::ReadAllText($launcher).Replace("`r`n", "`n").TrimEnd("`n")
-    if ($actualVbs -cne $expectedVbs) { return $false }
+    if ($actualVbs -cne $expectedVbs.Replace("`r`n", "`n")) { return $false }
     $actions = @($Task.Actions)
     $triggers = @($Task.Triggers)
     return [bool]($Task.Settings.Enabled -and $Task.Principal.UserId -in @('workspace', $account) -and

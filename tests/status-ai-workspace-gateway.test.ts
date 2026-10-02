@@ -3,11 +3,13 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const statusScript = fileURLToPath(new URL('../scripts/status-ai-workspace-gateway.ps1', import.meta.url));
+const launcher = fileURLToPath(new URL('../scripts/launch-codex-interactive-worker.vbs', import.meta.url)).replaceAll("'", "''");
 
 function statusWithCloudflared(present: boolean, commandLine: string | null): string {
   const script = `
 function Get-ScheduledTask { $null }
-function Get-WorkspaceInteractiveSessions { [pscustomobject]@{ SessionId = 2; User = 'AI-WORKSPACE-W\\workspace'; State = 'Disconnected' } }
+function Get-WorkspaceInteractiveSessions { [pscustomobject]@{ SessionId = 2; User = "$env:COMPUTERNAME\\workspace"; State = 'Disconnected' } }
+function Test-Path { $false }
 function Get-CimInstance {
     param($ClassName, $Filter)
     if ($Filter -and ${present ? '$true' : '$false'}) {
@@ -72,7 +74,7 @@ function Get-ScheduledTask {
         State = 'Ready'; Settings = [pscustomobject]@{ Enabled = $true }
         Principal = [pscustomobject]@{ UserId = 'workspace'; LogonType = 'Interactive'; RunLevel = 'Highest' }
         Triggers = @([pscustomobject]@{ UserId = 'workspace'; CimClass = [pscustomobject]@{ CimClassName = 'MSFT_TaskLogonTrigger' } })
-        Actions = @([pscustomobject]@{ Execute = "$env:SystemRoot\\System32\\wscript.exe"; Arguments = '//B //Nologo "C:\\work\\codex-with-chatgpt\\scripts\\launch-codex-interactive-worker.vbs"'; WorkingDirectory = 'C:\\work\\codex-with-chatgpt' })
+        Actions = @([pscustomobject]@{ Execute = "$env:SystemRoot\\System32\\wscript.exe"; Arguments = '//B //Nologo "${launcher}"'; WorkingDirectory = 'C:\\work\\codex-with-chatgpt' })
     }
 }
 function Get-ScheduledTaskInfo { [pscustomobject]@{ LastTaskResult = 3221225786 } }

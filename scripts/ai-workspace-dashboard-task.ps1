@@ -101,7 +101,7 @@ function Get-DashboardObservation {
             $info = Get-ScheduledTaskInfo -TaskName $DashboardTask -ErrorAction Stop
             if ($null -ne $info.LastTaskResult) { $lastResult = $info.LastTaskResult }
         }
-        catch { /* status remains available even without history access */ }
+        catch { <# status remains available even without history access #> }
     }
     $allProcesses = @(try { Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction Stop } catch { @() })
     $processes = @($allProcesses | Where-Object {
