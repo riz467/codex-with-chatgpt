@@ -1,11 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { IgnoreRules } from "../workspace/ignore.js";
-import { reviewWorkspaces } from "./review-profiles.js";
-import { startAutonomous, autonomousObservation } from "./autonomous-gateway.js";
+import { reviewProfiles, reviewWorkspaces } from "./review-profiles.js";
+import { autonomousObservation } from "./autonomous-gateway.js";
 
 export const REVIEW_ROOT = "C:\\work\\ai-orchestration-review";
 export const REPOS = {
@@ -16,13 +16,7 @@ export const REPOS = {
 export type LedgerReadRoots = Readonly<Record<keyof typeof REPOS, string>>;
 /** Trusted in-process composition only; never a tool argument or mutation dependency. */
 export type OrchestrationReadDependencies = Readonly<{ reviewRoot: string; repoRoots: LedgerReadRoots }>;
-// Review-only fixture identities. Do not add these to orchestration.start's repo allowlist.
-const AI_RUN = "C:\\Users\\workspace\\.local\\bin\\ai-run.ps1";
-const AI_COMPLETE = "C:\\Users\\workspace\\.local\\bin\\ai-complete.ps1";
-const AI_COMPLETE_INTEGRATED = "C:\\Users\\workspace\\.local\\bin\\ai-complete-integrated.ps1";
-const POWERSHELL = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
 const READ_ONLY_WORKER = fileURLToPath(new URL("./read-only-worker.js", import.meta.url));
-const AI_RUN_SCOPED = fileURLToPath(new URL("./invoke-ai-run.ps1", import.meta.url));
 export type OrchestrationMode = "read_only" | "change" | "autonomous";
 const idPattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/;
 const hash = (bytes: Buffer | string): string => createHash("sha256").update(bytes).digest("hex");
@@ -134,37 +128,12 @@ export function startTestJob(root = REVIEW_ROOT) {
   return marker;
 }
 
-export function completeOrchestration(taskId: string, reviewResult: string, doneApproved: boolean) {
-  return completeWithEngine(taskId, reviewResult, doneApproved, AI_COMPLETE);
+export function completeOrchestration(_taskId: string, _reviewResult: string, _doneApproved: boolean): never {
+  throw new GatewayError("LEGACY_COMPLETION_DISABLED", "Legacy authoritative completion is disabled; caller PASS / DoneApproved is historical evidence, not authority. An RC-02 bound request is required.");
 }
 
-export function completeIntegratedOrchestration(taskId: string, reviewResult: string, doneApproved: boolean) {
-  return completeWithEngine(taskId, reviewResult, doneApproved, AI_COMPLETE_INTEGRATED);
-}
-
-function completeWithEngine(taskId: string, reviewResult: string, doneApproved: boolean, launcher: string) {
-  if (!idPattern.test(taskId)) throw new GatewayError("INVALID_ID", "Invalid task id");
-  if (reviewResult !== "PASS" || doneApproved !== true) throw new GatewayError("DECISION_REQUIRED", "Explicit PASS and done_approved: true required");
-  // No caller-supplied path, repo, bundle, state or command. Only fixed repos are searched.
-  const candidates = Object.entries(REPOS).filter(([key]) => {
-    const repo = repoRoot(key as keyof typeof REPOS);
-    return fs.existsSync(safePath(repo, `.ai/tasks/${taskId}/status.json`));
-  });
-  if (candidates.length !== 1) throw new GatewayError("NOT_FOUND", "Task must exist in exactly one allowlisted repository");
-  const repo = repoRoot(candidates[0][0] as keyof typeof REPOS);
-  // Legacy completion cannot bypass the authoritative autonomous approval contract.
-  if (/^rpc-[a-f0-9]{32}$/.test(taskId) &&
-      fs.existsSync(safePath(REVIEW_ROOT, `rpc-jobs/auto-${taskId.slice(4)}/autonomous-run.json`))) {
-    throw new GatewayError("AUTONOMOUS_APPROVAL_REQUIRED", "Use the authoritative fixed-schema autonomous approval gate");
-  }
-  if (!fs.existsSync(launcher) || !fs.existsSync(POWERSHELL)) throw new GatewayError("RUNTIME_UNAVAILABLE", "Completion CLI is not deployed");
-  const result = spawnSync(POWERSHELL, ["-NoProfile", "-NonInteractive", "-File", launcher,
-    "-Repo", repo, "-TaskId", taskId, "-ReviewResult", "PASS", "-DoneApproved"],
-    { cwd: repo, shell: false, windowsHide: true, encoding: "utf8", timeout: 120000, maxBuffer: 65536 });
-  if (result.error || result.status !== 0 || !result.stdout?.includes("RESULT: DONE")) {
-    throw new GatewayError("COMPLETE_REJECTED", "Engine refused completion; inspect local engine evidence");
-  }
-  return { task_id: taskId, state: "DONE", repo: candidates[0][0] };
+export function completeIntegratedOrchestration(_taskId: string, _reviewResult: string, _doneApproved: boolean): never {
+  throw new GatewayError("LEGACY_COMPLETION_DISABLED", "Legacy integrated authoritative completion is disabled; an RC-02 bound request is required.");
 }
 
 type Job = { job_id: string; task_id: string; mode?: OrchestrationMode; process_id: number; repo_key: keyof typeof REPOS; started_at: string;
@@ -234,22 +203,24 @@ export function validateEditPaths(repo: string, paths: string[]): string[] {
 }
 
 export function startOrchestration(repo: string, goal: string, mode: OrchestrationMode, root = REVIEW_ROOT, editPaths?: string[]) {
-  if (mode === "autonomous") return startAutonomous(repo, goal, editPaths, root);
+  // Preserve pure identity rejection without consulting profiles on disk or dispatching a controller.
+  if (mode === "autonomous" && !Object.hasOwn(REPOS, repo) && !Object.hasOwn(reviewProfiles, repo)) {
+    throw new GatewayError("INVALID_REPO", "Unknown autonomous repository key");
+  }
   return launchOrchestration(repo, goal, mode, root, editPaths);
 }
-function launchOrchestration(repo: string, goal: string, mode: OrchestrationMode, root: string, editPaths?: string[], lineage?:
-  { parent_task_id: string; retry_of: string; retry_reason: string; attempt: number }) {
-  if (!Object.hasOwn(REPOS, repo)) throw new GatewayError("INVALID_REPO", "Unknown repository key");
-  if (mode !== "read_only" && mode !== "change") throw new GatewayError("INVALID_MODE", "Choose read_only or change");
+function launchOrchestration(repo: string, goal: string, mode: OrchestrationMode, root: string, editPaths?: string[]) {
+  if (mode !== "autonomous" && !Object.hasOwn(REPOS, repo)) throw new GatewayError("INVALID_REPO", "Unknown repository key");
+  // Before any filesystem repository inspection, registry writes or dispatch.
+  if (mode === "change" || mode === "autonomous") throw new GatewayError("FRESH_REQUEST_REQUIRED",
+    "Legacy change/autonomous start is quarantined; an RC-02 bound request is required. Read-only inspection remains available.");
+  if (mode !== "read_only") throw new GatewayError("INVALID_MODE", "Only read_only inspection is available");
   if (mode === "read_only" && editPaths !== undefined) throw new GatewayError("INVALID_EDIT_PATHS", "read_only does not accept edit_paths");
   if (typeof goal !== "string" || !goal.trim() || goal.length > 4000 || /[\x00-\x1f\x7f]/.test(goal)) {
     throw new GatewayError("INVALID_GOAL", "Goal must be nonempty, at most 4000 characters, without control characters");
   }
   const key = repo as keyof typeof REPOS;
   const repoPath = repoRoot(key);
-  const scoped = editPaths === undefined ? undefined : validateEditPaths(repoPath, editPaths);
-  if (mode === "change" && (!fs.existsSync(AI_RUN) || !fs.existsSync(POWERSHELL))) throw new GatewayError("RUNTIME_UNAVAILABLE", "Expected ai-run or pwsh not installed");
-  if (scoped && !fs.existsSync(AI_RUN_SCOPED)) throw new GatewayError("RUNTIME_UNAVAILABLE", "Scoped ai-run adapter not built");
   if (mode === "read_only" && !fs.existsSync(READ_ONLY_WORKER)) throw new GatewayError("RUNTIME_UNAVAILABLE", "Read-only worker not built");
   const jobsDir = safePath(root, "rpc-jobs");
   fs.mkdirSync(jobsDir, { recursive: true });
@@ -267,16 +238,12 @@ function launchOrchestration(repo: string, goal: string, mode: OrchestrationMode
   const out = fs.openSync(stdout_path, "wx"), err = fs.openSync(stderr_path, "wx");
   let child;
   try {
-    child = mode === "change"
-      ? spawn(POWERSHELL, ["-NoProfile", "-NonInteractive", "-File", scoped ? AI_RUN_SCOPED : AI_RUN, "-Repo", repoPath, "-TaskId", task_id, "-Goal", goal,
-          ...(scoped ? ["-EditPathsBase64", Buffer.from(JSON.stringify(scoped), "utf8").toString("base64")] : [])],
-        { cwd: repoPath, shell: false, stdio: ["ignore", out, err], windowsHide: true })
-      : spawn(process.execPath, [READ_ONLY_WORKER, key, job_id, task_id],
-        { cwd: repoPath, shell: false, stdio: ["ignore", out, err], windowsHide: true });
+    child = spawn(process.execPath, [READ_ONLY_WORKER, key, job_id, task_id],
+      { cwd: repoPath, shell: false, stdio: ["ignore", out, err], windowsHide: true });
   } finally { fs.closeSync(out); fs.closeSync(err); }
-  if (!child.pid) throw new GatewayError("RUNTIME_UNAVAILABLE", "Could not start ai-run");
+  if (!child.pid) throw new GatewayError("RUNTIME_UNAVAILABLE", "Could not start read-only worker");
   const job: Job = { job_id, task_id, mode, process_id: child.pid, repo_key: key, started_at: new Date().toISOString(), goal_sha256: hash(goal),
-    goal, ...(scoped ? { edit_paths: scoped } : {}), stdout_path, stderr_path, ...lineage };
+    goal, stdout_path, stderr_path };
   const file = jobFile(root, job_id);
   fs.writeFileSync(file, JSON.stringify(job), { flag: "wx" });
   child.on("exit", (code) => {
@@ -287,7 +254,7 @@ function launchOrchestration(repo: string, goal: string, mode: OrchestrationMode
   });
   child.unref();
   return { job_id, task_id, repo: key, mode, started_at: job.started_at,
-    parent_task_id: lineage?.parent_task_id ?? null, retry_of: lineage?.retry_of ?? null, attempt: lineage?.attempt ?? 1 };
+    parent_task_id: null, retry_of: null, attempt: 1 };
 }
 
 function findJob(id: string, root: string): Job {
@@ -332,6 +299,17 @@ function lookupForRead(id: string, root: string, roots: LedgerReadRoots): { job:
 }
 function evidence(job: Job) {
   return readTaskEvidence(repoRoot(job.repo_key), job.task_id);
+}
+
+/** Preserve stored autonomous evidence, but never project legacy local DONE as authority. */
+function legacyAutonomousObservation(id: string, root: string) {
+  const observation = autonomousObservation(id, root);
+  if (!observation) return null;
+  const done = observation.state === "DONE" || observation.result_category === "DONE" || observation.done_state === "DONE";
+  return { ...observation, authoritative_done: false,
+    result_category: done ? "LEGACY_LOCAL_DONE" : observation.result_category,
+    final_result: done ? "LEGACY_LOCAL_DONE" : observation.final_result,
+    done_state: done ? "LEGACY_LOCAL_DONE" : observation.done_state };
 }
 function readTaskEvidence(repo: string, taskId: string) {
   const file = safePath(repo, `.ai/tasks/${taskId}/status.json`);
@@ -400,7 +378,7 @@ function completionDetails(taskId: string, repo: keyof typeof REPOS, status: Rec
   }
   const transitions = Array.isArray(status.state_transition_history) ? status.state_transition_history : [];
   const doneTransition = transitions.filter((row): row is Record<string, unknown> => !!row && typeof row === "object" && (row as Record<string, unknown>).to === "DONE").at(-1);
-  return { result_category: "DONE", review_bundle: bundle, published: bundle !== null,
+  return { result_category: "LEGACY_LOCAL_DONE", authoritative_done: false, review_bundle: bundle, published: bundle !== null,
     completion_mode: typeof decision.completion_mode === "string" ? decision.completion_mode : null,
     review_result: decision.review_result, done_approved: decision.done_approved,
     completed_at: typeof integration?.completed_at === "string" ? integration.completed_at :
@@ -418,10 +396,10 @@ type StopReasonCategory = "HUMAN_APPROVAL_REQUIRED" | "SCOPE_CONFIRMATION_REQUIR
 function stopReason(category: StopReasonCategory | null, summary: string | null) {
   const actions: Record<StopReasonCategory, string> = {
     HUMAN_APPROVAL_REQUIRED: "Human review of the recorded proposal is required; the engine has no approval/resume route for this task.",
-    SCOPE_CONFIRMATION_REQUIRED: "Inspect candidate paths; a new-task retry is allowed only if the original explicit edit_paths were recorded.",
-    EVIDENCE_INSUFFICIENT: "Check retry eligibility, then retry research as a new task with the same scope on explicit user request; never resume the original task.",
-    VERIFY_BLOCKED: "Inspect verification evidence; use ai-resume only if the engine RetryVerify preflight accepts this task.",
-    EXECUTION_BLOCKED: "Inspect the execution environment and retry eligibility; only a new task with the original bounded scope may be retried.",
+    SCOPE_CONFIRMATION_REQUIRED: "Inspect candidate paths; a fresh RC-02 request / attempt is required. Legacy retry / redispatch is unavailable.",
+    EVIDENCE_INSUFFICIENT: "Inspect historical research evidence; a fresh RC-02 request / attempt is required. Legacy retry / redispatch is unavailable.",
+    VERIFY_BLOCKED: "Inspect verification evidence; a fresh RC-02 request / attempt is required. Legacy retry / redispatch is unavailable.",
+    EXECUTION_BLOCKED: "Inspect the execution environment; a fresh RC-02 request / attempt is required. Legacy retry / redispatch is unavailable.",
     READY_FOR_REVIEW: "Perform independent review of the verified changes.",
   };
   return { stop_reason_category: category, stop_reason_summary: summary,
@@ -513,75 +491,11 @@ function retryPlan(id: string, root: string) {
   const fail = (reason: string) => ({ job_id: job.job_id, task_id: job.task_id, repo: job.repo_key, mode,
     state: status?.state ?? null, stop_reason_category: category, eligible: false, reason,
     inherited_goal: null, inherited_edit_paths: null, ...lineage(job) });
-  if (active || job.exit_code === undefined) return fail("The original job has not finished");
-  if (mode === "change") {
-    const gate = gateDisposition(status);
-    if (gate === "refuse") return fail("Policy refusal requires a newly authorized contract, not an automatic retry");
-    if (gate === "unverified") return fail("Unverified policy gate requires a newly authorized contract, not an automatic retry");
-  }
-  if (category === "VERIFY_BLOCKED") return fail("Use the engine's RetryVerify preflight (ai-resume); do not create a new task");
-  if (category === "HUMAN_APPROVAL_REQUIRED") return fail("Human approval is required; retry cannot bypass the gate");
-  if (category === "READY_FOR_REVIEW" || category === null) return fail("Task is not eligible for a new-task retry");
-  if (!(["EVIDENCE_INSUFFICIENT", "EXECUTION_BLOCKED", "SCOPE_CONFIRMATION_REQUIRED"] as (typeof category)[]).includes(category)) return fail("Unsupported stop reason");
-  if ((job.attempt ?? 1) >= 3) return fail("Retry limit reached (maximum three attempts including the original)");
-  const jobsDir = safePath(root, "rpc-jobs");
-  if (fs.existsSync(safePath(root, `rpc-jobs/.retry-${job.job_id}.lock`))) return fail("A retry has already been reserved for this task");
-  for (const candidate of fs.readdirSync(jobsDir)) {
-    if (idPattern.test(candidate) && fs.existsSync(jobFile(root, candidate)) && readJob(root, candidate).parent_task_id === job.task_id) {
-      return fail("A retry already exists for this task; follow the child job instead");
-    }
-  }
-  const goal = status?.goal ?? job.goal;
-  if (typeof goal !== "string" || !goal.trim() || goal.length > 4000 || /[\x00-\x1f\x7f]/.test(goal) ||
-    typeof job.goal_sha256 !== "string" || hash(goal) !== job.goal_sha256 || (job.goal !== undefined && job.goal !== goal)) {
-    return fail("Original goal is unavailable or differs from the registered goal hash");
-  }
-  let editPaths: string[] | undefined;
-  if (mode === "change") {
-    const sourcePaths = status?.edit_paths ?? job.edit_paths;
-    if (!Array.isArray(sourcePaths) || sourcePaths.length < 1 || sourcePaths.length > 5 ||
-      sourcePaths.some((entry) => typeof entry !== "string")) return fail("No bounded original edit scope can be recovered");
-    if (category === "SCOPE_CONFIRMATION_REQUIRED" && (!job.edit_paths ||
-      job.edit_paths.length !== sourcePaths.length || job.edit_paths.some((entry, index) => entry !== sourcePaths[index]))) {
-      return fail("Scope confirmation needs explicitly recorded original edit_paths");
-    }
-    if (job.edit_paths && (job.edit_paths.length !== sourcePaths.length || job.edit_paths.some((entry, index) => entry !== sourcePaths[index]))) {
-      return fail("Original registry and engine scope differ");
-    }
-    const allowed = status?.allowed_paths;
-    if (status && (!Array.isArray(allowed) || allowed.length !== sourcePaths.length + 1 ||
-      sourcePaths.some((entry) => !allowed.includes(entry)) ||
-      !allowed.includes(`.ai/tasks/${job.task_id}/**`))) return fail("Engine allowlist and edit scope differ");
-    if (Array.isArray(status?.edits) && status.edits.length !== 0) return fail("Original task has applied edits; a fresh run could duplicate changes");
-    try {
-      editPaths = validateEditPaths(repoRoot(job.repo_key), sourcePaths as string[]);
-      if (editPaths.length !== sourcePaths.length || editPaths.some((entry, index) => entry !== sourcePaths[index])) {
-        return fail("Original scope is no longer identical after path validation");
-      }
-    } catch { return fail("Original edit scope is no longer valid or safe"); }
-  }
-  return { job_id: job.job_id, task_id: job.task_id, repo: job.repo_key, mode,
-    state: status?.state ?? null, stop_reason_category: category, eligible: true, reason: "New task only; original evidence remains unchanged",
-    inherited_goal: goal, inherited_edit_paths: editPaths ?? null, ...lineage(job) };
+  return fail("Fresh RC-02 request / attempt required; original evidence remains immutable. Legacy retry / redispatch is unavailable.");
 }
 export function getOrchestrationRetryPlan(id: string, root = REVIEW_ROOT) { return retryPlan(id, root); }
-export function retryOrchestration(id: string, retryReason = "User requested a same-scope retry", root = REVIEW_ROOT) {
-  if (typeof retryReason !== "string" || !retryReason.trim() || retryReason.length > 300 || /[\x00-\x1f\x7f]/.test(retryReason)) {
-    throw new GatewayError("INVALID_RETRY_REASON", "Retry reason must be 1-300 characters without control characters");
-  }
-  const plan = retryPlan(id, root);
-  if (!plan.eligible || !plan.inherited_goal) throw new GatewayError("RETRY_NOT_ALLOWED", plan.reason);
-  const parent = findJob(id, root);
-  // Atomic reservation in the RPC registry, not in the original task ledger/job.
-  // A crashed process leaves the reservation in place rather than risking duplicate retries.
-  const lock = safePath(root, `rpc-jobs/.retry-${parent.job_id}.lock`);
-  try { fs.writeFileSync(lock, JSON.stringify({ parent_task_id: parent.task_id, retry_of: parent.retry_of ?? parent.task_id }), { flag: "wx" }); }
-  catch { throw new GatewayError("RETRY_NOT_ALLOWED", "Retry already reserved for this task"); }
-  // Keep the reservation even if launch fails: a child may have started before
-  // registry persistence failed. Fail closed rather than risk two child tasks.
-  const child = launchOrchestration(plan.repo, plan.inherited_goal, plan.mode, root, plan.inherited_edit_paths ?? undefined,
-    { parent_task_id: parent.task_id, retry_of: parent.retry_of ?? parent.task_id, retry_reason: retryReason, attempt: (parent.attempt ?? 1) + 1 });
-  return { ...child, retry_reason: retryReason, stop_reason_category: plan.stop_reason_category };
+export function retryOrchestration(_id: string, _retryReason = "User requested a same-scope retry", _root = REVIEW_ROOT): never {
+  throw new GatewayError("FRESH_REQUEST_REQUIRED", "Legacy retry / redispatch is quarantined; a fresh RC-02 request / attempt is required. Original evidence remains immutable.");
 }
 function finalProposal(job: Job, status: Record<string, unknown>, roots: LedgerReadRoots = REPOS): { proposal: Record<string, unknown> | null; proposal_hash: string | null } {
   const repo = readRepoRoot(job.repo_key, roots);
@@ -645,7 +559,7 @@ export function getOrchestrationApproval(id: string, root = REVIEW_ROOT) {
   return { job_id: job.job_id, task_id: job.task_id, repo: job.repo_key, state: "NEEDS_APPROVAL", ...approvalDetails(job, status) };
 }
 export function getOrchestrationStatus(id: string, root = REVIEW_ROOT, roots: LedgerReadRoots = REPOS) {
-  const autonomous = autonomousObservation(id, root);
+  const autonomous = legacyAutonomousObservation(id, root);
   if (autonomous) return autonomous;
   const lookup = lookupForRead(id, root, roots), { job, repo } = lookup;
   if (!job) {
@@ -654,7 +568,7 @@ export function getOrchestrationStatus(id: string, root = REVIEW_ROOT, roots: Le
     return { job_id: null, repo, task_id: id, mode: "change" as const, process: "not_running", exit_code: null,
       state, updated_at: status.last_updated ?? null, next_action: state === "DONE" ? "None" :
         state === "READY_FOR_REVIEW" ? "ChatGPT review" : "Inspect task evidence",
-      result_category: state === "DONE" ? "DONE" : null, ...classifyStop(status, null, false),
+      result_category: state === "DONE" ? "LEGACY_LOCAL_DONE" : null, authoritative_done: false, ...classifyStop(status, null, false),
       parent_task_id: typeof status.parent_task_id === "string" ? status.parent_task_id : null,
       retry_of: typeof status.retry_of === "string" ? status.retry_of : null,
       attempt: typeof status.attempt === "number" ? status.attempt : null };
@@ -671,17 +585,18 @@ export function getOrchestrationStatus(id: string, root = REVIEW_ROOT, roots: Le
     next_action: mode === "read_only" ? active ? "Poll status" : state === "DONE" ? "Read result" : "Inspect local worker error" :
       state === "NEEDS_APPROVAL" ? "Inspect approval evidence; engine has no approval/resume route" : state === "BLOCKED" ? "Inspect task evidence" :
        state === "DONE" ? "None" : state === "READY_FOR_REVIEW" ? "ChatGPT review" : active ? "Poll status" : "Inspect job output locally",
-    result_category: state === "DONE" && mode === "change" ? "DONE" : result, ...stop, ...lineage(job) };
+    result_category: mode === "change" && (state === "DONE" || result === "DONE") ? "LEGACY_LOCAL_DONE" : result,
+    authoritative_done: false, ...stop, ...lineage(job) };
 }
 export function getOrchestrationResult(id: string, root = REVIEW_ROOT, roots: LedgerReadRoots = REPOS) {
-  const autonomous = autonomousObservation(id, root);
+  const autonomous = legacyAutonomousObservation(id, root);
   if (autonomous) return autonomous;
   const lookup = lookupForRead(id, root, roots), { job, repo } = lookup;
   const mode = job?.mode ?? "change";
   const status = mode === "change" ? lookup.status : readOnlyEvidence(job!, root);
   if (mode === "read_only" && job) {
     const done = job.exit_code === 0 && status !== null && !running(job);
-    return { job_id: job.job_id, task_id: job.task_id, mode, state: done ? "DONE" : null,
+    return { job_id: job.job_id, task_id: job.task_id, mode, state: done ? "DONE" : null, authoritative_done: false,
       summary: done ? (status.summary as string).slice(0, 1000) : "", changed_paths: [],
       verification: done ? status.verification : { completed: false, exit_code: null },
       blocker_or_approval_reason: null, review_bundle: null, published: false,
@@ -692,12 +607,13 @@ export function getOrchestrationResult(id: string, root = REVIEW_ROOT, roots: Le
   const bundle = job ? bundleFor(job, root) : null;
   const taskId = job?.task_id ?? id;
   const completion = status && state === "DONE" ? completionDetails(taskId, repo, status, root, roots) : {};
-  return { job_id: job?.job_id ?? null, task_id: taskId, repo, mode, state, summary: String(status?.message ?? "").slice(0, 1000),
+  return { job_id: job?.job_id ?? null, task_id: taskId, repo, mode, state, authoritative_done: false, summary: String(status?.message ?? "").slice(0, 1000),
     changed_paths: Array.isArray(status?.edits) ? status.edits.slice(0, 20).map((edit: unknown) => edit && typeof edit === "object" ? short((edit as Record<string, unknown>).path, 240) : null).filter((x): x is string => x !== null) : [],
     verification: { completed: status?.verify_completed === true, exit_code: status?.verify_exit_code ?? null },
     blocker_or_approval_reason: state === "BLOCKED" || state === "NEEDS_APPROVAL" ? String(status?.message ?? "").slice(0, 1000) : null,
     review_bundle: bundle ? safePath(root, bundle) : null, published: bundle !== null, final_result_line: job ? resultLine(job, root) : null,
-    ...(state === "NEEDS_APPROVAL" && job ? { result_category: resultLine(job, root)?.slice(8) ?? "HUMAN_APPROVAL_REQUIRED", ...approvalDetails(job, status!, roots) } :
+    ...(state === "NEEDS_APPROVAL" && job ? { result_category: resultLine(job, root) === "RESULT: DONE" ? "LEGACY_LOCAL_DONE" :
+      resultLine(job, root)?.slice(8) ?? "HUMAN_APPROVAL_REQUIRED", ...approvalDetails(job, status!, roots) } :
       { ...classifyStop(status, job ? resultLine(job, root)?.slice(8) ?? null : null, job ? running(job) : false) }),
     ...(job ? lineage(job) : { parent_task_id: typeof status?.parent_task_id === "string" ? status.parent_task_id : null,
       retry_of: typeof status?.retry_of === "string" ? status.retry_of : null, attempt: typeof status?.attempt === "number" ? status.attempt : null }),

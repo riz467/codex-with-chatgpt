@@ -318,9 +318,9 @@ export function createMcpServer(ctx: McpContext): McpServer {
   });
   server.registerTool("start_orchestration", {
     title: "Start local orchestration",
-    description: "Start a bounded local task. Autonomous mode accepts only trusted repository profiles and an optional exact fixed edit scope; OpenCode makes the decisions and Codex performs at most one bounded implementation. Legacy read_only/change remain unchanged. Returns immediately.",
-    inputSchema: { repo: z.string().min(1).max(80), mode: z.enum(["read_only", "change", "autonomous"]), goal: z.string().min(1).max(4000),
-      edit_paths: z.array(z.string()).min(1).max(5).optional().describe("Change mode only: existing repo-relative files, no globs or traversal") },
+    description: "Legacy Gateway currently supports read_only inspection only. Change/autonomous starts are quarantined until RC-02 bound request / attempt / gate integration. Returns immediately; inspection creates only local job evidence.",
+    inputSchema: { repo: z.string().min(1).max(80), mode: z.enum(["read_only"]), goal: z.string().min(1).max(4000),
+      edit_paths: z.array(z.string()).min(1).max(5).optional().describe("Legacy compatibility field; rejected for read_only inspection") },
     annotations: { readOnlyHint: false, openWorldHint: false },
   }, async (args, extra) => {
     const denied = requireScope(extra.authInfo, "orchestration.start"); if (denied) return denied;
@@ -328,12 +328,12 @@ export function createMcpServer(ctx: McpContext): McpServer {
   });
   server.registerTool("get_orchestration_status", {
     title: "Orchestration status",
-    description: "Read a registered job by id/job_id, or a task by task_id. Missing registry tasks fall back to fixed allowlisted engine ledgers.",
+    description: "Read historical evidence by id/job_id/task_id, falling back to fixed engine ledgers. Stored DONE is LEGACY_LOCAL_DONE with authoritative_done=false, not authoritative completion.",
     inputSchema: z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/).optional(),
       job_id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/).optional(),
       task_id: z.string().regex(/^rpc-[a-zA-Z0-9_-]{1,75}$/).optional() }).strict(), annotations: { readOnlyHint: true },
     outputSchema: z.object({ job_id: z.string().nullable(), task_id: z.string(), mode: z.enum(["read_only", "change", "autonomous"]), state: z.string().nullable(),
-      result_category: z.string().nullable(), ...stopReasonOutputSchema }).passthrough(),
+      result_category: z.string().nullable(), authoritative_done: z.literal(false), ...stopReasonOutputSchema }).passthrough(),
   }, async (args, extra) => {
     const denied = requireScope(extra.authInfo, "review.read"); if (denied) return denied;
     try {
@@ -344,12 +344,12 @@ export function createMcpServer(ctx: McpContext): McpServer {
   });
   server.registerTool("get_orchestration_result", {
     title: "Orchestration result",
-    description: "Read a result by id/job_id/task_id. Change mode uses the fixed task ledger (including completed tasks); read_only uses registered inspection evidence.",
+    description: "Read historical results by id/job_id/task_id. Local DONE is LEGACY_LOCAL_DONE with authoritative_done=false; PASS, done_approved and completion_mode are historical evidence only. Read_only uses registered inspection evidence.",
     inputSchema: z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/).optional(),
       job_id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/).optional(),
       task_id: z.string().regex(/^rpc-[a-zA-Z0-9_-]{1,75}$/).optional() }).strict(), annotations: { readOnlyHint: true },
     outputSchema: z.object({ job_id: z.string().nullable(), task_id: z.string(), mode: z.enum(["read_only", "change", "autonomous"]), state: z.string().nullable(),
-      ...stopReasonOutputSchema }).passthrough(),
+      authoritative_done: z.literal(false), ...stopReasonOutputSchema }).passthrough(),
   }, async (args, extra) => {
     const denied = requireScope(extra.authInfo, "review.read"); if (denied) return denied;
     try {
@@ -368,8 +368,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
     try { return okStructured(getOrchestrationApproval(args.id)); } catch (error) { return mapError(error); }
   });
   server.registerTool("get_orchestration_retry_plan", {
-    title: "Check safe retry eligibility",
-    description: "Read-only check of a stopped registered task. Recovers the original hashed goal and bounded scope; does not start a task or bypass approval.",
+    title: "Inspect legacy retry migration status",
+    description: "Read-only historical status / lineage inspection. Legacy eligibility is always false; fresh RC-02 request / attempt required. Original evidence remains immutable; retry / redispatch unavailable.",
     inputSchema: z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/) }).strict(),
     annotations: { readOnlyHint: true, openWorldHint: false },
   }, async (args, extra) => {
@@ -377,8 +377,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
     try { return okStructured(getOrchestrationRetryPlan(args.id)); } catch (error) { return mapError(error); }
   });
   server.registerTool("retry_orchestration", {
-    title: "Retry stopped orchestration as a new task",
-    description: "Starts one new task only for an eligible stopped job, using its recorded goal, repo, mode and unchanged bounded scope. Never resumes or edits the original task; approval and verify gates remain in force. No command, executable, repo, goal or path input.",
+    title: "Disabled legacy retry compatibility endpoint",
+    description: "Legacy compatibility endpoint: retry / redispatch is quarantined and always rejected before reservation or child creation. A fresh RC-02 request / attempt is required; original evidence remains immutable.",
     inputSchema: z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/),
       retry_reason: z.string().min(1).max(300).optional() }).strict(),
     annotations: { readOnlyHint: false, openWorldHint: false },
@@ -388,8 +388,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
   });
   // Do not expose any completion write through the review-bound connector.
   if (workspace.root.toLowerCase() !== REVIEW_ROOT.toLowerCase()) server.registerTool("complete_orchestration", {
-    title: "Complete independently reviewed orchestration",
-    description: "After explicit human approval of an independent PASS review, ask the engine to move a verified published task from READY_FOR_REVIEW to DONE. No paths or states accepted; no review result is inferred.",
+    title: "Disabled legacy completion compatibility endpoint",
+    description: "Legacy compatibility endpoint; authoritative completion disabled. Always rejects before discovery or engine calls, including caller PASS and done_approved=true. RC-02 bound request required.",
     inputSchema: z.object({ task_id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/),
       review_result: z.literal("PASS"), done_approved: z.literal(true) }).strict(),
     annotations: { readOnlyHint: false, openWorldHint: false },
@@ -398,8 +398,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
     try { return okStructured(completeOrchestration(args.task_id, args.review_result, args.done_approved)); } catch (error) { return mapError(error); }
   });
   if (workspace.root.toLowerCase() !== REVIEW_ROOT.toLowerCase()) server.registerTool("complete_integrated_orchestration", {
-    title: "Complete an integrated reviewed task",
-    description: "Only after explicit human PASS and DONE approval: engine validates the published review patch against a reachable Git commit, HEAD/index content and explained working-tree line endings. No path, commit, command or state input accepted; does not infer review approval.",
+    title: "Disabled legacy integrated completion endpoint",
+    description: "Legacy compatibility endpoint; integrated authoritative completion disabled. Always rejects before discovery or engine calls, including caller PASS and done_approved=true. RC-02 bound request required.",
     inputSchema: z.object({ task_id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/),
       review_result: z.literal("PASS"), done_approved: z.literal(true) }).strict(),
     annotations: { readOnlyHint: false, openWorldHint: false },
@@ -408,8 +408,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
     try { return okStructured(completeIntegratedOrchestration(args.task_id, args.review_result, args.done_approved)); } catch (error) { return mapError(error); }
   });
   if (workspace.root.toLowerCase() !== REVIEW_ROOT.toLowerCase()) server.registerTool("complete_autonomous_orchestration", {
-    title: "Complete current independently reviewed autonomous task",
-    description: "Requires a single-use human approval evidence record created by the local Dashboard's explicit FINAL_DONE_APPROVAL action. Caller-supplied done_approved is never sufficient. Rechecks current Review, goal, manifest, result hashes and consumes the approval before existing engine Complete. Never commits or pushes.",
+    title: "Disabled legacy autonomous completion endpoint",
+    description: "Legacy compatibility endpoint; autonomous authoritative completion disabled. Always rejects before reading CURRENT_REVIEW, consuming approval, preflight or engine calls. Dashboard-local approval is not CT700 Human Approval; RC-02 bound request required.",
     inputSchema: z.object({ task_id: z.string().regex(/^rpc-[a-f0-9]{32}$/), review_result: z.literal("PASS"),
       review_evidence_hash: z.string().regex(/^[a-f0-9]{64}$/), bundle_manifest_sha256: z.string().regex(/^[a-f0-9]{64}$/),
       authoritative_review_id: z.string().regex(/^review-[0-9a-f-]{36}$/), done_approved: z.literal(true) }).strict(),

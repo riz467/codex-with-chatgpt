@@ -10,6 +10,12 @@ import { runReadOnlyJob } from "../src/mcp/read-only-worker.js";
 import { createScratch, type Scratch } from "./support/scratch.js";
 import { writeCompletedTask } from "./support/synthetic-review.js";
 import { testPowerShellExecutable } from "./support/powershell.js";
+import { startAutonomous } from "../src/mcp/autonomous-gateway.js";
+import * as autonomousGateway from "../src/mcp/autonomous-gateway.js";
+
+vi.mock("../src/mcp/autonomous-gateway.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/mcp/autonomous-gateway.js")>(), startAutonomous: vi.fn(),
+}));
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -37,6 +43,35 @@ function bundle(root: string) {
   return dir;
 }
 describe("local review integrity", () => {
+  it.each([true, false])("disables PASS/DoneApproved completion before discovery regardless of task/launcher availability (%s)", available => {
+    const root = temp();
+    const exists = vi.spyOn(fs, "existsSync").mockReturnValue(available);
+    const reads = vi.spyOn(fs, "readFileSync"), stats = vi.spyOn(fs, "statSync");
+    const writes = [vi.spyOn(fs, "writeFileSync"), vi.spyOn(fs, "mkdirSync"), vi.spyOn(fs, "openSync")];
+    for (const complete of [completeOrchestration, completeIntegratedOrchestration]) {
+      expect(() => complete("rpc-" + "a".repeat(32), "PASS", true))
+        .toThrow(expect.objectContaining({ code: "LEGACY_COMPLETION_DISABLED" }));
+    }
+    expect(exists).not.toHaveBeenCalled();
+    expect(reads).not.toHaveBeenCalled();
+    expect(stats).not.toHaveBeenCalled();
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect(spawnSync).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    expect(fs.readdirSync(root)).toEqual([]);
+  });
+  it("rejects retry even for unknown/invalid IDs before any reservation or discovery", () => {
+    const root = temp();
+    const reads = vi.spyOn(fs, "readFileSync");
+    const writes = [vi.spyOn(fs, "writeFileSync"), vi.spyOn(fs, "mkdirSync"), vi.spyOn(fs, "openSync")];
+    for (const id of ["unknown", "../escape", "auto-" + "a".repeat(32)]) {
+      expect(() => retryOrchestration(id, undefined, root)).toThrow(expect.objectContaining({ code: "FRESH_REQUEST_REQUIRED" }));
+    }
+    expect(reads).not.toHaveBeenCalled();
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    expect(fs.readdirSync(root)).toEqual([]);
+  });
   it("never invokes the engine without an explicit PASS and approval or with an unsafe task ID", () => {
     expect(() => completeOrchestration("task-1", "NEEDS_WORK", true)).toThrow();
     expect(() => completeOrchestration("task-1", "PASS", false)).toThrow();
@@ -96,9 +131,9 @@ describe("RC-01_B2 synthetic completed ledger gateway reads", () => {
       vi.spyOn(fs, "rmSync"), vi.spyOn(fs, "unlinkSync"), vi.spyOn(fs, "renameSync")];
     try {
       expect(status()).toMatchObject({ task_id: fixture.taskId, repo: "pve-doc", job_id: null, mode: "change",
-        state: "DONE", process: "not_running", result_category: "DONE", next_action: "None" });
+        state: "DONE", process: "not_running", result_category: "LEGACY_LOCAL_DONE", authoritative_done: false, next_action: "None" });
       expect(result()).toMatchObject({ task_id: fixture.taskId, job_id: null, repo: "pve-doc", mode: "change", state: "DONE",
-        result_category: "DONE", review_result: "PASS", done_approved: true, completion_mode: "post_integration",
+        result_category: "LEGACY_LOCAL_DONE", authoritative_done: false, review_result: "PASS", done_approved: true, completion_mode: "post_integration",
         integrated_commit: fixture.integratedCommit, published: true, review_bundle: path.join(fixture.reviewRoot, fixture.bundle),
         completed_at: fixture.completedAt, changed_paths: fixture.changedPaths, verification: { completed: true, exit_code: 0 } });
       expect(verifyBundleIntegrity(fixture.bundle, fixture.reviewRoot)).toMatchObject({ valid: true, issues: [] });
@@ -187,7 +222,7 @@ describe("bounded actions", () => {
     const read = vi.spyOn(fs, "readFileSync").mockImplementation(((file: string, encoding?: string) =>
       files.has(String(file)) ? files.get(String(file))! : originalRead(file, encoding as BufferEncoding)) as typeof fs.readFileSync);
     try {
-      expect(getOrchestrationResult(id, root)).toMatchObject({ job_id: null, state: "DONE", result_category: "DONE",
+      expect(getOrchestrationResult(id, root)).toMatchObject({ job_id: null, state: "DONE", result_category: "LEGACY_LOCAL_DONE", authoritative_done: false,
         review_result: "PASS", done_approved: true, completion_mode: null, integrated_commit: null,
         completed_at: "2026-09-25T12:00:00Z", published: false });
       status.state = "READY_FOR_REVIEW";
@@ -245,29 +280,64 @@ describe("bounded actions", () => {
   it.each(runtimeFiles)("fails closed before spawning or writing when runtime %s is missing", missing => {
     const root = temp(), exists = fs.existsSync.bind(fs);
     vi.spyOn(fs, "existsSync").mockImplementation(file => runtimeFiles.includes(String(file)) ? String(file) !== missing : exists(file));
-    expect(() => startOrchestration("pve-doc", "Review a narrow change", "change", root)).toThrow(expect.objectContaining({ code: "RUNTIME_UNAVAILABLE" }));
+    expect(() => startOrchestration("pve-doc", "Review a narrow change", "change", root)).toThrow(expect.objectContaining({ code: "FRESH_REQUEST_REQUIRED" }));
     expect(spawn).not.toHaveBeenCalled();
     expect(fs.readdirSync(root)).toEqual([]);
   });
-  it("starts only the fixed ai-run executable with separate arguments and returns a job immediately", () => {
+  it.each(["change", "autonomous"] as const)("quarantines %s before discovery, job/review writes or controller dispatch", mode => {
     const root = temp();
     runtimeAvailable();
-    const child = Object.assign(new EventEmitter(), { pid: process.pid, unref: vi.fn() });
-    vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
-    const goal = "Review a narrow change; do not execute arbitrary shell";
-    const job = startOrchestration("pve-doc", goal, "change", root);
-    expect(job.job_id).toMatch(/^[a-f0-9-]{36}$/);
-    expect(job.task_id).toMatch(/^rpc-[a-f0-9]{32}$/);
-    const [exe, args, opts] = vi.mocked(spawn).mock.calls[0];
-    expect(exe).toBe("C:\\Program Files\\PowerShell\\7\\pwsh.exe");
-    expect(args).toEqual(["-NoProfile", "-NonInteractive", "-File", "C:\\Users\\workspace\\.local\\bin\\ai-run.ps1", "-Repo", "C:\\work\\pve-doc", "-TaskId", job.task_id, "-Goal", goal]);
-    expect(opts).toMatchObject({ shell: false, windowsHide: true });
-    expect(JSON.parse(fs.readFileSync(path.join(root, "rpc-jobs", job.job_id, "job.json"), "utf8"))).toMatchObject({ job_id: job.job_id, task_id: job.task_id, repo_key: "pve-doc", process_id: process.pid });
-    expect(() => startOrchestration("pve-doc", goal, "change", root)).toThrow(/already running/);
-    expect(spawn).toHaveBeenCalledTimes(1);
-    fs.writeFileSync(path.join(root, "rpc-jobs", job.job_id, "stdout.log"), "RESULT: HUMAN_SCOPE_CONFIRMATION_REQUIRED\n");
-    child.emit("exit", 2);
-    expect(getOrchestrationStatus(job.job_id, root)).toMatchObject({ mode: "change", process: "exited", exit_code: 2, result_category: "HUMAN_SCOPE_CONFIRMATION_REQUIRED" });
+    const reads = vi.spyOn(fs, "readFileSync"), stats = vi.spyOn(fs, "statSync");
+    const writes = [vi.spyOn(fs, "mkdirSync"), vi.spyOn(fs, "writeFileSync"), vi.spyOn(fs, "openSync")];
+    const repos = mode === "autonomous" ? ["pve-doc", "autonomous-campaign-gateway-fixture"] : ["pve-doc"];
+    for (const repo of repos) {
+      for (const scope of [undefined, ["README.md"]]) {
+        expect(() => startOrchestration(repo, "Legacy goal", mode, root, scope))
+          .toThrow(expect.objectContaining({ code: "FRESH_REQUEST_REQUIRED" }));
+      }
+    }
+    expect(reads).not.toHaveBeenCalled();
+    expect(stats).not.toHaveBeenCalled();
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    expect(spawnSync).not.toHaveBeenCalled();
+    expect(startAutonomous).not.toHaveBeenCalled();
+    expect(fs.readdirSync(root)).toEqual([]);
+  });
+
+  it("distinguishes registered legacy DONE from authoritative completion without writes", () => {
+    const scratch = createScratch(), fixture = writeCompletedTask(scratch);
+    scratch.write(path.join(fixture.reviewRoot, "rpc-jobs/legacy-completed/job.json"), JSON.stringify({
+      job_id: "legacy-completed", task_id: fixture.taskId, repo_key: "pve-doc", mode: "change",
+      process_id: process.pid, exit_code: 0,
+    }));
+    scratch.write(path.join(fixture.reviewRoot, "rpc-jobs/legacy-completed/stdout.log"), "RESULT: DONE\n");
+    const before = scratch.read(fixture.statusFile);
+    const write = vi.spyOn(fs, "writeFileSync");
+    try {
+      for (const read of [getOrchestrationStatus, getOrchestrationResult]) expect(read("legacy-completed", fixture.reviewRoot, fixture.reads.repoRoots)).toMatchObject({
+        state: "DONE", result_category: "LEGACY_LOCAL_DONE", authoritative_done: false,
+      });
+      expect(write).not.toHaveBeenCalled();
+      expect(scratch.read(fixture.statusFile)).toEqual(before);
+    } finally { write.mockRestore(); scratch.dispose(); }
+  });
+
+  it("quarantines autonomous DONE classification, including a result-only DONE claim", () => {
+    const root = temp(), taskId = "rpc-" + "a".repeat(32);
+    const observation = vi.spyOn(autonomousGateway, "autonomousObservation");
+    const write = vi.spyOn(fs, "writeFileSync");
+    try {
+      for (const state of ["DONE", null]) {
+        observation.mockReturnValue({ job_id: "historical-auto", task_id: taskId, mode: "autonomous",
+          state, result_category: "DONE", final_result: "DONE", done_state: state,
+        } as ReturnType<typeof autonomousGateway.autonomousObservation>);
+        for (const read of [getOrchestrationStatus, getOrchestrationResult]) expect(read(taskId, root)).toMatchObject({ state,
+          result_category: "LEGACY_LOCAL_DONE", final_result: "LEGACY_LOCAL_DONE", done_state: "LEGACY_LOCAL_DONE", authoritative_done: false,
+        });
+      }
+      expect(write).not.toHaveBeenCalled();
+    } finally { observation.mockRestore(); write.mockRestore(); }
   });
   it("read_only dispatches only the fixed Node worker, never ai-run or a caller command", () => {
     const root = temp();
@@ -287,22 +357,16 @@ describe("bounded actions", () => {
     expect(getOrchestrationResult(job.task_id, root)).toMatchObject({ mode: "read_only", changed_paths: [], published: false });
     expect(() => startOrchestration("ai-orchestration-config", "goal", "read_only", root, ["README.md"])).toThrow();
   });
-  it("change with explicit EditPaths passes a JSON array through only the fixed ai-run wrapper", () => {
+  it("change with explicit EditPaths cannot reach the fixed ai-run wrapper", () => {
     const root = temp();
     runtimeAvailable();
     const child = Object.assign(new EventEmitter(), { pid: process.pid, unref: vi.fn() });
     vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
     const goal = "README.mdに1行追記してください";
-    const job = startOrchestration("ai-orchestration-config", goal, "change", root, ["README.md", "README.md"]);
-    expect(job.mode).toBe("change");
-    const [exe, args, opts] = vi.mocked(spawn).mock.calls[0];
-    expect(exe).toBe("C:\\Program Files\\PowerShell\\7\\pwsh.exe");
-    expect(args?.[3]).toMatch(/invoke-ai-run\.ps1$/);
-    expect(args?.slice(4, 10)).toEqual(["-Repo", "C:\\work\\ai-orchestration-config", "-TaskId", job.task_id, "-Goal", goal]);
-    expect(args?.[10]).toBe("-EditPathsBase64");
-    expect(JSON.parse(Buffer.from(args?.[11] ?? "", "base64").toString("utf8"))).toEqual(["README.md"]);
-    expect(opts).toMatchObject({ shell: false, cwd: "C:\\work\\ai-orchestration-config" });
-    child.emit("exit", 0);
+    expect(() => startOrchestration("ai-orchestration-config", goal, "change", root, ["README.md", "README.md"]))
+      .toThrow(expect.objectContaining({ code: "FRESH_REQUEST_REQUIRED" }));
+    expect(spawn).not.toHaveBeenCalled();
+    expect(fs.readdirSync(root)).toEqual([]);
   });
   it("PowerShell adapter binds multiple EditPaths as an array to ai-run", () => {
     const dir = temp(), stub = path.join(dir, "ai-run.ps1"), wrapper = path.join(dir, "invoke-ai-run.ps1");
@@ -396,6 +460,10 @@ describe("bounded actions", () => {
       expect(result).toMatchObject({ proposal_hash: sha(Buffer.from(JSON.stringify(proposal))),
         risky_actions: expect.arrayContaining(["git push origin main"]) });
       expect(getOrchestrationApproval(id, root).structured_proposal?.edits).toHaveLength(1);
+      fs.writeFileSync(path.join(dir, "stdout.log"), "RESULT: DONE\n");
+      expect(getOrchestrationResult(id, root)).toMatchObject({ state: "NEEDS_APPROVAL",
+        result_category: "LEGACY_LOCAL_DONE", authoritative_done: false });
+      fs.writeFileSync(path.join(dir, "stdout.log"), "RESULT: HUMAN_APPROVAL_REQUIRED\n");
       expect(JSON.stringify(getOrchestrationApproval(id, root))).not.toMatch(/PRIVATE OLD TEXT|PRIVATE NEW TEXT/);
       expect(vi.mocked(spawn)).not.toHaveBeenCalled();
       proposal.proposed_command = "";
@@ -403,7 +471,7 @@ describe("bounded actions", () => {
       proposal.edits = [] as typeof proposal.edits;
       expect(getOrchestrationStatus(id, root)).toMatchObject({ state: "NEEDS_APPROVAL", result_category: "HUMAN_APPROVAL_REQUIRED",
         stop_reason_category: "EVIDENCE_INSUFFICIENT", human_action_required: false });
-      expect(getOrchestrationResult(id, root).recommended_next_action).toMatch(/retry research/i);
+      expect(getOrchestrationResult(id, root).recommended_next_action).toMatch(/fresh RC-02/i);
       for (const message of [
         "読み取りコマンドが実行環境の接続タイムアウトで失敗し、編集案を提示しません。",
         "作業環境への読取アクセスが失敗したため、対象文書と未コミット差分を確認できませんでした。正確な置換箇所を特定できず、編集案は提示できません。",
@@ -433,7 +501,7 @@ describe("bounded actions", () => {
       status.message = "VerifyInternal failed: validation failed";
       Object.assign(status, { verify_exit_code: 1, state_transition_history: [{ from: "VERIFYING", to: "BLOCKED" }] });
       expect(getOrchestrationStatus(id, root)).toMatchObject({ stop_reason_category: "VERIFY_BLOCKED", human_action_required: false });
-      expect(getOrchestrationResult(id, root).recommended_next_action).toMatch(/RetryVerify/);
+      expect(getOrchestrationResult(id, root).recommended_next_action).toMatch(/retry \/ redispatch is unavailable/i);
       status.message = "Codex runtime unavailable";
       expect(getOrchestrationResult(id, root).stop_reason_category).toBe("EXECUTION_BLOCKED");
       status.state = "NEEDS_APPROVAL";
@@ -454,7 +522,7 @@ describe("bounded actions", () => {
     expect(() => getOrchestrationApproval(id, root)).toThrow(/not NEEDS_APPROVAL/);
     expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: false, stop_reason_category: "SCOPE_CONFIRMATION_REQUIRED" });
   });
-  it("retries only a hash-matched original goal and identical scoped paths as a new job", () => {
+  it("never retries a formerly eligible evidence-insufficient task or copies its goal/scope", () => {
     const root = temp(), id = "retry-parent", task = "rpc-retry-parent", goal = "Read and correct README.md. Do not commit or push.";
     const dir = path.join(root, "rpc-jobs", id);
     fs.mkdirSync(dir, { recursive: true });
@@ -477,26 +545,25 @@ describe("bounded actions", () => {
     vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
     try {
       expect(() => retryOrchestration("unknown", undefined, root)).toThrow();
-      expect(getOrchestrationRetryPlan(task, root)).toMatchObject({ eligible: true, stop_reason_category: "EVIDENCE_INSUFFICIENT",
-        inherited_goal: goal, inherited_edit_paths: ["README.md"], attempt: 1 });
+      expect(getOrchestrationRetryPlan(task, root)).toMatchObject({ eligible: false, stop_reason_category: "EVIDENCE_INSUFFICIENT",
+        inherited_goal: null, inherited_edit_paths: null, attempt: 1 });
+      expect(getOrchestrationRetryPlan(task, root).reason).toMatch(/Fresh RC-02 request \/ attempt required.*original evidence remains immutable.*retry \/ redispatch is unavailable/i);
       expect(fs.readFileSync(path.join(dir, "job.json"), "utf8")).toBe(parentBytes);
       expect(vi.mocked(spawn)).not.toHaveBeenCalled();
-      const retried = retryOrchestration(id, "Research timed out", root);
-      expect(retried).toMatchObject({ parent_task_id: task, retry_of: task, retry_reason: "Research timed out", attempt: 2 });
-      expect(retried.task_id).not.toBe(task);
-      const childJob = JSON.parse(fs.readFileSync(path.join(root, "rpc-jobs", retried.job_id, "job.json"), "utf8"));
-      expect(childJob).toMatchObject({ goal, goal_sha256: parent.goal_sha256, edit_paths: ["README.md"],
-        repo_key: parent.repo_key, mode: parent.mode, parent_task_id: task, retry_of: task, retry_reason: "Research timed out", attempt: 2 });
-      expect(getOrchestrationStatus(retried.job_id, root)).toMatchObject({ task_id: retried.task_id, parent_task_id: task, retry_of: task, attempt: 2 });
-      expect(getOrchestrationResult(retried.task_id, root)).toMatchObject({ parent_task_id: task, retry_of: task, attempt: 2 });
-      const [, args, opts] = vi.mocked(spawn).mock.calls[0];
-      expect(opts).toMatchObject({ shell: false });
-      expect(args?.slice(4, 10)).toEqual(["-Repo", "C:\\work\\ai-orchestration-config", "-TaskId", retried.task_id, "-Goal", goal]);
-      expect(JSON.parse(Buffer.from(args?.[11] ?? "", "base64").toString("utf8"))).toEqual(["README.md"]);
+      const writes = [vi.spyOn(fs, "writeFileSync"), vi.spyOn(fs, "mkdirSync"), vi.spyOn(fs, "openSync")];
+      const beforeStatus = JSON.stringify(status), beforeProposal = JSON.stringify(proposal);
+      expect(() => retryOrchestration(id, "Research timed out", root)).toThrow(expect.objectContaining({ code: "FRESH_REQUEST_REQUIRED" }));
+      expect(() => retryOrchestration(task, undefined, root)).toThrow(expect.objectContaining({ code: "FRESH_REQUEST_REQUIRED" }));
+      for (const write of writes) expect(write).not.toHaveBeenCalled();
+      for (const write of writes) write.mockRestore();
+      expect(spawn).not.toHaveBeenCalled();
+      expect(spawnSync).not.toHaveBeenCalled();
+      expect(JSON.stringify(status)).toBe(beforeStatus);
+      expect(JSON.stringify(proposal)).toBe(beforeProposal);
+      expect(fs.readdirSync(path.join(root, "rpc-jobs"))).toEqual([id]);
       expect(fs.readFileSync(path.join(dir, "job.json"), "utf8")).toBe(parentBytes);
       expect(getOrchestrationRetryPlan(id, root).eligible).toBe(false);
-      expect(() => retryOrchestration(id, undefined, root)).toThrow(/reserved/);
-      child.emit("exit", 2);
+      expect(() => retryOrchestration(id, undefined, root)).toThrow(/quarantined/);
     } finally { exists.mockRestore(); read.mockRestore(); }
   });
   it("denies risky, review, verify and scope-drift retries without spawning", () => {
@@ -516,28 +583,30 @@ describe("bounded actions", () => {
       String(file) === statusFile ? JSON.stringify(status) : String(file) === proposalFile ? Buffer.from(JSON.stringify(proposal)) : readOriginal(file, encoding as BufferEncoding)) as typeof fs.readFileSync);
     try {
       expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: false, stop_reason_category: "HUMAN_APPROVAL_REQUIRED" });
-      expect(() => retryOrchestration(id, undefined, root)).toThrow(/Human approval/);
+      expect(() => retryOrchestration(id, undefined, root)).toThrow(/quarantined/);
       status.state = "READY_FOR_REVIEW";
-      expect(() => retryOrchestration(id, undefined, root)).toThrow(/not eligible/);
+      expect(() => retryOrchestration(id, undefined, root)).toThrow(/quarantined/);
       status.state = "BLOCKED";
       status.message = "VerifyInternal failed: check";
       Object.assign(status, { verify_exit_code: 1, state_transition_history: [{ from: "VERIFYING", to: "BLOCKED" }] });
-      expect(() => retryOrchestration(id, undefined, root)).toThrow(/RetryVerify/);
+      expect(() => retryOrchestration(id, undefined, root)).toThrow(/quarantined/);
       status.message = "Runtime unavailable";
-      expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: true, stop_reason_category: "EXECUTION_BLOCKED" });
+      expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: false, stop_reason_category: "EXECUTION_BLOCKED" });
+      expect(() => retryOrchestration(id, undefined, root)).toThrow(/quarantined/);
       status.edit_paths = ["README.md", "docs/other.md"];
       expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: false });
       status.edit_paths = ["README.md"];
       status.state = "NEEDS_APPROVAL";
       proposal.proposed_command = "";
       proposal.message = "Edit scope unclear: paths unspecified";
-      expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: true, stop_reason_category: "SCOPE_CONFIRMATION_REQUIRED" });
+      expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: false, stop_reason_category: "SCOPE_CONFIRMATION_REQUIRED" });
+      expect(() => retryOrchestration(id, undefined, root)).toThrow(/quarantined/);
       status.goal = "Different goal";
       expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: false });
       expect(vi.mocked(spawn)).not.toHaveBeenCalled();
     } finally { exists.mockRestore(); read.mockRestore(); }
   });
-  it("never retries a policy refusal or an unverified gate, while preserving allowed and historical retries", () => {
+  it("never retries policy refusal, unverified, formerly allowed or historical gates", () => {
     const root = temp(), id = "retry-policy", task = "rpc-retry-policy", goal = "Edit README.md";
     const dir = path.join(root, "rpc-jobs", id);
     fs.mkdirSync(dir, { recursive: true });
@@ -563,9 +632,9 @@ describe("bounded actions", () => {
       const refusal = getOrchestrationRetryPlan(id, root);
       expect(refusal).toMatchObject({ eligible: false, stop_reason_category: "EXECUTION_BLOCKED",
         inherited_goal: null, inherited_edit_paths: null });
-      expect(refusal.reason).toMatch(/Policy refusal.*newly authorized contract.*not an automatic retry/i);
-      expect(() => retryOrchestration(id, "Caller requested another attempt", root)).toThrow(/Policy refusal/);
-      expect(() => retryOrchestration(task, undefined, root)).toThrow(/Policy refusal/);
+      expect(refusal.reason).toMatch(/Fresh RC-02/);
+      expect(() => retryOrchestration(id, "Caller requested another attempt", root)).toThrow(/quarantined/);
+      expect(() => retryOrchestration(task, undefined, root)).toThrow(/quarantined/);
 
       status.message = "Runtime unavailable";
       const allowedGate = { version: 1, decision: "ALLOW_BOUNDED_EDIT", reason_code: "BOUNDED_EDIT",
@@ -576,19 +645,19 @@ describe("bounded actions", () => {
         { ...allowedGate, reason_code: "UNKNOWN" }, { ...allowedGate, scope: ["OTHER.md"] }]) {
         status.gate_decision = gate;
         expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: false, stop_reason_category: "EXECUTION_BLOCKED" });
-        expect(getOrchestrationRetryPlan(id, root).reason).toMatch(/Unverified policy gate.*newly authorized contract/i);
-        expect(() => retryOrchestration(id, "Try anyway", root)).toThrow(/Unverified policy gate/);
+        expect(getOrchestrationRetryPlan(id, root).reason).toMatch(/Fresh RC-02/);
+        expect(() => retryOrchestration(id, "Try anyway", root)).toThrow(/quarantined/);
       }
 
       status.gate_decision = allowedGate;
-      expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: true, stop_reason_category: "EXECUTION_BLOCKED",
-        inherited_goal: goal, inherited_edit_paths: ["README.md"] });
+      expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: false, stop_reason_category: "EXECUTION_BLOCKED",
+        inherited_goal: null, inherited_edit_paths: null });
       status.message = "VerifyInternal failed: check";
       expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: false, stop_reason_category: "VERIFY_BLOCKED" });
       status.message = "Runtime unavailable";
       delete status.gate_decision;
-      expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: true, stop_reason_category: "EXECUTION_BLOCKED",
-        inherited_goal: goal, inherited_edit_paths: ["README.md"] });
+      expect(getOrchestrationRetryPlan(id, root)).toMatchObject({ eligible: false, stop_reason_category: "EXECUTION_BLOCKED",
+        inherited_goal: null, inherited_edit_paths: null });
       expect(fs.readFileSync(jobFile, "utf8")).toBe(parent);
       expect(fs.readdirSync(path.join(root, "rpc-jobs"))).toEqual([id]);
       expect(write).not.toHaveBeenCalled();

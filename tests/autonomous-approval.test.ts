@@ -1,7 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { validateDoneApproval, currentApprovalCandidate, issueHumanDoneApproval, consumeHumanApproval } from "../src/mcp/autonomous-approval.js";
+import { validateDoneApproval, currentApprovalCandidate, issueHumanDoneApproval, consumeHumanApproval, completeCurrentAutonomous } from "../src/mcp/autonomous-approval.js";
 import { createScratch, type Scratch } from "./support/scratch.js";
 import { writePolicyReview } from "./support/synthetic-review.js";
 
@@ -19,10 +20,29 @@ const issue = (input: unknown = fixture.request) => issueHumanDoneApproval(input
 const consume = () => consumeHumanApproval(fixture.root, fixture.taskId, fixture.approval, fixture.observation);
 
 beforeEach(() => { scratch = createScratch(); fixture = writePolicyReview(scratch, "approval"); });
-afterEach(() => scratch?.dispose());
+afterEach(() => { vi.restoreAllMocks(); scratch?.dispose(); });
 
-describe("explicit autonomous DONE gate on generated scratch evidence", () => {
-  it("accepts only the exact current two-phase PASS", () => {
+describe("historical autonomous approval evidence on generated scratch fixtures", () => {
+  it("quarantines fully valid-looking locally approved completion before any production read or consume/preflight", () => {
+    expect(validate()).toMatchObject({ task_id: fixture.taskId });
+    issue();
+    const recordFile = path.join(fixture.root, `rpc-jobs/human-approvals/${fixture.taskId}/current.json`);
+    const before = scratch.read(recordFile);
+    const reads = vi.spyOn(fs, "readFileSync"), exists = vi.spyOn(fs, "existsSync");
+    const writes = [vi.spyOn(fs, "writeFileSync"), vi.spyOn(fs, "mkdirSync"), vi.spyOn(fs, "openSync"), vi.spyOn(fs, "renameSync")];
+    try {
+      for (const input of [fixture.approval, null, { ...fixture.approval, root: fixture.root }]) {
+        expect(() => completeCurrentAutonomous(input)).toThrow(expect.objectContaining({ code: "LEGACY_COMPLETION_DISABLED" }));
+      }
+      expect(reads).not.toHaveBeenCalled();
+      expect(exists).not.toHaveBeenCalled();
+      for (const write of writes) expect(write).not.toHaveBeenCalled();
+    } finally { reads.mockRestore(); exists.mockRestore(); for (const write of writes) write.mockRestore(); }
+    expect(scratch.read(recordFile)).toEqual(before);
+    // The quarantined call did not consume the local nonce.
+    consume();
+  });
+  it("validates the exact historical two-phase PASS without granting completion authority", () => {
     expect(validate()).toMatchObject({ task_id: fixture.taskId, review_id: fixture.reviewId });
     expect(candidate()).toMatchObject({ task_id: fixture.taskId, run_id: fixture.runId,
       canonical_goal_hash: fixture.goalHash, authoritative_review_id: fixture.reviewId });

@@ -80,11 +80,11 @@ describe("RC-01_B2 synthetic completed ledger over MCP", () => {
       const status = await call("get_orchestration_status");
       expect(status.isError ?? false).toBe(false);
       expect(structuredJsonOf(status)).toMatchObject({ task_id: fixture.taskId, repo: "pve-doc", job_id: null,
-        mode: "change", state: "DONE", process: "not_running", result_category: "DONE" });
+        mode: "change", state: "DONE", process: "not_running", result_category: "LEGACY_LOCAL_DONE", authoritative_done: false });
       const result = await call("get_orchestration_result");
       expect(result.isError ?? false).toBe(false);
       expect(structuredJsonOf(result)).toMatchObject({ task_id: fixture.taskId, repo: "pve-doc", job_id: null,
-        mode: "change", state: "DONE", result_category: "DONE", review_result: "PASS", done_approved: true,
+        mode: "change", state: "DONE", result_category: "LEGACY_LOCAL_DONE", authoritative_done: false, review_result: "PASS", done_approved: true,
         completion_mode: "post_integration", integrated_commit: fixture.integratedCommit, completed_at: fixture.completedAt,
         published: true, changed_paths: fixture.changedPaths, verification: { completed: true, exit_code: 0 } });
       for (const write of writes) expect(write).not.toHaveBeenCalled();
@@ -239,7 +239,7 @@ afterAll(async () => {
     expectToolOutputSchema(tools, "execution_output", ["action", "items", "text"]);
     const start = tools.find((tool) => tool.name === "start_orchestration")?.inputSchema as { required?: string[]; properties?: Record<string, { enum?: string[] }> };
     expect(start.required).toEqual(expect.arrayContaining(["repo", "mode", "goal"]));
-    expect(start.properties?.mode?.enum).toEqual(["read_only", "change", "autonomous"]);
+    expect(start.properties?.mode?.enum).toEqual(["read_only"]);
     expect(start.properties).toHaveProperty("edit_paths");
     expect(start.required).not.toContain("edit_paths");
   });
@@ -252,8 +252,11 @@ afterAll(async () => {
     expect(description).not.toContain("has_more");
     expect(description).not.toContain("next_offset");
   });
-  it("refuses completion without explicit PASS and human approval", async () => {
+  it("refuses legacy completion even with explicit PASS and done_approved", async () => {
     for (const name of ["complete_orchestration", "complete_integrated_orchestration"]) {
+      const valid = await client.callTool({ name, arguments: { task_id: "test-1", review_result: "PASS", done_approved: true } });
+      expect(valid.isError).toBe(true);
+      expect(textOf(valid)).toContain("LEGACY_COMPLETION_DISABLED");
       for (const args of [
         { task_id: "test-1", review_result: "NEEDS_WORK", done_approved: true },
         { task_id: "test-1", review_result: "PASS", done_approved: false },
@@ -271,11 +274,26 @@ afterAll(async () => {
     for (const arguments_ of [
       { repo: "ai-orchestration-config", mode: "read_only", goal: "inspect", edit_paths: ["README.md"] },
       { repo: "ai-orchestration-config", mode: "change", goal: "edit", edit_paths: ["../outside"] },
+      { repo: "ai-orchestration-config", mode: "change", goal: "edit" },
+      { repo: "ai-orchestration-config", mode: "autonomous", goal: "edit" },
       { repo: "unknown", mode: "change", goal: "edit", edit_paths: ["README.md"] },
     ]) {
       const result = await client.callTool({ ...base, arguments: arguments_ });
       expect(result.isError).toBe(true);
     }
+  });
+
+  it("documents quarantined compatibility endpoints and rejects legacy retry", async () => {
+    const { tools } = await client.listTools();
+    expect(tools.find(t => t.name === "start_orchestration")?.description).toMatch(/read_only inspection only/);
+    expect(tools.find(t => t.name === "get_orchestration_retry_plan")?.description).toMatch(/eligibility is always false/);
+    expect(tools.find(t => t.name === "retry_orchestration")?.description).toMatch(/quarantined/);
+    for (const name of ["complete_orchestration", "complete_integrated_orchestration", "complete_autonomous_orchestration"]) {
+      expect(tools.find(t => t.name === name)?.description).toMatch(/authoritative completion disabled/);
+    }
+    const retry = await client.callTool({ name: "retry_orchestration", arguments: { id: "unissued" } });
+    expect(retry.isError).toBe(true);
+    expect(textOf(retry)).toContain("FRESH_REQUEST_REQUIRED");
   });
 
   it("searches and reads an allowlisted repo over MCP without accepting caller paths", async () => {

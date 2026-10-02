@@ -1,9 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { REVIEW_ROOT, safePath, verifyBundleIntegrity } from "./local-gateway.js";
+import { GatewayError, REVIEW_ROOT, safePath, verifyBundleIntegrity } from "./local-gateway.js";
 import { getReviewProfile, reviewProfiles } from "./review-profiles.js";
-import { preflightAutonomousCompletion, completeAutonomousTask } from "./completion-adapter.js";
 
 const digest = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
 const taskPattern = /^rpc-[a-f0-9]{32}$/;
@@ -34,7 +33,7 @@ function withTaskLock<T>(root: string, taskId: string, action: () => T): T {
   try { return action(); } finally { fs.closeSync(lock); fs.unlinkSync(lockFile); }
 }
 
-/** Read-only gate. The caller cannot choose the repo, bundle, profile or review result. */
+/** Historical/candidate evidence validation only; not CT700 approval or completion authority. */
 export function validateDoneApproval(input: unknown, repoKey: string, root = REVIEW_ROOT, observation: ApprovalObservation = productionObservation) {
   if (!input || typeof input !== "object" || Array.isArray(input)) reject();
   const approval = input as Record<string, unknown>;
@@ -86,7 +85,7 @@ export function validateDoneApproval(input: unknown, repoKey: string, root = REV
   } catch { reject(); }
 }
 
-/** Read-only, fail-closed candidate for the current Review pointer. */
+/** Read-only historical candidate inspection; CURRENT_REVIEW does not confer RC-02 currentness authority. */
 export function currentApprovalCandidate(root = REVIEW_ROOT, observation: ApprovalObservation = productionObservation) {
   try {
     const pointer = read(safePath(root, "CURRENT_REVIEW.json"));
@@ -163,26 +162,7 @@ export function consumeHumanApproval(root: string, taskId: string, expected: Don
   finally { fs.closeSync(fd); }
 }
 
-/** Uses the existing engine's completion mode; never writes DONE directly. */
-function completeBoundAutonomous(input: unknown, repoKey: string, root: string) {
-  if (path.resolve(root).toLowerCase() !== path.resolve(REVIEW_ROOT).toLowerCase()) reject();
-  if (!input || typeof input !== "object" || !taskPattern.test(String((input as Record<string, unknown>).task_id))) reject();
-  const taskId = String((input as Record<string, unknown>).task_id);
-  return withTaskLock(root, taskId, () => {
-  const eligible = validateDoneApproval(input, repoKey, root);
-   const mode = preflightAutonomousCompletion(eligible.repo, eligible.task_id);
-  // A newer review or changed evidence cannot inherit an earlier preflight.
-  validateDoneApproval(input, repoKey, root);
-  consumeHumanApproval(root, taskId, input as DoneApproval);
-   return completeAutonomousTask(eligible.repo, eligible.task_id, mode);
-  });
-}
-
-/** No caller-selected repository: the current sealed review pointer determines it. */
-export function completeCurrentAutonomous(input: unknown) {
-  if (!input || typeof input !== "object" || !taskPattern.test(String((input as Record<string, unknown>).task_id))) reject();
-  const pointer = read(safePath(REVIEW_ROOT, "CURRENT_REVIEW.json"));
-  const matches = Object.entries(reviewProfiles).filter(([, profile]) => profile.workspace === pointer.source_workspace);
-  if (pointer.task_id !== (input as Record<string, unknown>).task_id || matches.length !== 1) reject();
-  return completeBoundAutonomous(input, matches[0][0], REVIEW_ROOT);
+/** Compatibility endpoint: reject before reading production Review or consuming local approval. */
+export function completeCurrentAutonomous(_input: unknown): never {
+  throw new GatewayError("LEGACY_COMPLETION_DISABLED", "Legacy autonomous authoritative completion is disabled; Dashboard-local approval is not CT700 Human Approval. An RC-02 bound request is required.");
 }
