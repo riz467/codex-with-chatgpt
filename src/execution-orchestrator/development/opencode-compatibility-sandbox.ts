@@ -16,10 +16,15 @@ export function parseNetworkObservation(input: unknown) { return freeze(parseStr
 // from all four paths establish capability. DNS/connection/timeout failures do not.
 export const NETWORK_PREFLIGHT_SOURCE = String.raw`
 export function isNetworkPermissionDenial(error) {
-  const seen = new Set();
-  for (let e = error; e && typeof e === 'object' && !seen.has(e); e = e.cause) {
+  const seen = new Set(), pending = [error];
+  while (pending.length) {
+    const e = pending.pop();
+    if (!e || typeof e !== 'object' || seen.has(e)) continue;
     seen.add(e);
     if (e.code === 'ERR_ACCESS_DENIED' && e.permission === 'Net') return true;
+    // Node 26's socket error stores the original permission error in errno;
+    // fetch then wraps that socket error in cause. Inspect only object errors.
+    pending.push(e.cause, e.errno);
   }
   return false;
 }

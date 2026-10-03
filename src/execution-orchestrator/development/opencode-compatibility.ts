@@ -211,7 +211,9 @@ export async function certifyCandidate(input: unknown) {
   let networkObservation: z.infer<typeof networkObservationSchema> | null = null;
   let liveProbe: "PLATFORM_UNAVAILABLE" | "NOT_RUN" | "COMPLETED" = "NOT_RUN";
   try {
-    const npm = join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+    // Windows/legacy layouts put npm beside node; official Linux tarballs use ../lib.
+    const besideNode = join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+    const npm = existsSync(besideNode) ? besideNode : join(dirname(process.execPath), "..", "lib", "node_modules", "npm", "bin", "npm-cli.js");
     if (!existsSync(npm)) throw new Error("HOST_NPM_UNAVAILABLE");
     writeFileSync(join(scratch, "package.json"), JSON.stringify({ private: true, type: "module", dependencies: {
       "@opencode/core": resolution.candidateVersion,

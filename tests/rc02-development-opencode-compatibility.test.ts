@@ -54,7 +54,10 @@ function mockProcesses(mode: "pass" | "install-failed" | "crash" | "incompatible
       expect(options.env[key]).toBeUndefined();
     if (argv.includes("install")) {
       expect(options.env.HOME).toBe(options.cwd);
-      expect(argv[0]).toBe(join(dirname(process.execPath), "node_modules/npm/bin/npm-cli.js"));
+      expect([
+        join(dirname(process.execPath), "node_modules/npm/bin/npm-cli.js"),
+        join(dirname(process.execPath), "../lib/node_modules/npm/bin/npm-cli.js"),
+      ]).toContain(argv[0]);
       expect(argv).toContain("--ignore-scripts"); expect(argv).toContain("--workspaces=false");
       expect(argv).toContain(`--userconfig=${join(options.cwd, "user.npmrc")}`);
       expect(argv).toContain(`--globalconfig=${join(options.cwd, "global.npmrc")}`);

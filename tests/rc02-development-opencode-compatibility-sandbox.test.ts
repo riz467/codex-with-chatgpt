@@ -37,12 +37,23 @@ it.each(["ENOTFOUND", "ECONNREFUSED", "ETIMEDOUT", "ECONNRESET", "ERR_TLS_CERT_A
       const bad = { code: ${JSON.stringify(code)}, permission: 'Net' };
       if (isNetworkPermissionDenial(bad) || isNetworkPermissionDenial({ cause: bad })) process.exit(3);
       if (isNetworkPermissionDenial({ code: 'ERR_ACCESS_DENIED', permission: 'FileSystemRead' })) process.exit(4);
-      if (!isNetworkPermissionDenial({ cause: { code: 'ERR_ACCESS_DENIED', permission: 'Net' } })) process.exit(5);`);
+       if (!isNetworkPermissionDenial({ cause: { code: 'ERR_ACCESS_DENIED', permission: 'Net' } })) process.exit(5);`);
     expect(spawnSync(process.execPath, f.args, { cwd: f.dir, env: {}, shell: false, timeout: 10_000 }).status).toBe(0);
   });
 
 it.each(["fetch", "http", "https", "net"])("rejects tampered %s observation", key => {
   expect(() => parseNetworkObservation({ ...observation, denied: { ...observation.denied, [key]: "ECONNREFUSED" } })).toThrow();
+});
+
+it("recognizes Node26 errno/cause wrappers without accepting a generic access denial", () => {
+  const f = fixture(`
+    const original = { code: 'ERR_ACCESS_DENIED', permission: 'Net' };
+    if (!isNetworkPermissionDenial({ cause: { code: 'ERR_ACCESS_DENIED', errno: original } })) process.exit(3);
+    if (isNetworkPermissionDenial({ code: 'ERR_ACCESS_DENIED', errno: 'ERR_ACCESS_DENIED' })) process.exit(4);
+    if (isNetworkPermissionDenial({ errno: { code: 'ERR_ACCESS_DENIED', permission: 'FileSystemRead' } })) process.exit(5);
+    const cyclic = {}; cyclic.errno = cyclic;
+    if (isNetworkPermissionDenial(cyclic)) process.exit(6);`);
+  expect(spawnSync(process.execPath, f.args, { cwd: f.dir, env: {}, shell: false, timeout: 10_000 }).status).toBe(0);
 });
 it("network evidence is strict, immutable and never application-fake-only", () => {
   expect(Object.isFrozen(parseNetworkObservation(observation).denied)).toBe(true);
