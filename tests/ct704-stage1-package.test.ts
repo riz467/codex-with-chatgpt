@@ -321,6 +321,24 @@ it("Stage 1 package contains fixture closure, no credentials or authority servic
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
+it("retired Stage 1 LXC human wrapper is an inert fail-closed sentinel", () => {
+  const root = path.resolve(import.meta.dirname, "..");
+  const wrapper = fs.readFileSync(path.join(root, "scripts/ct704-stage1-human.sh"), "utf8");
+  expect(wrapper).toBe([
+    "#!/bin/bash",
+    "set -euo pipefail",
+    "printf '%s\\n' 'RC02_STAGE1_LXC_WRAPPER_RETIRED=STOP; KVM_PROOF_COMPLETE; PRODUCTION_DISABLED' >&2",
+    "exit 64",
+    "",
+  ].join("\n"));
+  expect(wrapper).not.toMatch(/\b(?:pct|qm|ssh|scp|curl|wget|apt(?:-get)?|systemctl)\b/);
+  const docs = fs.readFileSync(path.join(root, "docs/ct704-stage1.md"), "utf8");
+  expect(docs).toContain("former LXC / CT704 execution route: **RETIRED**");
+  expect(docs).not.toContain("pct exec 704");
+  expect(docs).toContain("`productionExecution`: **DISABLED**");
+  expect(docs).toContain("**UNRESOLVED_UNTIL_HUMAN_BOUNDARY_REVIEW**");
+});
+
 it("Stage 1 fails closed unless the detected substrate is KVM, without an LXC fallback", () => {
   const root = path.resolve(import.meta.dirname, "..");
   const guest = fs.readFileSync(path.join(root, "scripts/ct704-stage1-guest.sh"), "utf8");

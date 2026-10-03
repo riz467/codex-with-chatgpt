@@ -1,147 +1,168 @@
-# CT704 RC-02 Stage 1 — bounded human-admin execution
+# RC-02 Stage 1 — KVM executor proof closure
 
-Preparation only. No production service/dispatch, approval, review, signing,
-provider credentials, Tailscale or shared mount is installed. No commit/push.
-The systemd-257 nesting warning is not a failure; actual sandbox execution is
-the deciding evidence. Never enable nesting/keyctl or relax AppArmor/seccomp.
+Stage 1 is closed as a **technical KVM sandbox proof**. It does not authorize,
+deploy or start production execution.
 
-## Runtime decision (observed 2026-10-03)
+Current closure state (2026-10-04):
 
-Node **26.10.0**, official glibc Linux-x64 tarball, root-owned under
-`/opt/node-v26.10.0-linux-x64`; use absolute executable/controlled PATH.
-Official [index](https://nodejs.org/dist/index.json) lists it as newest 26.x.
-[Release](https://nodejs.org/en/blog/release/v26.10.0) is Current, not yet LTS;
-[schedule](https://github.com/nodejs/Release/blob/main/schedule.json) puts LTS
-at 2026-10-28 and EOL at 2029-04-30. This is the current cumulative patched
-release, not a claim that its `security:false` means a security-only release.
-Archive SHA-256 from official SHASUMS256.txt:
-`ca70e9e349de048b9522abb3adc05b3bd6f43c5ffd3ec57916c7da292f59f022`.
-TLS + pinned hash verification, not an independent PGP signature verification.
-Before delayed execution, recheck release/security notices; do not silently
-substitute another version.
+- Stage 1 technical proof: **PASS**
+- final clean-room substrate: **KVM**
+- former LXC / CT704 execution route: **RETIRED**
+- `productionExecution`: **DISABLED**
+- live-runner authority field: **UNRESOLVED_UNTIL_HUMAN_BOUNDARY_REVIEW**
+- Review PASS is not Human Approval, a permit, production activation or DONE.
 
-Debian packages: `bubblewrap git ca-certificates wget xz-utils libstdc++6
-libgcc-s1`, with apt's ordinary dependency closure (libc/loader etc.). Existing
-Debian Bash, coreutils, tar, util-linux/runuser, passwd/useradd and Python3 are
-used. No curl, compiler toolchain, pnpm, Docker or setuid sandbox is needed.
-Debian's [pool](https://deb.debian.org/debian/pool/main/b/bubblewrap/) currently
-contains trixie update `0.12.0-1~deb13u1`; use the configured signed trixie apt
-sources, not sid or a hand-built binary. Actual apt candidate/flags and kernel
-permission remain live checks, not inferred from this pool listing.
+The historical `ct704-*` filenames are retained only for evidence continuity.
+They are not evidence that CT704 remains an executable Stage 1 target.
 
-Host tooling: `vitest@3.2.7 zod@3.25.76 typescript@5.9.3 tsx@4.23.12`, matching
-the repository's resolved versions. Install into a separate npm scratch
-manifest, no lifecycle scripts or ambient npm config; retain its actual lock
-as `stage1-tooling-lock.json`. No repository policy/manifest is rewritten.
-Native platform optionals (esbuild/Rollup) are acquired by npm without install
-scripts; failure to load them is a failure, not permission to enable scripts.
-Transitive tooling dependencies are resolved at preparation time and recorded,
-not yet a pre-certified reproducible graph.
+## Why the LXC route was retired
 
-## Files / entrypoints
+The original Stage 1 experiment used an unprivileged Debian LXC guest with
+`nesting=0`. Bubblewrap could not establish the required sandbox boundary
+without weakening the container constraints.
 
-`scripts/pack-ct704-stage1.mjs` produces `stage1-files.json`, the exact source
-inventory: selected existing tests and their static relative import closure,
-D.1's host-read adapter sources, manifests/policies and the three guest scripts.
-No whole repository clone, `.git`, `.ai`, `dist`, Windows dependencies or
-authority services are transferred. Source containing synthetic contract
-records is fixture data, not signing/delegation authority.
+The failed LXC result was accepted as a boundary result. The following fallbacks
+remain prohibited:
 
-- DL2-C: `sandbox.ts::runSandboxFixture`, existing test `LIVE Linux:`.
-- Capsule: `ct704-stage1-runtime.mjs`, Node+actual `ldd` loader/library closure.
-  Root-owned regular files, empty mountpoints; no host `/usr` bind.
-- D.1: existing `verify-opencode-compatibility.mjs --acquire --candidate 2.0.22`.
-  Certify the current pinned core, not an unrequested upgrade. Its npm scratch
-  acquisition uses network; candidate execution denies network through Node
-  permissions and uses only synthetic OAuth/provider data, zero provider calls.
-  No real enrollment or credentials are used. Official Linux npm layout is now
-  supported alongside the existing Windows layout.
-  Node26 wraps socket permission errors in `errno` (and fetch in `cause`);
-  the existing network-denial recognizer now follows both object wrappers while
-  still requiring the original `ERR_ACCESS_DENIED` with `permission: Net`.
-- E0: existing `Linux live malicious-test fixture`; sealed FAST runtime includes
-  Git+loader/libs, trusted verification scripts and regular-file dependencies.
-  Host test calls genuine mutation/store/FAST handles; no production candidate.
+- privileged LXC
+- `nesting=1`
+- AppArmor/seccomp relaxation
+- setuid tricks
+- direct-process fallback
+- shared/NAS mounts
+- importing review, signing, approval or production authority into the executor
 
-## Exact preparation and live plan
+Stage 1 therefore moved to KVM rather than weakening the sandbox.
 
-On the development PC, from `C:\work\codex-with-chatgpt`, use a NEW directory:
+`scripts/ct704-stage1-human.sh` is now a fail-closed retirement sentinel. It
+must not be used to reach a guest or hypervisor. Invocation exits non-zero before
+performing infrastructure operations. Any future Stage 1 rerun requires a new
+bounded, human-reviewed KVM plan; the old LXC procedure must not be revived.
 
-```powershell
-node scripts/pack-ct704-stage1.mjs C:\work\tmp\ct704-stage1-reviewed
-tar -cf C:\work\tmp\ct704-stage1-reviewed.tar -C C:\work\tmp\ct704-stage1-reviewed .
-Get-FileHash C:\work\tmp\ct704-stage1-reviewed.tar -Algorithm SHA256
+## Runtime used by the proof
+
+The final proof used Debian 13 KVM guests and the official Node **26.10.0**
+glibc Linux-x64 archive. The archive SHA-256 used by the proof was:
+
+`ca70e9e349de048b9522abb3adc05b3bd6f43c5ffd3ec57916c7da292f59f022`
+
+The guest preparation included `bubblewrap`, Git, CA certificates, `wget`,
+`xz-utils`, `libstdc++6`, `libgcc-s1` and `libatomic1`. Node and Git loader /
+shared-library closure was materialized into the sealed runtime rather than
+binding the host `/lib` or `/usr` trees.
+
+The FAST runtime additionally contained fixed, reviewed local files only:
+
+- `/etc/hosts`
+- `/etc/nsswitch.conf` with `hosts: files`
+- `/runtime/git-excludes` containing only `/node_modules/`
+
+No `resolv.conf` was added and `--unshare-net` remained in force.
+
+## Stage 1 execution contract
+
+The proof exercised these boundaries:
+
+1. **CAPSULE** — sealed Node runtime and dependency closure
+2. **BWRAP** — KVM guest can execute the fixed bubblewrap namespace contract
+3. **DL2_C** — malicious sandbox fixture remains contained
+4. **D1** — OpenCode compatibility capsule stays proposal-only, with no review
+   authority and zero provider calls in the synthetic compatibility probe
+5. **E0_FAST** — FAST verification runs inside the sealed KVM sandbox
+
+The live runner reports the exact phase state and fails closed. A failed phase
+is `FAIL`; later phases are `SKIP`. There is no security-relaxing retry path.
+
+The D1 compatibility capsule removes review-only imports and branches through a
+host-owned AST specialization. Any unexpected review reference or source drift
+is `HOST_ADAPTER_HARNESS_DRIFT`, not permission to weaken the capsule.
+
+Native `.node` dependencies are walked deterministically and inspected with
+`ldd`. Missing, uninspectable, symlink or other non-regular dependency entries
+fail closed.
+
+## Final clean-room proof
+
+A diagnostic KVM guest first established that the substrate could satisfy the
+sandbox contract. The final evidence was then reproduced in a fresh guest,
+not a clone of the diagnostic VM.
+
+Final clean-room guest:
+
+- VMID: **112**
+- node: **pve5**
+- hostname: `rc02-cleanroom-112`
+- Debian genericcloud image
+- 2 cores / 2048 MiB
+- CPU type `host`
+- `local-lvm`
+- `vmbr0`, firewall enabled
+- DHCP
+- `onboot=0`
+- protection enabled
+- no-authority tag
+
+Final live result:
+
+```json
+{"stage":"RC02_STAGE1","results":{"CAPSULE":"PASS","BWRAP":"PASS","DL2_C":"PASS","D1":"PASS","E0_FAST":"PASS"},"productionExecution":"DISABLED","authority":"UNRESOLVED_UNTIL_HUMAN_BOUNDARY_REVIEW"}
 ```
 
-Human reviews the inventory and artifact hash, transfers the tar plus
-`scripts/ct704-stage1-human.sh` by the existing human-admin route, without
-forwarding keys/agent/credentials into the guest. Before connecting, compare
-CT704's current placement in the PVE documentation inventory. On **pve5**:
+The separate boundary audit then confirmed the Stage 1 guest identity had no
+sudo grant or supplementary groups, no Stage 1 listener, no PVE/Docker/Podman/
+Tailscale/approver/review authority paths, no PVE ACL/token relationship, and
+no production execution enablement. That audit is evidence about this bounded
+proof; it does not create production authority or change the live-runner field.
 
-```bash
-sha256sum /path/to/ct704-stage1-reviewed.tar # compare PC hash out of band
-bash /path/to/ct704-stage1-human.sh /path/to/ct704-stage1-reviewed.tar
-```
+Proof artifact retained outside the removed test guests:
 
-The wrapper checks CT704 only, its running state, name, IP, unprivileged/nesting/
-keyctl/mount/security boundary. It creates only a fresh guest destination and
-executes the guest script via `pct exec 704`; CT config is compared after exit.
-It never calls `pct set`, restarts a guest, or mutates any PVE resource.
-Guest provisioning creates a dedicated non-login user and two capsules, then
-executes `ct704-stage1-live.mjs` in a clean environment as that user. No unit,
-listener or autostart is installed. Temporary package/cache side effects are
-ordinary guest preparation, not authority or isolation failures.
+- artifact: `rc02-stage1-kvm-20261004-001246.tar`
+- SHA-256: `63e1c8e308ffad36b50595da5a04f6c98488d02a06f435e6155b448feab20d26`
+- clean-room log SHA-256:
+  `70b3d0fd58e747ff10b12661d7d0461716c97f621bfa4c7f34cdb79a1c8b87e4`
+- boundary-audit SHA-256:
+  `afa3bee5d05fe6f83c1dc348c96e6010c9bcfdc6e9a93f5b6cd5639fe89927bf`
 
-The live runner requires an actual passed assertion, **not** Vitest exit 0 with
-a skipped live test. Sequence: capsule execution → DL2-C → D.1 network-denial
-fixture + real synthetic compatibility capsule → E0 malicious FAST fixture.
-On failure, stop; retain exact bwrap stderr. Do not retry with broader grants.
-`Operation not permitted` establishes failure, but not which host policy denied
-it: human may consult existing pve5 kernel/AppArmor logs read-only for the exact
-cause. No automatic recovery/constraint weakening. Fresh-only installer does
-not overwrite existing identities/capsules; review partial preparation manually.
+## Cleanup
 
-## Required authority review (separate from sandbox PASS)
+The diagnostic KVM guest, clean-room KVM guest, temporary cloud image,
+clean-room temporary directory and former CT704 LXC test environment were
+removed after evidence capture.
 
-After fixtures, human-admin performs bounded, read-only inspection inside CT704:
+Stage 1 does not depend on any surviving test guest.
 
-```bash
-pct exec 704 -- id rc02-stage1
-pct exec 704 -- find /root /home /var/lib/rc02-stage1 /etc/rc02 /opt/rc02-stage1 -maxdepth 4 -type f \( -name auth.json -o -name '*.env' -o -name 'id_*' -o -name '*token*' -o -name '*signing*' -o -name '*approval*' \) -printf '%p\n'
-pct exec 704 -- find /etc/sudoers.d -maxdepth 1 -type f -printf '%f\n'
-pct exec 704 -- systemctl list-unit-files --no-pager
-pct exec 704 -- ss -lntup
-pct exec 704 -- findmnt -rn -o TARGET,FSTYPE
-pct exec 704 -- sh -c 'for p in /etc/pve /run/pve /run/docker.sock /run/podman/podman.sock /var/lib/tailscale /etc/rc02-approver /etc/rc02-review; do test ! -e "$p" || printf "REVIEW_UNEXPECTED_PATH:%s\n" "$p"; done'
-```
+## What Stage 1 does not authorize
 
-Missing optional directories in `find` are harmless, not failed invariants.
-Inspect sudo policy and any findings privately; do not print credential contents.
-Confirm the new user has no supplementary admin groups/sudo/capability grants,
-outbound PVE credentials, agent socket, provider/OAuth material or approval/
-review/signing keys; no authority service is active. System SSH host keys,
-public CA stores, source code referring to tokens, and synthetic D.1 credentials
-are not authority findings by themselves. Review inherited guest root bootstrap
-credentials/configuration privately, including locations not listed above if
-the baseline used any. Human must attest no authority was transferred and no
-PVE ACL/token grant exists for a CT704 identity. Guest filesystem checks cannot
-prove a cluster-side ACL or credential absence exhaustively.
+Stage 1 establishes only the bounded sandbox proof above. It does **not**
+establish or authorize:
 
-## Status semantics / current local result
+- a Production KVM Executor service
+- Production Executor activation
+- provider/OAuth credential custody
+- review, signing or approval authority inside the executor
+- commit or push authority
+- deployment or runtime reload
+- production network access
+- Human Approval or Passkey substitution
 
-- **PASS**: on checksum-verified official Windows Node26.10.0, five focused test
-  files: **124 passed / 3 skipped**. Includes actual permission-denied fetch/http/
-  https/net attempts against an accepting loopback listener (zero connections).
-  Typecheck, Bash/JS syntax, package inventory and diff checks also pass.
-  This is not Linux kernel certification. An initial standalone Node26 run
-  exposed the errno-wrapper incompatibility (now fixed); npm-dependent mock
-  tests were rerun with the complete official distribution, not a bare node.exe.
-- **SKIP**: local Linux DL2-C, Linux E0 and opt-in registry D.1 certificate test.
-- **FAIL**: any live subprocess/assertion failure; remaining steps not executed.
-- **UNRESOLVED**: CT704 kernel namespace/bwrap support, actual Debian loader/native
-  tooling execution, D.1/E0 live results and human authority review until run.
+Production KVM Executor work must use a new contract and a new activation gate.
+The retired LXC wrapper is not a migration path to production.
 
-`CT704 STAGE1 READY FOR LIVE EXECUTION` means the bounded verification artifacts
-are prepared, **not** Stage 1 passed. Only all five live result fields PASS plus
-the separate human boundary/authority review establish Stage 1 verification.
-Even then this implementation does not authorize or start production execution.
+Before Production Executor activation, negative E2E coverage must demonstrate
+that unreviewed candidate/test execution cannot successfully read host
+credentials or repo-external files, obtain unapproved network access, spawn a
+host-side process, mutate canonical/controller/verifier state, or escalate an
+MCP/tool surface into generic shell/Python/arbitrary-path execution. Sandbox
+completion must leave no host-side change outside the explicitly bounded
+evidence path.
+
+## Status semantics
+
+- **Stage 1 PASS**: the recorded KVM technical proof completed all five live
+  phases and the separate bounded authority/boundary audit passed.
+- **Review PASS**: independent review evidence only; never Human Approval.
+- **Human Approval**: separate explicit human action.
+- **Permit / production execution**: separate later control-plane state.
+- **DONE**: not implied by any Stage 1 result.
+
+`productionExecution=DISABLED` remains the production state at Stage 1 closure.
