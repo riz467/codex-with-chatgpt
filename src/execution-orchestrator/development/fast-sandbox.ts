@@ -12,9 +12,10 @@ export const FAST_TIMEOUT_MS = 600_000;
 export const fastEnvironment = freeze({ PATH: "/usr/bin", LANG: "C", LC_ALL: "C", TMPDIR: "/tmp",
   GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_GLOBAL: "/dev/null",
   GIT_TERMINAL_PROMPT: "0", GIT_NO_REPLACE_OBJECTS: "1", GIT_ALLOW_PROTOCOL: "", GIT_OPTIONAL_LOCKS: "0",
-  GIT_ATTR_NOSYSTEM: "1", GIT_CONFIG_COUNT: "5", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: "/dev/null",
+  GIT_ATTR_NOSYSTEM: "1", GIT_CONFIG_COUNT: "6", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: "/dev/null",
   GIT_CONFIG_KEY_1: "core.fsmonitor", GIT_CONFIG_VALUE_1: "false", GIT_CONFIG_KEY_2: "credential.helper", GIT_CONFIG_VALUE_2: "",
-  GIT_CONFIG_KEY_3: "protocol.allow", GIT_CONFIG_VALUE_3: "never", GIT_CONFIG_KEY_4: "core.attributesFile", GIT_CONFIG_VALUE_4: "/dev/null" });
+  GIT_CONFIG_KEY_3: "protocol.allow", GIT_CONFIG_VALUE_3: "never", GIT_CONFIG_KEY_4: "core.attributesFile", GIT_CONFIG_VALUE_4: "/dev/null",
+  GIT_CONFIG_KEY_5: "core.excludesFile", GIT_CONFIG_VALUE_5: "/runtime/git-excludes" });
 const namespaces = ["--unshare-user", "--unshare-pid", "--unshare-net", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
   "--disable-userns", "--assert-userns-disabled", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"];
 
@@ -56,13 +57,24 @@ export function inspectFastRuntime() {
   }
   const tree = snapshotTree(runtime);
   for (const name of Object.keys(tree)) trusted(path.join(runtime, name));
-  const allowed = ["usr", "lib", "lib64", "runtime", "candidate", "proc", "dev", "tmp", "scratch"];
+  const allowed = ["usr", "lib", "lib64", "runtime", "candidate", "proc", "dev", "tmp", "scratch", "etc"];
   if (fs.readdirSync(runtime).some(n => !allowed.includes(n))) throw new Error("FAST_NONMINIMAL_RUNTIME");
   for (const name of ["candidate", "proc", "dev", "tmp", "scratch"])
     if (!fs.lstatSync(path.join(runtime, name)).isDirectory() || fs.readdirSync(path.join(runtime, name)).length)
       throw new Error("FAST_MOUNTPOINT_NOT_EMPTY");
   for (const name of ["usr/bin/node", "usr/bin/git", "runtime/scripts/verify-ai-workspace.mjs", "runtime/scripts/verification-policy.mjs"])
     if (tree[name]?.kind !== "FILE") throw new Error("FAST_RUNTIME_FILE_ABSENT");
+  const fixedFiles = {
+    "etc/hosts": "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n",
+    "etc/nsswitch.conf": "hosts: files\n",
+    "runtime/git-excludes": "/node_modules/\n",
+  };
+  for (const [name, content] of Object.entries(fixedFiles)) {
+    if (tree[name]?.kind !== "FILE") throw new Error("FAST_RUNTIME_FILE_ABSENT");
+    if (fs.readFileSync(path.join(runtime, name), "utf8") !== content) throw new Error("FAST_RUNTIME_FIXED_CONTENT");
+  }
+  if (tree.etc?.kind !== "DIRECTORY" || fs.readdirSync(path.join(runtime, "etc")).some(n => !["hosts", "nsswitch.conf"].includes(n)))
+    throw new Error("FAST_NONMINIMAL_RUNTIME");
   if (tree["runtime/node_modules"]?.kind !== "DIRECTORY" ||
     fs.readdirSync(path.join(runtime, "usr/bin")).some(n => !["node", "git"].includes(n))) throw new Error("FAST_RUNTIME_EXECUTABLES");
   // Content identity excludes host inode/device numbering and remains stable across provisioning.

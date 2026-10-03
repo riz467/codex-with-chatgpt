@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import ts from "typescript";
 import { canonicalJson } from "../src/task-contract/contract.js";
 import { assessProductionPromotion, certifyCandidate, exactCandidateVersionSchema, inspectCanaryGraph,
   observeCurrentProductionVersion, parseCompatibilityCertificate, resolveCandidateVersion }
@@ -203,10 +206,92 @@ describe("D.1 scratch acquisition and subprocess protocol", () => {
       expect(readFileSync(marker, "utf8")).toBe("false");
     }
     const transport = readFileSync(join(capsule, "transport.js"), "utf8");
-    expect(transport).not.toContain("function dispatchProposal");
+    expect(transport).not.toContain("dispatchProposal");
+    expect(transport).not.toContain("review-context.js"); expect(transport).not.toContain("review-evidence.js");
+    expect(transport).not.toContain("dispatchAdvisoryReview"); expect(transport).not.toContain("HOST_REVIEW_INSTRUCTION");
+    expect(transport).not.toContain("assertReviewCoreBoundary"); expect(transport).not.toContain("assertAdmission");
+    expect(transport).toContain("async function runEmbedded"); expect(transport).toContain("export { runEmbedded }");
     expect(transport).toContain("assertOAuthWireIdentity"); expect(transport).toContain("assertProposalCoreBoundary");
     expect(transport).toContain("version: z.literal(CANDIDATE_VERSION)");
   });
+  it("loads the generated entrypoint through the candidate public-API fixture without review dependencies", async () => {
+    const dir = temp(); installFixture(dir); const capsule = join(dir, "probe"); mkdirSync(capsule);
+    const runtime = join(dir, "runtime"); mkdirSync(runtime);
+    buildCompatibilityProbe(root, capsule, "2.0.23", inspectCanaryGraph(dir, resolution).packages);
+    // Public-API fixture only: imports can link, but execution deliberately
+    // fails at OAuth composition. This is not a mock compatibility success.
+    writeFileSync(join(capsule, "opencode-core-adapter.js"), `export const AGENT = 'dev2-proposal', DENY = {},
+      INTERNAL_PLUGINS = [], PROFILE_VERSION = '2.0.22';
+      export const inspectPinnedCore = async () => ({}); export const assertCoreInspection = () => {};`);
+    const modules = new Map<string, Set<string>>();
+    for (const name of ["transport.js", "opencode-oauth.js"]) {
+      const tree = ts.createSourceFile(name, readFileSync(join(capsule, name), "utf8"), ts.ScriptTarget.Latest, true);
+      for (const statement of tree.statements) {
+        if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
+        const specifier = statement.moduleSpecifier.text;
+        if (!specifier.startsWith("@opencode/") && !specifier.startsWith("effect")) continue;
+        const bindings = statement.importClause?.namedBindings;
+        expect(bindings && ts.isNamedImports(bindings)).toBe(true);
+        const names = modules.get(specifier) ?? new Set<string>();
+        if (bindings && ts.isNamedImports(bindings)) for (const binding of bindings.elements)
+          names.add((binding.propertyName ?? binding.name).text);
+        modules.set(specifier, names);
+      }
+    }
+    for (const [specifier, names] of modules) {
+      const parts = specifier.split("/"), packageName = specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
+      const subpath = parts.slice(specifier.startsWith("@") ? 2 : 1).join("/");
+      const packageDir = join(dir, "node_modules", packageName), file = subpath ? `${subpath}.js` : "index.js";
+      mkdirSync(dirname(join(packageDir, file)), { recursive: true });
+      writeFileSync(join(packageDir, "package.json"), JSON.stringify({ type: "module", exports: { ".": "./index.js", "./*": "./*.js" } }));
+      writeFileSync(join(packageDir, file), [...names].map(name => name === "Credential"
+        ? `export const Credential = { ID: { make() { throw new Error('PUBLIC_API_FIXTURE_REACHED_OAUTH_COMPOSITION'); } } };`
+        : `export const ${name} = {};`).join("\n"));
+    }
+    const require = createRequire(import.meta.url);
+    cpSync(dirname(require.resolve("zod/package.json")), join(dir, "node_modules/zod"), { recursive: true });
+    const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    // Exercise module loading even on Node versions where the real entrypoint
+    // correctly stops before imports because network permissions are unavailable.
+    const load = actual.spawnSync(process.execPath, ["--permission", `--allow-fs-read=${dir}`, "--input-type=module", "-e",
+      `const transport = await import(${JSON.stringify(pathToFileURL(join(capsule, "transport.js")).href)});
+       if (typeof transport.runEmbedded !== 'function') process.exit(3);`],
+    { cwd: dir, env: {}, shell: false, encoding: "utf8", timeout: 30_000 });
+    expect(load.stderr).not.toContain("ERR_MODULE_NOT_FOUND"); expect(load.status).toBe(0);
+    const child = actual.spawnSync(process.execPath, ["--permission", `--allow-fs-read=${dir}`, `--allow-fs-write=${runtime}`,
+      `--allow-fs-write=${join(capsule, "result.json")}`, join(capsule, "entry.mjs"), "2.0.23"],
+    { cwd: dir, env: { TEMP: runtime, TMP: runtime, HOME: runtime }, shell: false, encoding: "utf8", timeout: 30_000 });
+    expect(child.status).toBe(0); expect(child.stderr).not.toContain("ERR_MODULE_NOT_FOUND");
+    const observed = JSON.parse(readFileSync(join(capsule, "result.json"), "utf8"));
+    if (Number(process.versions.node.split(".")[0]) >= 25) {
+      expect(child.stderr).toContain("PUBLIC_API_FIXTURE_REACHED_OAUTH_COMPOSITION");
+      expect(observed.result).toBe("INCOMPATIBLE");
+    } else expect(observed.result).toBe("PROBE_FAILED");
+    expect(existsSync(join(capsule, "review-context.js"))).toBe(false);
+    expect(existsSync(join(capsule, "review-evidence.js"))).toBe(false);
+  });
+  it.each(["missing-import", "duplicate-import", "missing-function", "duplicate-function", "changed-branch", "extra-reference"])(
+    "fails closed on review harness drift: %s", mode => {
+      const fixture = temp(), capsule = join(fixture, "probe"); mkdirSync(capsule);
+      const files = ["task-contract/contract", ...["opencode-core-adapter", "opencode-oauth", "opencode-transport",
+        "proposal-input", "proposal"].map(name => `execution-orchestrator/development/${name}`)];
+      for (const file of files) {
+        const target = join(fixture, "src", `${file}.ts`); mkdirSync(dirname(target), { recursive: true });
+        cpSync(join(root, "src", `${file}.ts`), target);
+      }
+      const path = join(fixture, "src/execution-orchestrator/development/opencode-transport.ts");
+      let source = readFileSync(path, "utf8");
+      if (mode === "missing-import") source = source.replace('from "./review-context.js"', 'from "./renamed-review-context.js"');
+      if (mode === "duplicate-import") source += '\nimport { parseFindings as other } from "./review-evidence.js";';
+      if (mode === "missing-function") source = source.replace("function assertReviewCoreBoundary", "function renamedReviewBoundary");
+      if (mode === "duplicate-function") source += "\nfunction assertReviewCoreBoundary() {}";
+      if (mode === "changed-branch") source = source.replace("review ? HOST_REVIEW_INSTRUCTION : HOST_INSTRUCTION", "review ? HOST_REVIEW_INSTRUCTION : prompt.system");
+      if (mode === "extra-reference") source += "\nconst unexpected = HOST_REVIEW_INSTRUCTION;";
+      writeFileSync(path, source);
+      expect(() => buildCompatibilityProbe(fixture, capsule, "2.0.23", [])).toThrow("HOST_ADAPTER_HARNESS_DRIFT");
+      expect(existsSync(join(capsule, "transport.js"))).toBe(false);
+      expect(existsSync(join(capsule, "entry.mjs"))).toBe(false);
+    });
   it("native realpath compatibility keeps filesystem reads/writes outside scratch denied", async () => {
     const dir = temp(), outside = temp(), secret = join(outside, "production-secret");
     const runtime = join(dir, "runtime"), packageFile = join(dir, "candidate-package.js");

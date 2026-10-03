@@ -18,9 +18,15 @@ function linuxRuntimeFixture(onFast?: () => void, failure?: "timeout" | "fail" |
     if (key === "getuid" || key === "geteuid") return () => 1000;
     return Reflect.get(target, key);
   } }));
-  const entries = ["", "candidate", "proc", "dev", "tmp", "scratch", "usr", "usr/bin", "runtime", "runtime/scripts", "runtime/node_modules",
-    "usr/bin/node", "usr/bin/git", "runtime/scripts/verify-ai-workspace.mjs", "runtime/scripts/verification-policy.mjs"];
-  const isFile = (name: string) => /(?:node|git|\.mjs)$/.test(name);
+  const fixedFiles: Record<string, string> = {
+    "etc/hosts": "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n",
+    "etc/nsswitch.conf": "hosts: files\n",
+    "runtime/git-excludes": "/node_modules/\n",
+  };
+  const relative = (name: string) => name.replaceAll("\\", "/").replace(/^\/opt\/rc02-fast-runtime\//, "");
+  const entries = ["", "candidate", "proc", "dev", "tmp", "scratch", "usr", "usr/bin", "runtime", "runtime/scripts", "runtime/node_modules", "etc",
+    "usr/bin/node", "usr/bin/git", "runtime/scripts/verify-ai-workspace.mjs", "runtime/scripts/verification-policy.mjs", ...Object.keys(fixedFiles)];
+  const isFile = (name: string) => /(?:node|git|\.mjs)$/.test(name) || Object.hasOwn(fixedFiles, relative(name));
   const tree = Object.fromEntries(entries.map(name => [name, { kind: isFile(name) ? "FILE" : "DIRECTORY", identity: "fixture",
     ...(isFile(name) ? { sha256: "a".repeat(64), byteLength: 1 } : {}) }])) as mutation.TreeSnapshot;
   const snapshot = mutation.snapshotTree;
@@ -28,8 +34,14 @@ function linuxRuntimeFixture(onFast?: () => void, failure?: "timeout" | "fail" |
   const trusted = (name: unknown) => typeof name === "string" && /^(?:\/$|\/opt(?:\/|$)|\/usr(?:\/|$))/.test(name.replaceAll("\\", "/"));
   const stat = fs.lstatSync, realpath = fs.realpathSync.native, list = fs.readdirSync;
   const read = fs.readFileSync;
-  vi.spyOn(fs, "readFileSync").mockImplementation(((name: any, ...args: any[]) => name === "/proc/self/mountinfo"
-    ? "1 0 8:1 / / rw - ext4 /dev/root rw\n" : (read as any)(name, ...args)) as any);
+  vi.spyOn(fs, "readFileSync").mockImplementation(((name: any, ...args: any[]) => {
+    if (name === "/proc/self/mountinfo") return "1 0 8:1 / / rw - ext4 /dev/root rw\n";
+    if (typeof name === "string" && name.replaceAll("\\", "/").startsWith("/opt/rc02-fast-runtime/")) {
+      const content = fixedFiles[relative(name)];
+      if (content !== undefined) return args[0] === "utf8" ? content : Buffer.from(content);
+    }
+    return (read as any)(name, ...args);
+  }) as any);
   vi.spyOn(fs, "lstatSync").mockImplementation(((name: any, ...args: any[]) => trusted(name)
     ? { uid: 0, mode: 0o755, nlink: 1, isSymbolicLink: () => false, isFile: () => isFile(String(name)) || String(name).endsWith("bwrap"),
       isDirectory: () => !isFile(String(name)) && !String(name).endsWith("bwrap") }
@@ -38,7 +50,9 @@ function linuxRuntimeFixture(onFast?: () => void, failure?: "timeout" | "fail" |
   vi.spyOn(fs, "readdirSync").mockImplementation(((name: any, ...args: any[]) => {
     if (!trusted(name)) return (list as any)(name, ...args);
     const n = String(name).replaceAll("\\", "/");
-    if (n === "/opt/rc02-fast-runtime") return ["usr", "runtime", "candidate", "proc", "dev", "tmp", "scratch"];
+    if (n === "/opt/rc02-fast-runtime") return ["usr", "runtime", "candidate", "proc", "dev", "tmp", "scratch", "etc"];
+    if (n === "/opt/rc02-fast-runtime/etc") return ["hosts", "nsswitch.conf"];
+    if (n === "/opt/rc02-fast-runtime/runtime") return ["scripts", "node_modules", "git-excludes"];
     if (n.endsWith("/usr/bin")) return ["node", "git"];
     return [];
   }) as any);

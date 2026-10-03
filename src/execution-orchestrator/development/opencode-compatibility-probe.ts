@@ -7,8 +7,9 @@ import { NETWORK_PREFLIGHT_SOURCE } from "./opencode-compatibility-sandbox.js";
 
 /** Host-owned adapter conformance capsule. No candidate source is transformed.
  * Reuses the CURRENT D0/D1 security assertions instead of certifying a weaker
- * substitute adapter. Only dispatch admission is omitted; runEmbedded remains
- * intact. The pinned-package assertion is replaced by host-observed scratch
+ * substitute adapter. Dispatch admission and review-only surface are omitted;
+ * runEmbedded's production proposal branch remains intact. The pinned-package
+ * assertion is replaced by host-observed scratch
  * identities, and its version literal is bound to the exact candidate. All
  * capability, wire, OAuth, model and terminal assertions remain unchanged.
  * Transpilation happens in the parent WITHOUT importing any OpenCode module.
@@ -33,12 +34,76 @@ process.stdout.write(JSON.stringify(await preflightNetworkIsolation()));\n`);
   compile("opencode-oauth.js", replaceOnce(dev("opencode-oauth"), "../../task-contract/contract.js", "./contract.js"));
   const original = dev("opencode-transport");
   const tree = ts.createSourceFile("transport.ts", original, ts.ScriptTarget.Latest, true);
-  let removed = 0;
+  const removals = new Map<string, number>([
+    ["dispatchProposal", 0], ["dispatchAdvisoryReview", 0], ["assertReviewCoreBoundary", 0],
+    ["./review-context.js", 0], ["./review-evidence.js", 0],
+  ]);
+  const branches = new Map<string, number>([
+    ["review ? HOST_REVIEW_INSTRUCTION : HOST_INSTRUCTION", 0],
+    ['review ? "E1 advisory review" : "D1 proposal"', 0],
+    ["review ? assertReviewCoreBoundary : assertProposalCoreBoundary", 0],
+  ]);
+  let embedded = 0, admissions = 0, attemptFences = 0;
+  const printer = ts.createPrinter();
   const transport = tree.statements.filter(statement => {
-    if (ts.isFunctionDeclaration(statement) && statement.name?.text === "dispatchProposal") { removed++; return false; }
+    const key = ts.isFunctionDeclaration(statement) ? statement.name?.text :
+      ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier) ? statement.moduleSpecifier.text : undefined;
+    if (key && removals.has(key)) { removals.set(key, removals.get(key)! + 1); return false; }
     return true;
-  }).map(statement => statement.getFullText(tree)).join("");
-  if (removed !== 1) throw new Error("HOST_ADAPTER_HARNESS_DRIFT");
+  }).map(statement => {
+    if (ts.isVariableStatement(statement) && statement.declarationList.declarations.some(d =>
+      ts.isIdentifier(d.name) && d.name.text === "attempts")) {
+      const declarations = statement.declarationList.declarations;
+      if (declarations.length !== 2 || declarations[0].getText(tree) !== "attempts = new Set<string>()" ||
+        declarations[1].getText(tree) !== "nativeSessions = new Set<string>()") throw new Error("HOST_ADAPTER_HARNESS_DRIFT");
+      attemptFences++;
+      return printer.printNode(ts.EmitHint.Unspecified, ts.factory.updateVariableStatement(statement, statement.modifiers,
+        ts.factory.updateVariableDeclarationList(statement.declarationList, declarations.slice(1))), tree);
+    }
+    if (!ts.isFunctionDeclaration(statement) || statement.name?.text !== "runEmbedded") return statement.getFullText(tree);
+    embedded++;
+    if (statement.parameters.length !== 5 || statement.parameters[3].getText(tree) !== "review = false" ||
+      statement.parameters[4].getText(tree) !== "assertAdmission?: () => void") throw new Error("HOST_ADAPTER_HARNESS_DRIFT");
+    // Specialize only the exact production default (review=false, no admission
+    // callback). All proposal security checks and transport operations survive.
+    const transformed = ts.transform(statement, [context => node => {
+      const visit: ts.Visitor = child => {
+        if (ts.isConditionalExpression(child) && ts.isIdentifier(child.condition) && child.condition.text === "review") {
+          const key = child.getText(tree);
+          if (!branches.has(key)) throw new Error("HOST_ADAPTER_HARNESS_DRIFT");
+          branches.set(key, branches.get(key)! + 1);
+          return child.whenFalse;
+        }
+        if (ts.isExpressionStatement(child) && ts.isCallExpression(child.expression) &&
+          ts.isIdentifier(child.expression.expression) && child.expression.expression.text === "assertAdmission") {
+          if (child.getText(tree) !== "assertAdmission?.();") throw new Error("HOST_ADAPTER_HARNESS_DRIFT");
+          admissions++;
+          return undefined;
+        }
+        return ts.visitEachChild(child, visit, context);
+      };
+      return ts.visitNode(node, visit) as ts.FunctionDeclaration;
+    }]);
+    try {
+      const selected = transformed.transformed[0];
+      const proposal = ts.factory.updateFunctionDeclaration(selected, selected.modifiers, selected.asteriskToken,
+        selected.name, selected.typeParameters, selected.parameters.slice(0, 3), selected.type, selected.body);
+      return printer.printNode(ts.EmitHint.Unspecified, proposal, tree);
+    } finally { transformed.dispose(); }
+  }).join("\n");
+  if (embedded !== 1 || admissions !== 2 || attemptFences !== 1 || [...removals.values(), ...branches.values()].some(count => count !== 1))
+    throw new Error("HOST_ADAPTER_HARNESS_DRIFT");
+  // A new review reference outside the known surface must never escape into a
+  // capsule that deliberately has no review authority/context dependencies.
+  const selectedTree = ts.createSourceFile("proposal-transport.ts", transport, ts.ScriptTarget.Latest, true);
+  const forbidden = new Set(["review", "assertAdmission", "attempts", "HOST_REVIEW_INSTRUCTION", "inspectReviewContext",
+    "assertReviewDispatchCurrent", "ReviewContext", "parseFindings", "assertReviewCoreBoundary", "dispatchAdvisoryReview"]);
+  const check = (node: ts.Node): void => {
+    if ((ts.isIdentifier(node) && forbidden.has(node.text)) ||
+      (ts.isStringLiteral(node) && /^\.\/review-/.test(node.text))) throw new Error("HOST_ADAPTER_HARNESS_DRIFT");
+    ts.forEachChild(node, check);
+  };
+  check(selectedTree);
   let harness = replaceOnce(transport, "../../task-contract/contract.js", "./contract.js");
   harness = replaceOnce(harness, "./opencode-core-profile.js", "./identities.js");
   harness = replaceOnce(harness, "version: z.literal(PROFILE_VERSION)", "version: z.literal(CANDIDATE_VERSION)");

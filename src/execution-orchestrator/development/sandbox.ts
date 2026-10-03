@@ -70,8 +70,9 @@ function denied(fn, label) {
   try { fn(); } catch (e) { if (['ENOENT','EACCES','EPERM','EROFS','ESRCH'].includes(e.code)) return; throw e; }
   throw new Error(label);
 }
-assert(JSON.stringify(Object.keys(process.env).sort()) === JSON.stringify(['LANG','PATH']), 'environment');
-assert(process.env.LANG === 'C' && process.env.PATH === '/usr/bin', 'environment values');
+// bubblewrap re-establishes PWD from the host-controlled --chdir destination.
+assert(JSON.stringify(Object.keys(process.env).sort()) === JSON.stringify(['LANG','PATH','PWD']), 'environment');
+assert(process.env.LANG === 'C' && process.env.PATH === '/usr/bin' && process.env.PWD === '/candidate', 'environment values');
 assert(fs.readFileSync('/proc/self/status','utf8').match(/^NoNewPrivs:\s+1$/m), 'no new privileges');
 assert(fs.readFileSync('/proc/self/status','utf8').match(/^CapEff:\s+0+$/m), 'capabilities');
 for (const name of ['mnt','net','pid','user','ipc','uts','cgroup'])
