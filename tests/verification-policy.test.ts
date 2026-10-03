@@ -1,7 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, symlinkSync, linkSync, realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 // These repository-local JS modules are deliberately outside production src/.
 import { selectPolicy, validatePaths, requireTestCoverage } from "../scripts/verification-policy.mjs";
-import { parseArguments, parseGitPaths, verify } from "../scripts/verify-ai-workspace.mjs";
+import { parseArguments, parseGitPaths, verify, FULL_SHARD_COUNT, enumerateFullTests, assertFullCaseNames, executeCommand }
+  from "../scripts/verify-ai-workspace.mjs";
+
+vi.mock("node:child_process", () => ({ spawnSync: vi.fn() }));
+const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
+const temporary: string[] = [];
+afterEach(() => { vi.restoreAllMocks(); vi.mocked(spawnSync).mockReset();
+  for (const root of temporary.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 const report = (count = 1, names = ["tests/example.test.ts"]) => ({
   status: 0, stderr: "", stdout: JSON.stringify({ success: true, numTotalTests: count,
@@ -205,14 +218,14 @@ describe("hermetic runner contract", () => {
     expect(invalid.pass).toBe(false);
   });
 
-  it.each(["REVIEW", "FULL"])("executes only owned commands for %s", async (profile) => {
-    const result = await verify([profile, "--paths", "docs/example.md"],
+  it("executes only owned commands for REVIEW", async () => {
+    const result = await verify(["REVIEW", "--paths", "docs/example.md"],
       () => ({ status: 0, stdout: "", stderr: "" }), noContainment);
     expect(result.pass).toBe(true);
-    expect(result.commands).toHaveLength(profile === "FULL" ? 7 : 6);
+    expect(result.commands).toHaveLength(6);
     expect(JSON.stringify(result.commands)).toContain("typecheck");
     expect(JSON.stringify(result.commands)).toContain("--check");
-    expect(JSON.stringify(result.commands).includes("--maxWorkers=2")).toBe(profile === "FULL");
+    expect(JSON.stringify(result.commands)).not.toContain("--maxWorkers=2");
   });
 
   it("returns a final failure summary on command failure, invalid JSON, containment or timeout", async () => {
@@ -231,5 +244,187 @@ describe("hermetic runner contract", () => {
       () => { throw new Error("Path escapes repository via symlink"); });
     expect(escaped.pass).toBe(false);
     expect(escaped.commands).toHaveLength(3);
+  });
+});
+
+const fullReport = (files: string[]) => ({ success: true, numTotalTests: files.length, numPassedTests: files.length,
+  numFailedTests: 0, numPendingTests: 0, numTodoTests: 0, testResults: files.map(name => ({
+    name: resolve(repositoryRoot, name), status: "passed", assertionResults: [{ status: "passed", failureMessages: [] }],
+  })) });
+function fullExecutor(change?: (index: number, report: ReturnType<typeof fullReport>, command: any) => unknown) {
+  const expected = enumerateFullTests();
+  const execute = vi.fn(withGit((command: any) => {
+    const selection = command.argv.find((arg: string) => arg.startsWith("--shard="));
+    if (selection) {
+      const index = Number(selection.match(/^--shard=(\d)\/8$/)?.[1]);
+      if (!index) throw new Error("Unexpected shard selector");
+      const report = fullReport(expected.filter((_: string, i: number) => i % FULL_SHARD_COUNT === index - 1));
+      const replacement = change?.(index, report, command);
+      const output = command.argv.find((arg: string) => arg.startsWith("--outputFile="))?.slice("--outputFile=".length);
+      writeFileSync(output, typeof replacement === "string" ? replacement : JSON.stringify(replacement ?? report), { flag: "wx" });
+      return { status: 0, stdout: "test subprocess output is not the report\n", stderr: "" };
+    }
+    return { status: 0, stdout: "", stderr: "" };
+  }));
+  return { execute, expected };
+}
+
+describe("FULL fixed sequential shards and exact coverage proof", () => {
+  it("executes exactly 1/8..8/8 then typecheck and both diff checks, even with a declared path", async () => {
+    const { execute, expected } = fullExecutor();
+    const result = await verify(["FULL", "--paths", "tests/verification-policy.test.ts"], execute, noContainment);
+    expect(result.pass).toBe(true); expect(FULL_SHARD_COUNT).toBe(8);
+    expect(result.commands).toHaveLength(14);
+    const entry = resolve(createRequire(import.meta.url).resolve("vitest/package.json"), "..", "vitest.mjs");
+    for (const [offset, command] of result.commands.slice(3, 11).entries()) {
+      expect(command.executable).toBe(process.execPath);
+      expect(command.argv).toEqual([entry, "run", "--maxWorkers=2", `--shard=${offset + 1}/8`,
+        `--config=${resolve(repositoryRoot, "vitest.config.ts")}`, "--reporter=json", expect.stringMatching(/^--outputFile=/)]);
+      expect(command.argv).not.toContain("tests/verification-policy.test.ts");
+    }
+    expect(JSON.stringify(result.commands[11])).toContain("typecheck");
+    expect(result.commands.slice(12).map((c: any) => c.argv)).toEqual([["diff", "--check"], ["diff", "--cached", "--check"]]);
+    expect(result.full_coverage).toEqual({ expected_files: expected, observed_files: expected, missing_files: [], extra_files: [], exact: true });
+    expect(result.full_shards.map((s: any) => s.result)).toEqual(Array(8).fill("PASS"));
+    expect(result.full_shards.every((s: any) => Number.isFinite(s.elapsed_seconds) && s.elapsed_seconds >= 0)).toBe(true);
+    expect(result.full_test_counts).toEqual({ total: expected.length, passed: expected.length, skipped: 0, todo: 0 });
+  });
+  it("awaits each shard before admitting the next", async () => {
+    const { execute } = fullExecutor(); let active = false;
+    const result = await verify(["FULL"], async (command: any) => {
+      expect(active).toBe(false); active = true;
+      await Promise.resolve(); const value = execute(command); active = false; return value;
+    }, noContainment);
+    expect(result.pass).toBe(true);
+  });
+  it.each(["--shard", "--shard=1/8", "--shard-count", "--workers", "--maxWorkers=9", "--timeout", "--testNamePattern", "--test-path"])(
+    "rejects caller selector %s before execution", async option => {
+      for (const args of [["FULL", option], ["FULL", "--paths", option]]) {
+        const execute = vi.fn(); const result = await verify(args, execute, noContainment);
+        expect(result.pass).toBe(false); expect(execute).not.toHaveBeenCalled();
+      }
+    });
+  it.each(["nonzero", "timeout", "missing report"])("fails closed and stops on shard 3 %s", async mode => {
+    const { execute } = fullExecutor();
+    const result = await verify(["FULL"], (command: any) => {
+      if (command.argv.includes("--shard=3/8")) {
+        if (mode === "timeout") throw new Error("NOT COMPLETED: ETIMEDOUT");
+        return { status: mode === "nonzero" ? 1 : 0, stdout: "", stderr: "" };
+      }
+      return execute(command);
+    }, noContainment);
+    expect(result.pass).toBe(false); expect(result.full_shards).toHaveLength(3);
+    expect(result.full_shards[2].result).toBe("FAIL"); expect(result.full_coverage.exact).toBe(false);
+    expect(result.commands).toHaveLength(6); expect(JSON.stringify(result.commands)).not.toContain("typecheck");
+    if (mode === "timeout") expect(result.error).toContain("ETIMEDOUT");
+  });
+  it.each(["JSON", "false success", "missing results", "invalid integer", "negative count", "unsafe integer", "missing count",
+    "count mismatch", "failed file", "running assertion", "failed assertion", "relative name", "path escape", "case alias", "root case alias", "drive case alias"])(
+    "rejects invalid report: %s", async mode => {
+      const { execute } = fullExecutor((index, report) => {
+        if (index !== 2) return;
+        if (mode === "JSON") return "{not JSON";
+        if (mode === "false success") report.success = false;
+        if (mode === "missing results") delete (report as any).testResults;
+        if (mode === "invalid integer") report.numTotalTests = 1.5;
+        if (mode === "negative count") report.numTotalTests = -1;
+        if (mode === "unsafe integer") report.numTotalTests = Number.MAX_SAFE_INTEGER + 1;
+        if (mode === "missing count") delete (report as any).numTotalTests;
+        if (mode === "count mismatch") report.numTotalTests++;
+        if (mode === "failed file") report.testResults[0].status = "failed";
+        if (mode === "running assertion") report.testResults[0].assertionResults[0].status = "pending";
+        if (mode === "failed assertion") report.testResults[0].assertionResults[0].status = "failed";
+        if (mode === "relative name") report.testResults[0].name = "tests/verification-policy.test.ts";
+        if (mode === "path escape") report.testResults[0].name = resolve(repositoryRoot, "../outside.test.ts");
+        if (mode === "case alias") report.testResults[0].name = report.testResults[0].name.replace("tests", "TESTS");
+        if (mode === "root case alias") report.testResults[0].name = report.testResults[0].name.replace("codex-with-chatgpt", "CODEX-WITH-CHATGPT");
+        if (mode === "drive case alias") report.testResults[0].name = report.testResults[0].name.replace(process.platform === "win32" ? /^[A-Z]/ : /work/, s => s === s.toUpperCase() ? s.toLowerCase() : s.toUpperCase());
+        return report;
+      });
+      const result = await verify(["FULL"], execute, noContainment);
+      expect(result.pass).toBe(false); expect(result.full_shards.at(-1).index).toBe(2);
+      expect(result.full_coverage.exact).toBe(false);
+    });
+  it.each(["cross-shard duplicate", "within-shard duplicate", "missing", "extra", "zero"])("rejects %s coverage", async mode => {
+    const expected = enumerateFullTests();
+    const { execute } = fullExecutor((index, report) => {
+      if (mode === "zero") return fullReport([]);
+      if (mode === "cross-shard duplicate" && index === 2) return fullReport([expected[0]]);
+      if (index !== 1) return;
+      const files = report.testResults.map(f => f.name);
+      if (mode === "within-shard duplicate") return fullReport([...files, files[0]]);
+      if (mode === "missing") return fullReport(files.slice(1));
+      if (mode === "extra") return fullReport([...files, "tests/unexpected.test.ts"]);
+    });
+    const result = await verify(["FULL"], execute, noContainment);
+    expect(result.pass).toBe(false); expect(result.full_coverage.exact).toBe(false);
+    expect(JSON.stringify(result.commands)).not.toContain("typecheck");
+    if (mode === "missing" || mode === "zero") expect(result.full_shards).toHaveLength(8);
+  });
+  it("retains acknowledged skipped counts without treating pending execution as a skip", async () => {
+    const { execute, expected } = fullExecutor((index, report) => {
+      if (index !== 1) return;
+      report.numPassedTests--; report.numPendingTests++;
+      report.testResults[0].assertionResults[0].status = "skipped"; return report;
+    });
+    const result = await verify(["FULL"], execute, noContainment);
+    expect(result.pass).toBe(true); expect(result.full_test_counts).toEqual({ total: expected.length, passed: expected.length - 1, skipped: 1, todo: 0 });
+  });
+  it("keeps the actual executor at exactly 600000ms, shell=false and bounded output", () => {
+    vi.mocked(spawnSync).mockReturnValue({ status: 0, stdout: "{}", stderr: "", output: [], pid: 1, signal: null });
+    const command = { executable: process.execPath, argv: ["fixed-entry"] };
+    expect(executeCommand(command).status).toBe(0);
+    expect(spawnSync).toHaveBeenCalledWith(command.executable, command.argv,
+      expect.objectContaining({ timeout: 600000, shell: false, maxBuffer: 64 * 1024 * 1024 }));
+    vi.mocked(spawnSync).mockReturnValue({ status: null, stdout: "", stderr: "", output: [], pid: 1, signal: "SIGTERM",
+      error: Object.assign(new Error("ETIMEDOUT"), { code: "ETIMEDOUT" }) });
+    expect(() => executeCommand(command)).toThrow("NOT COMPLETED");
+  });
+});
+
+function inventoryFixture() {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "full-inventory-"))); temporary.push(root);
+  mkdirSync(join(root, "tests"));
+  writeFileSync(join(root, "vitest.config.ts"), readFileSync(join(repositoryRoot, "vitest.config.ts")));
+  return root;
+}
+describe("FULL independently enumerated include semantics", () => {
+  it.each(["vitest.workspace.ts", "vitest.workspace.json", "vitest.projects.js", "VITEST.WORKSPACE.MTS"])(
+    "rejects discovered assertion-filtering workspace %s even with the same file include", name => {
+      const root = inventoryFixture(); writeFileSync(join(root, "tests", "one.test.ts"), "");
+      writeFileSync(join(root, name), 'export default [{ test: { include: ["tests/**/*.test.ts"], testNamePattern: "NEVER_MATCH" } }];');
+      expect(() => enumerateFullTests(root)).toThrow("workspace/project");
+    });
+  it("enumerates nested and hidden test files with exactly the current default exclusions", () => {
+    const root = inventoryFixture();
+    for (const name of ["one.test.ts", "nested/two.test.ts", ".hidden/three.test.ts", "not.test.tsx", "helper.ts",
+      "dist/excluded.test.ts", "node_modules/excluded.test.ts", ".git/excluded.test.ts", "cypress/excluded.test.ts", "vitest.config.test.ts"]) {
+      const full = join(root, "tests", name); mkdirSync(resolve(full, ".."), { recursive: true }); writeFileSync(full, "");
+    }
+    expect(enumerateFullTests(root)).toEqual(["tests/.hidden/three.test.ts", "tests/nested/two.test.ts", "tests/one.test.ts"]);
+  });
+  it("fails closed on config/include drift and empty inventories", () => {
+    const root = inventoryFixture(); expect(() => enumerateFullTests(root)).toThrow("Empty");
+    writeFileSync(join(root, "tests", "one.test.ts"), "");
+    writeFileSync(join(root, "vitest.config.ts"), 'export default { test: { include: ["tests/one.test.ts"] } };');
+    expect(() => enumerateFullTests(root)).toThrow("semantics changed");
+  });
+  it.each(["link", "dangling link", "root alias", "hardlink"])("rejects %s without following an escape", mode => {
+    const root = inventoryFixture(), outside = inventoryFixture();
+    writeFileSync(join(outside, "tests", "one.test.ts"), "");
+    if (mode === "hardlink") {
+      linkSync(join(outside, "tests", "one.test.ts"), join(root, "tests", "one.test.ts"));
+      expect(() => enumerateFullTests(root)).toThrow("Unsafe");
+    } else {
+      const link = join(root, mode === "root alias" ? "alias" : "tests/alias");
+      symlinkSync(mode === "dangling link" ? join(outside, "missing") : outside, link, process.platform === "win32" ? "junction" : "dir");
+      expect(() => enumerateFullTests(mode === "root alias" ? link : root)).toThrow("Unsafe");
+    }
+  });
+  it("rejects Windows case aliases independently of the host filesystem case mode", () => {
+    expect(() => assertFullCaseNames(["one.test.ts", "ONE.test.ts"])).toThrow("case alias");
+    expect(() => assertFullCaseNames(["nested", "NESTED"])).toThrow("case alias");
+    const root = inventoryFixture(); writeFileSync(join(root, "tests", "one.test.ts"), "");
+    expect(() => enumerateFullTests(root.replace("full-inventory", "FULL-INVENTORY"))).toThrow();
   });
 });

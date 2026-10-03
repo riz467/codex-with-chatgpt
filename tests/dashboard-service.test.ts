@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createWindowsTaskFixture } from './support/windows-task-fixture.js';
 import { createDashboard } from '../src/dashboard/server.js';
 import { Collector } from '../src/dashboard/collector.js';
@@ -15,78 +15,83 @@ const launcher = fileURLToPath(new URL('../scripts/run-ai-workspace-dashboard.mj
 const ps = (code: string) => spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 15000 });
 const dot = `. '${common.replaceAll("'", "''")}'`;
 
-function config(variation = '') {
-  const result = ps(`${dot}
-
-$a=New-ScheduledTaskAction -Execute $DashboardNode -Argument $DashboardActionArguments -WorkingDirectory $DashboardRoot
-$t=New-ScheduledTaskTrigger -AtStartup
-$p=New-ScheduledTaskPrincipal -UserId $DashboardAccount -LogonType S4U -RunLevel Highest
-$s=New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-$task=New-ScheduledTask -Action $a -Trigger $t -Principal $p -Settings $s
-${variation}
-Test-DashboardTaskConfig $task`);
-  expect(result.status, result.stderr).toBe(0);
-  return result.stdout.trim() === 'True';
+const accountVariations = [
+  "$task.Principal.UserId = 'workspace'", '$task.Principal.UserId = $DashboardAccount', '$task.Principal.UserId = $FixtureWorkspaceSid',
+];
+const equivalentDurations = "$task.Principal = [pscustomobject]@{ UserId=$DashboardAccount; LogonType='S4U'; RunLevel='HighestAvailable' }; $task.Settings.ExecutionTimeLimit = 'PT00H00M00S'; $task.Settings.RestartInterval = 'PT60S'";
+const issueVariations = [
+  ["$task.Principal.UserId = 'S-1-5-18'", 'Principal.UserId'],
+  ["$task.Principal.UserId = 'OTHER\\workspace'", 'Principal.UserId'],
+  ["$task.Principal.UserId = 'missing-fixture-account'", 'Principal.UserId'],
+  ["$task.Principal.UserId = 'S-1-invalid'", 'Principal.UserId'],
+  ["$task.Principal.LogonType = 'Password'", 'Principal.LogonType'],
+  ["$task = [pscustomobject]@{ TaskName='AI-Workspace-Dashboard'; Actions=$task.Actions; Triggers=$task.Triggers; Settings=$task.Settings; Principal=[pscustomobject]@{ UserId=$DashboardAccount; LogonType='InteractiveToken'; RunLevel='Highest' } }", 'Principal.LogonType'],
+  ["$task.Settings.RestartInterval = 'PT5M'", 'Settings.RestartInterval'],
+  ["$task.Settings.ExecutionTimeLimit = 'PT1H'", 'Settings.ExecutionTimeLimit'],
+  ["$task.Settings.RestartCount = 4", 'Settings.RestartCount'],
+  ["$task.Actions += New-ScheduledTaskAction -Execute 'cmd.exe'", 'Actions.Count'],
+  ["$task.Actions[0].Execute = 'cmd.exe'", 'Actions.Execute'],
+  ["$task.Actions[0].Arguments = 'other-script.js'", 'Actions.Arguments'],
+];
+const malformedVariations = [
+  '$task.Actions[0].Execute = "C:\\Windows\\System32\\cmd.exe"',
+  '$task.Actions[0].Arguments += " --port 80"',
+  '$task.Actions[0].WorkingDirectory = "C:\\work\\other"',
+  '$task.Actions += New-ScheduledTaskAction -Execute "cmd.exe"',
+  '$task.Triggers = @(New-ScheduledTaskTrigger -AtLogOn)',
+  '$task.Principal.LogonType = "Interactive"',
+  '$task.Principal.RunLevel = "Limited"',
+  '$task.Principal.UserId = "OTHER\\workspace"',
+  '$task.Settings.Hidden = $false', '$task.Settings.MultipleInstances = "Parallel"',
+  '$task.Settings.RestartCount = 2', '$task.Settings.RestartInterval = "PT5M"',
+  '$task.Settings.ExecutionTimeLimit = "PT1H"', '$task.Settings.DisallowStartIfOnBatteries = $true',
+  '$task.Settings.StopIfGoingOnBatteries = $true', '$task.Settings.RunOnlyIfNetworkAvailable = $true', '$task.Settings.Enabled = $false',
+];
+const observations = new Map<string, { valid: boolean; issues: string }>();
+function observation(variation: string) {
+  const row = observations.get(variation);
+  if (!row) throw new Error('Missing PowerShell fixture observation');
+  return row;
 }
-function issues(variation: string) {
-  const result = ps(`${dot}
-$a=New-ScheduledTaskAction -Execute $DashboardNode -Argument $DashboardActionArguments -WorkingDirectory $DashboardRoot
-$t=New-ScheduledTaskTrigger -AtStartup
-$p=New-ScheduledTaskPrincipal -UserId $DashboardAccount -LogonType S4U -RunLevel Highest
-$s=New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-$task=New-ScheduledTask -Action $a -Trigger $t -Principal $p -Settings $s
-${variation}
-@(Get-DashboardTaskConfigIssues $task) -join ','`);
-  expect(result.status, result.stderr).toBe(0);
-  return result.stdout.trim();
-}
+const config = (variation = '') => observation(variation).valid;
+const issues = (variation: string) => observation(variation).issues;
 
 describe.skipIf(process.platform !== 'win32')('dashboard Scheduled Task preflight (no registration)', () => {
-  it('accepts only the pinned AtStartup S4U Highest configuration', () => expect(config()).toBe(true));
-  it.each([
-    "$task.Principal.UserId = 'workspace'",
-    '$task.Principal.UserId = $DashboardAccount',
-    '$task.Principal.UserId = $FixtureWorkspaceSid',
-  ])('accepts same workspace SID regardless of account representation: %s', variation => expect(config(variation)).toBe(true));
-  it('accepts HighestAvailable XML representation and equivalent ISO durations', () => {
-    expect(config("$task.Principal = [pscustomobject]@{ UserId=$DashboardAccount; LogonType='S4U'; RunLevel='HighestAvailable' }; $task.Settings.ExecutionTimeLimit = 'PT00H00M00S'; $task.Settings.RestartInterval = 'PT60S'")).toBe(true);
+  beforeAll(() => {
+    const variations = ['', ...accountVariations, equivalentDurations, ...issueVariations.map(([v]) => v), ...malformedVariations];
+    // Amortize PowerShell startup only. Every case dot-sources the real validator
+    // into a fresh local scope and constructs fresh task data; no OS registration.
+    const cases = variations.map((variation, index) => `Observe-FixtureTask ${index} { ${variation} }`).join('\n');
+    const result = ps(`$ErrorActionPreference='Stop'
+function Observe-FixtureTask([int]$index, [scriptblock]$variation) {
+${dot}
+$a=New-ScheduledTaskAction -Execute $DashboardNode -Argument $DashboardActionArguments -WorkingDirectory $DashboardRoot
+$t=New-ScheduledTaskTrigger -AtStartup
+$p=New-ScheduledTaskPrincipal -UserId $DashboardAccount -LogonType S4U -RunLevel Highest
+$s=New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+$task=New-ScheduledTask -Action $a -Trigger $t -Principal $p -Settings $s
+. $variation
+[pscustomobject]@{ index=$index; valid=(Test-DashboardTaskConfig $task); issues=(@(Get-DashboardTaskConfigIssues $task) -join ',') }
+}
+@(${cases}) | ConvertTo-Json -Compress -Depth 4`);
+    expect(result.status, result.stderr).toBe(0);
+    const rows = JSON.parse(result.stdout);
+    expect(rows).toHaveLength(variations.length);
+    rows.forEach((row: { index: number; valid: boolean; issues: string }, i: number) => {
+      expect(row.index).toBe(i); expect(typeof row.valid).toBe('boolean'); expect(typeof row.issues).toBe('string');
+      observations.set(variations[i], row);
+    });
   });
-  it.each([
-    ["$task.Principal.UserId = 'S-1-5-18'", 'Principal.UserId'],
-    ["$task.Principal.UserId = 'OTHER\\workspace'", 'Principal.UserId'],
-    ["$task.Principal.UserId = 'missing-fixture-account'", 'Principal.UserId'],
-    ["$task.Principal.UserId = 'S-1-invalid'", 'Principal.UserId'],
-    ["$task.Principal.LogonType = 'Password'", 'Principal.LogonType'],
-    ["$task = [pscustomobject]@{ TaskName='AI-Workspace-Dashboard'; Actions=$task.Actions; Triggers=$task.Triggers; Settings=$task.Settings; Principal=[pscustomobject]@{ UserId=$DashboardAccount; LogonType='InteractiveToken'; RunLevel='Highest' } }", 'Principal.LogonType'],
-    ["$task.Settings.RestartInterval = 'PT5M'", 'Settings.RestartInterval'],
-    ["$task.Settings.ExecutionTimeLimit = 'PT1H'", 'Settings.ExecutionTimeLimit'],
-    ["$task.Settings.RestartCount = 4", 'Settings.RestartCount'],
-    ["$task.Actions += New-ScheduledTaskAction -Execute 'cmd.exe'", 'Actions.Count'],
-    ["$task.Actions[0].Execute = 'cmd.exe'", 'Actions.Execute'],
-    ["$task.Actions[0].Arguments = 'other-script.js'", 'Actions.Arguments'],
-  ])('fails closed with a safe reason for %s', (variation, reason) => {
+  it('accepts only the pinned AtStartup S4U Highest configuration', () => expect(config()).toBe(true));
+  it.each(accountVariations)('accepts same workspace SID regardless of account representation: %s', variation => expect(config(variation)).toBe(true));
+  it('accepts HighestAvailable XML representation and equivalent ISO durations', () => {
+    expect(config(equivalentDurations)).toBe(true);
+  });
+  it.each(issueVariations)('fails closed with a safe reason for %s', (variation, reason) => {
     expect(issues(variation)).toContain(reason);
     expect(config(variation)).toBe(false);
   });
-  it.each([
-    '$task.Actions[0].Execute = "C:\\Windows\\System32\\cmd.exe"',
-    '$task.Actions[0].Arguments += " --port 80"',
-    '$task.Actions[0].WorkingDirectory = "C:\\work\\other"',
-    '$task.Actions += New-ScheduledTaskAction -Execute "cmd.exe"',
-    '$task.Triggers = @(New-ScheduledTaskTrigger -AtLogOn)',
-    '$task.Principal.LogonType = "Interactive"',
-    '$task.Principal.RunLevel = "Limited"',
-    '$task.Principal.UserId = "OTHER\\workspace"',
-    '$task.Settings.Hidden = $false',
-    '$task.Settings.MultipleInstances = "Parallel"',
-    '$task.Settings.RestartCount = 2',
-    '$task.Settings.RestartInterval = "PT5M"',
-    '$task.Settings.ExecutionTimeLimit = "PT1H"',
-    '$task.Settings.DisallowStartIfOnBatteries = $true',
-    '$task.Settings.StopIfGoingOnBatteries = $true',
-    '$task.Settings.RunOnlyIfNetworkAvailable = $true',
-    '$task.Settings.Enabled = $false',
-  ])('rejects malformed configuration: %s', variation => expect(config(variation)).toBe(false));
+  it.each(malformedVariations)('rejects malformed configuration: %s', variation => expect(config(variation)).toBe(false));
   it('rejects launcher arguments before any import or bind', () => {
     const result = spawnSync(process.execPath, [launcher, '--host', '0.0.0.0'], { encoding: 'utf8', timeout: 5000 });
     expect(result.status).toBe(2);

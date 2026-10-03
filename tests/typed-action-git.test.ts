@@ -1,7 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, lstat, realpath, rm, symlink } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, lstat, realpath, rm, symlink } from "node:fs/promises";
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -56,9 +56,11 @@ function put(root: string, name: string, content: string) { writeFileSync(path.j
 function commit(root: string, name: string, content: string) {
   put(root, name, content); git(root, "add", "--", name); git(root, "commit", "-m", "fixture change");
 }
-async function fixture() {
+let template: string;
+beforeAll(async () => {
   const base = path.join(await realpath(tmpdir()), "opencode"); await mkdir(base, { recursive: true });
-  const directory = await mkdtemp(path.join(base, "typed-git-")); dirs.push(directory);
+  template = await mkdtemp(path.join(base, "typed-git-template-"));
+  const directory = template;
   const origin = path.join(directory, "origin.git"), seed = path.join(directory, "seed"), root = path.join(directory, "local");
   await mkdir(origin); await mkdir(seed);
   git(origin, "init", "--bare", "--initial-branch=main");
@@ -67,6 +69,16 @@ async function fixture() {
   git(seed, "add", "."); git(seed, "commit", "-m", "fixture base");
   git(seed, "remote", "add", "origin", origin); git(seed, "push", "-u", "origin", "main");
   git(directory, "clone", "--single-branch", "--branch", "main", origin, root); configure(root);
+});
+afterAll(async () => { if (template) await rm(template, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
+async function fixture() {
+  const directory = await mkdtemp(path.join(path.dirname(template), "typed-git-")); dirs.push(directory);
+  // Only immutable baseline bytes are reused. Each case gets independent copies
+  // of all three repositories (no hardlinks), fresh identities and a fresh adapter.
+  for (const name of ["origin.git", "seed", "local"])
+    await cp(path.join(template, name), path.join(directory, name), { recursive: true, force: false, errorOnExist: true });
+  const origin = path.join(directory, "origin.git"), seed = path.join(directory, "seed"), root = path.join(directory, "local");
+  git(seed, "config", "remote.origin.url", origin); git(root, "config", "remote.origin.url", origin);
   const record: TrustedFixtureRepository = {
     id: randomUUID(), root, rootIdentity: await fileIdentity(root), gitIdentity: await fileIdentity(path.join(root, ".git")),
     origin, originIdentity: await fileIdentity(origin), generation: 7,

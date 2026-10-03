@@ -38,8 +38,12 @@
   "packageManager": "pnpm@11.24.0",
   "dependencies": {
     "@modelcontextprotocol/sdk": "latest",
+    "@opencode/ai": "2.0.22",
+    "@opencode/core": "2.0.22",
+    "@opencode/util": "2.0.22",
     "@simplewebauthn/server": "^13.3.3",
     "commander": "^14.0.0",
+    "effect": "4.0.0-rc.112",
     "express": "^5.1.0",
     "ignore": "^7.0.5",
     "zod": "^3.25.0"
