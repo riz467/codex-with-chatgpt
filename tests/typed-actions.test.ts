@@ -97,6 +97,113 @@ function reverseKeys(value: any): any {
   return value;
 }
 
+function maintenanceSnapshot(): any {
+  return {
+    schemaVersion: 1, snapshotId: uuid, collectorId: otherId, collectedAt: "2026-10-01T00:00:10.000Z",
+    inventoryGeneration: 7, inventorySha256: hash, policySha256: otherHash,
+    checks: [
+      { checkId: uuid, checkKind: "NodeResources", target: { kind: "node", id: uuid }, result: "PASS",
+        targetGeneration: 3, observedAt: "2026-10-01T00:00:01.000Z", evidenceSha256: hash },
+      { checkId: otherId, checkKind: "ServiceHealth", target: { kind: "service", id: otherId }, result: "WARN",
+        targetGeneration: 4, observedAt: "2026-10-01T00:00:02.000Z", evidenceSha256: otherHash },
+      { checkId: nextAttemptId, checkKind: "BackupFreshness", target: { kind: "backup", id: nextAttemptId }, result: "UNKNOWN",
+        targetGeneration: 5, observedAt: "2026-10-01T00:00:03.000Z", evidenceSha256: hash },
+    ],
+  };
+}
+
+function maintenancePlan(snapshot = maintenanceSnapshot()): any {
+  return {
+    schemaVersion: 1, planId: "44444444-4444-4444-8444-444444444444",
+    snapshotHash: core.hashMaintenanceSnapshot(snapshot), createdAt: "2026-10-01T00:00:11.000Z",
+    semantics: { authority: "none", executionPermission: false, approval: "required-for-mutation", done: false },
+    recommendations: [
+      { checkId: uuid, target: { kind: "node", id: uuid }, disposition: "NO_ACTION", actionKind: null, reasonCode: "HEALTHY" },
+      { checkId: otherId, target: { kind: "service", id: otherId }, disposition: "PROPOSE_ACTION", actionKind: "RestartService", reasonCode: "DEGRADED" },
+      { checkId: nextAttemptId, target: { kind: "backup", id: nextAttemptId }, disposition: "ESCALATE_HUMAN", actionKind: null, reasonCode: "EVIDENCE_UNKNOWN" },
+    ],
+  };
+}
+
+describe("Dot maintenance proposal-only contract", () => {
+  it("binds complete normalized observations and a non-authoritative plan deterministically", () => {
+    const snapshot = maintenanceSnapshot(), plan = maintenancePlan(snapshot);
+    const parsed = core.parseMaintenanceSnapshot(snapshot), bound = core.bindMaintenancePlan(plan, snapshot);
+    expect(Object.isFrozen(parsed.checks)).toBe(true);
+    expect(Object.isFrozen(bound.plan.recommendations)).toBe(true);
+    expect(core.hashMaintenanceSnapshot(reverseKeys(snapshot))).toBe(core.hashMaintenanceSnapshot(snapshot));
+    expect(core.hashMaintenancePlan(reverseKeys(plan))).toBe(core.hashMaintenancePlan(plan));
+    expect(core.hashMaintenanceSnapshot(snapshot)).toBe(createHash("sha256")
+      .update(`dot-maintenance-snapshot-v1\n${core.canonicalizeMaintenanceSnapshot(snapshot)}`).digest("hex"));
+    expect(core.hashMaintenancePlan(plan)).toBe(createHash("sha256")
+      .update(`dot-maintenance-plan-v1\n${core.canonicalizeMaintenancePlan(plan)}`).digest("hex"));
+    expect(bound.snapshotHash).toBe(plan.snapshotHash);
+    expect(bound.plan.semantics).toEqual({ authority: "none", executionPermission: false,
+      approval: "required-for-mutation", done: false });
+    expect(core.maintenanceActionKinds).toEqual(["AptUpgradeNode", "AptUpgradeGuest", "AppUpgrade", "RestartService", "RebootNode"]);
+    expect(core.maintenanceActionKinds).not.toContain("GitIntegrateMain" as any);
+  });
+
+  it("requires every non-PASS result to remain visible and every snapshot check to be covered", () => {
+    const snapshot = maintenanceSnapshot();
+    for (const index of [1, 2]) {
+      const plan = maintenancePlan(snapshot);
+      plan.recommendations[index].disposition = "NO_ACTION";
+      plan.recommendations[index].actionKind = null;
+      expect(() => core.bindMaintenancePlan(plan, snapshot)).toThrow("Non-PASS maintenance result requires attention");
+    }
+    const missing = maintenancePlan(snapshot); missing.recommendations.pop();
+    expect(() => core.bindMaintenancePlan(missing, snapshot)).toThrow("Maintenance plan must cover every check");
+    const duplicate = maintenancePlan(snapshot); duplicate.recommendations[2].checkId = duplicate.recommendations[1].checkId;
+    expect(() => core.parseMaintenancePlan(duplicate)).toThrow();
+  });
+
+  it("binds targets, time and snapshot identity and rejects incompatible maintenance actions", () => {
+    const snapshot = maintenanceSnapshot();
+    const wrongSnapshot = maintenancePlan(snapshot); wrongSnapshot.snapshotHash = otherHash;
+    expect(() => core.bindMaintenancePlan(wrongSnapshot, snapshot)).toThrow("Maintenance snapshot binding mismatch");
+    const early = maintenancePlan(snapshot); early.createdAt = "2026-09-30T23:59:59.000Z";
+    expect(() => core.bindMaintenancePlan(early, snapshot)).toThrow("Maintenance plan predates snapshot");
+    const retarget = maintenancePlan(snapshot); retarget.recommendations[1].target.id = uuid;
+    expect(() => core.bindMaintenancePlan(retarget, snapshot)).toThrow("Maintenance recommendation binding mismatch");
+    const wrongAction = maintenancePlan(snapshot); wrongAction.recommendations[1].actionKind = "AptUpgradeNode";
+    expect(() => core.bindMaintenancePlan(wrongAction, snapshot)).toThrow("Maintenance action target mismatch");
+    const git = maintenancePlan(snapshot); git.recommendations[1].actionKind = "GitIntegrateMain";
+    expect(() => core.parseMaintenancePlan(git)).toThrow();
+    const noActionKind = maintenancePlan(snapshot); noActionKind.recommendations[1].actionKind = null;
+    expect(() => core.parseMaintenancePlan(noActionKind)).toThrow();
+    const hiddenAction = maintenancePlan(snapshot); hiddenAction.recommendations[0].actionKind = "RestartService";
+    expect(() => core.parseMaintenancePlan(hiddenAction)).toThrow();
+  });
+
+  it("rejects malformed collector semantics, unsafe escape hatches and inconsistent normalized targets", () => {
+    const future = maintenanceSnapshot(); future.checks[0].observedAt = "2026-10-01T00:00:11.000Z";
+    expect(() => core.parseMaintenanceSnapshot(future)).toThrow();
+    const wrongTarget = maintenanceSnapshot(); wrongTarget.checks[0].target.kind = "service";
+    expect(() => core.parseMaintenanceSnapshot(wrongTarget)).toThrow();
+    const wrongBoundary = maintenanceSnapshot();
+    wrongBoundary.checks[0].checkKind = "SecurityBoundary";
+    wrongBoundary.checks[0].target.kind = "node";
+    expect(() => core.parseMaintenanceSnapshot(wrongBoundary)).toThrow();
+    wrongBoundary.checks[0].target.kind = "security-boundary";
+    expect(() => core.parseMaintenanceSnapshot(wrongBoundary)).not.toThrow();
+    const duplicate = maintenanceSnapshot(); duplicate.checks[2].checkId = duplicate.checks[1].checkId;
+    expect(() => core.parseMaintenanceSnapshot(duplicate)).toThrow();
+    for (const key of ["command", "shell", "executable", "script", "path", "url", "args", "credential", "token"]) {
+      const snapshot = maintenanceSnapshot(); snapshot.checks[0][key] = "arbitrary";
+      expect(() => core.parseMaintenanceSnapshot(snapshot)).toThrow();
+      const plan = maintenancePlan(); plan.recommendations[0][key] = "arbitrary";
+      expect(() => core.parseMaintenancePlan(plan)).toThrow();
+    }
+    const authority = maintenancePlan(); authority.semantics.authority = "approved";
+    expect(() => core.parseMaintenancePlan(authority)).toThrow();
+    const execution = maintenancePlan(); execution.semantics.executionPermission = true;
+    expect(() => core.parseMaintenancePlan(execution)).toThrow();
+    const accessor = maintenanceSnapshot(); Object.defineProperty(accessor.checks[0], "command", { get: () => "exec", enumerable: true });
+    expect(() => core.parseMaintenanceSnapshot(accessor)).toThrow("Invalid JSON property");
+  });
+});
+
 describe("typed action requests", () => {
   it.each(core.actionKinds)("accepts and deeply freezes %s", (kind) => {
     const input = request(kind);
@@ -369,8 +476,11 @@ describe("retry and empty execution surface", () => {
     expect(() => (core.executableMutationAdapters as any[]).push({ execute: () => {} })).toThrow();
     expect(Object.keys(core).sort()).toEqual([
       "actionAttemptSchema", "actionKinds", "actionReceiptSchema", "actionRequestSchema", "actionStates", "assertActionTransition",
-      "assertExpectedState", "assertRetryRequest", "bindActionReceipt", "bindActionRequest",
-      "bindActionAttempt", "hashActionAttempt", "canonicalizeActionRequest", "executableMutationAdapters", "hashActionRequest", "parseActionRequest", "typedActionBootstrap",
+      "assertExpectedState", "assertRetryRequest", "bindActionReceipt", "bindActionRequest", "bindMaintenancePlan",
+      "bindActionAttempt", "hashActionAttempt", "canonicalizeActionRequest", "canonicalizeMaintenancePlan",
+      "canonicalizeMaintenanceSnapshot", "executableMutationAdapters", "hashActionRequest", "hashMaintenancePlan",
+      "hashMaintenanceSnapshot", "maintenanceActionKinds", "maintenanceCheckKinds", "maintenancePlanSchema",
+      "maintenanceSnapshotSchema", "parseActionRequest", "parseMaintenancePlan", "parseMaintenanceSnapshot", "typedActionBootstrap",
     ].sort());
   });
 });

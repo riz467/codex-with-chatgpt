@@ -203,6 +203,115 @@ export function bindActionRequest(input: unknown) {
   return freeze({ request, requestHash: hashActionRequest(request) });
 }
 
+export const maintenanceCheckKinds = Object.freeze([
+  "ClusterQuorum", "NodeResources", "NodeUpdates", "GuestExpectedState", "GuestUpdates", "ApplicationVersion",
+  "StorageHealth", "BackupFreshness", "ServiceHealth", "TimerHealth", "SecurityBoundary",
+] as const);
+export type MaintenanceCheckKind = typeof maintenanceCheckKinds[number];
+export const maintenanceActionKinds = Object.freeze([
+  "AptUpgradeNode", "AptUpgradeGuest", "AppUpgrade", "RestartService", "RebootNode",
+] as const);
+export type MaintenanceActionKind = typeof maintenanceActionKinds[number];
+const maintenanceTargetKinds = ["cluster", "node", "guest", "application", "service", "storage", "backup", "timer", "security-boundary"] as const;
+const maintenanceTargetSchema = z.object({ kind: z.enum(maintenanceTargetKinds), id }).strict();
+const maintenanceObservationSchema = z.object({
+  checkId: id, checkKind: z.enum(maintenanceCheckKinds), target: maintenanceTargetSchema,
+  result: z.enum(["PASS", "WARN", "FAIL", "UNKNOWN"]), targetGeneration: generation,
+  observedAt: timestamp, evidenceSha256: sha256,
+}).strict();
+const targetForCheck: Readonly<Record<MaintenanceCheckKind, typeof maintenanceTargetKinds[number]>> = Object.freeze({
+  ClusterQuorum: "cluster", NodeResources: "node", NodeUpdates: "node", GuestExpectedState: "guest",
+  GuestUpdates: "guest", ApplicationVersion: "application", StorageHealth: "storage", BackupFreshness: "backup",
+  ServiceHealth: "service", TimerHealth: "timer", SecurityBoundary: "security-boundary",
+});
+export const maintenanceSnapshotSchema = z.object({
+  schemaVersion: z.literal(1), snapshotId: id, collectorId: id, collectedAt: timestamp,
+  inventoryGeneration: generation, inventorySha256: sha256, policySha256: sha256,
+  checks: z.array(maintenanceObservationSchema).min(1).max(512),
+}).strict().superRefine((snapshot, ctx) => {
+  const seen = new Set<string>();
+  for (const [index, check] of snapshot.checks.entries()) {
+    if (seen.has(check.checkId)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["checks", index, "checkId"], message: "Duplicate maintenance check ID" });
+    seen.add(check.checkId);
+    if (Date.parse(check.observedAt) > Date.parse(snapshot.collectedAt))
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["checks", index, "observedAt"], message: "Observation is newer than snapshot" });
+    const expected = targetForCheck[check.checkKind];
+    if (check.target.kind !== expected)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["checks", index, "target", "kind"], message: "Maintenance check target mismatch" });
+  }
+});
+export type MaintenanceSnapshot = Immutable<z.infer<typeof maintenanceSnapshotSchema>>;
+const maintenanceDisposition = z.enum(["NO_ACTION", "OBSERVE", "PROPOSE_ACTION", "ESCALATE_HUMAN"]);
+const maintenanceReasonCode = z.enum(["HEALTHY", "DEGRADED", "UPDATE_AVAILABLE", "RESTART_RECOMMENDED", "REBOOT_RECOMMENDED",
+  "BACKUP_STALE", "POLICY_VIOLATION", "EVIDENCE_UNKNOWN", "MANUAL_REVIEW_REQUIRED"]);
+const maintenanceRecommendationSchema = z.object({
+  checkId: id, target: maintenanceTargetSchema, disposition: maintenanceDisposition,
+  actionKind: z.enum(maintenanceActionKinds).nullable(), reasonCode: maintenanceReasonCode,
+}).strict().superRefine((recommendation, ctx) => {
+  if ((recommendation.disposition === "PROPOSE_ACTION") !== (recommendation.actionKind !== null))
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["actionKind"], message: "Action kind is proposal-only" });
+});
+export const maintenancePlanSchema = z.object({
+  schemaVersion: z.literal(1), planId: id, snapshotHash: sha256, createdAt: timestamp,
+  semantics: z.object({ authority: z.literal("none"), executionPermission: z.literal(false),
+    approval: z.literal("required-for-mutation"), done: z.literal(false) }).strict(),
+  recommendations: z.array(maintenanceRecommendationSchema).min(1).max(512),
+}).strict().superRefine((plan, ctx) => {
+  const seen = new Set<string>();
+  for (const [index, recommendation] of plan.recommendations.entries()) {
+    if (seen.has(recommendation.checkId)) ctx.addIssue({ code: z.ZodIssueCode.custom,
+      path: ["recommendations", index, "checkId"], message: "Duplicate maintenance recommendation" });
+    seen.add(recommendation.checkId);
+  }
+});
+export type MaintenancePlan = Immutable<z.infer<typeof maintenancePlanSchema>>;
+
+export function parseMaintenanceSnapshot(input: unknown): MaintenanceSnapshot {
+  assertJson(input);
+  return freeze(maintenanceSnapshotSchema.parse(input));
+}
+export function canonicalizeMaintenanceSnapshot(input: unknown): string {
+  return canonical(parseMaintenanceSnapshot(input));
+}
+export function hashMaintenanceSnapshot(input: unknown): string {
+  return digest("dot-maintenance-snapshot-v1", parseMaintenanceSnapshot(input));
+}
+export function parseMaintenancePlan(input: unknown): MaintenancePlan {
+  assertJson(input);
+  return freeze(maintenancePlanSchema.parse(input));
+}
+export function canonicalizeMaintenancePlan(input: unknown): string {
+  return canonical(parseMaintenancePlan(input));
+}
+export function hashMaintenancePlan(input: unknown): string {
+  return digest("dot-maintenance-plan-v1", parseMaintenancePlan(input));
+}
+const maintenanceActionTarget: Readonly<Record<MaintenanceActionKind, typeof maintenanceTargetKinds[number]>> = Object.freeze({
+  AptUpgradeNode: "node", AptUpgradeGuest: "guest", AppUpgrade: "application", RestartService: "service", RebootNode: "node",
+});
+
+/** Binds a proposal-only Dot plan to a complete trusted snapshot. This creates no
+ * approval, execution permission, PASS, permit or DONE state. Mutation proposals
+ * must become fresh typed-action requests and traverse the normal review/human path. */
+export function bindMaintenancePlan(input: unknown, snapshotInput: unknown) {
+  const snapshot = parseMaintenanceSnapshot(snapshotInput), plan = parseMaintenancePlan(input);
+  const snapshotHash = hashMaintenanceSnapshot(snapshot);
+  if (plan.snapshotHash !== snapshotHash) throw new Error("Maintenance snapshot binding mismatch");
+  if (Date.parse(plan.createdAt) < Date.parse(snapshot.collectedAt)) throw new Error("Maintenance plan predates snapshot");
+  if (plan.recommendations.length !== snapshot.checks.length) throw new Error("Maintenance plan must cover every check");
+  const checks = new Map(snapshot.checks.map(check => [check.checkId, check] as const));
+  for (const recommendation of plan.recommendations) {
+    const check = checks.get(recommendation.checkId);
+    if (!check || canonical(check.target) !== canonical(recommendation.target)) throw new Error("Maintenance recommendation binding mismatch");
+    if (check.result !== "PASS" && recommendation.disposition === "NO_ACTION") throw new Error("Non-PASS maintenance result requires attention");
+    if (recommendation.actionKind && recommendation.target.kind !== maintenanceActionTarget[recommendation.actionKind])
+      throw new Error("Maintenance action target mismatch");
+    checks.delete(recommendation.checkId);
+  }
+  if (checks.size) throw new Error("Maintenance plan omitted checks");
+  return freeze({ snapshot, snapshotHash, plan, planHash: hashMaintenancePlan(plan) });
+}
+
 /** A trusted coordinator allocates IDs/sequences, persists them and prevents
  * reuse across history. This pure contract neither allocates nor consumes an
  * attempt, and its hash is NOT an approval/signature. Human Approval/Finalizer
