@@ -18,6 +18,7 @@ describe("bounded control-plane profile", () => {
     fs.writeFileSync(path.join(repo, "src", "mcp", "server.ts"), "export const server = 1;\n");
     fs.writeFileSync(path.join(repo, "src", "mcp", "typed-actions.ts"), "export const action = 1;\n");
     fs.writeFileSync(path.join(repo, "tests", "typed-actions.test.ts"), "export const test = 1;\n");
+    fs.writeFileSync(path.join(repo, "tests", "mcp-integration.test.ts"), "export const integration = 1;\n");
     fs.writeFileSync(path.join(repo, "src", "mcp", "bounded-task.ts"), "export const gate = 1;\n");
     fs.writeFileSync(path.join(repo, "src", "mcp", "local-gateway.ts"), "export const gateway = 1;\n");
 
@@ -26,7 +27,10 @@ describe("bounded control-plane profile", () => {
     git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "initial");
 
     const actual = fs.realpathSync.native(repo);
-    const worker: Worker = async () => ({
+    const observedBudgets: { timeout: number; promptTimeout?: number }[] = [];
+    const worker: Worker = async (_repo, _prompt, timeout, promptTimeout) => {
+      observedBudgets.push({ timeout, promptTimeout });
+      return ({
       worker: "opencode", session_id: "ses_control", execution_id: "msg_control",
       provider: "fixture", model: "fixture", usage: null, tools: 0, state: "completed",
       output: JSON.stringify({ edits: [{
@@ -34,7 +38,8 @@ describe("bounded control-plane profile", () => {
         old_text: "export const action = 1;",
         new_text: "export const action = 2;",
       }] }),
-    });
+      });
+    };
     const verifier: Verifier = (_repo, profile, paths) => ({
       profile, passed: true, paths: [...paths], tests_run: 0, checks: [],
     });
@@ -63,10 +68,17 @@ describe("bounded control-plane profile", () => {
     expect(() => tasks.start({ ...base, edit_paths: ["src/mcp/local-gateway.ts"] })).toThrow("INVALID_CONTRACT");
     expect(() => tasks.start({ ...base, execution_profile: "tracked_typescript_dashboard" })).toThrow("INVALID_CONTRACT");
 
+    const integrationOnly = tasks.start({ ...base, edit_paths: ["tests/mcp-integration.test.ts"] });
+    await expect(tasks.execute(integrationOnly.task_id)).rejects.toThrow("INVALID_PROPOSAL");
+
     const started = tasks.start(base);
     const result = await tasks.execute(started.task_id);
     expect(result.state).toBe("REVIEW_PENDING");
     expect(tasks.status(started.task_id).codex_calls).toBe(0);
+    expect(observedBudgets).toEqual([
+      { timeout: 330000, promptTimeout: 300000 },
+      { timeout: 330000, promptTimeout: 300000 },
+    ]);
     expect(tasks.artifacts(started.task_id, 1).verify).toMatchObject({
       profile: "tracked_typescript_control_plane",
       passed: true,
