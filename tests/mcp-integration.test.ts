@@ -11,6 +11,7 @@ import { CloudflaredQuickTunnel } from "../src/tunnel/cloudflared.js";
 import { createScratch, type Scratch } from "./support/scratch.js";
 import { writeCompletedTask } from "./support/synthetic-review.js";
 import { writeResearchRepos } from "./support/synthetic-repos.js";
+import { DevelopmentStore } from "../src/execution-orchestrator/development/store.js";
 
 let root: string;
 let bridge: Bridge;
@@ -141,6 +142,66 @@ describe("RC-01_B2 synthetic completed ledger over MCP", () => {
   });
 });
 
+describe("RC-02 request-only startup over MCP", () => {
+  it("rejects invalid inputs without creating a child and fixes two distinct clean-repo attempts", async () => {
+    const previousStateDir = process.env.C2C_STATE_DIR;
+    const state = isolateStateDir();
+    const cleanRoot = makeTmpDir("rc02-clean");
+    makeGitRepo(cleanRoot);
+    let cleanBridge: Bridge | undefined;
+    let cleanClient: Client | undefined;
+    try {
+      cleanBridge = await startBridge({ workspaceRoot: cleanRoot, port: 0, persistRuntime: false,
+        authStoreFile: path.join(state, "rc02-auth.json") });
+      const tokens = cleanBridge.authStore.issueTokens({ clientId: "rc02-starter", scopes: ["orchestration.start"] });
+      cleanClient = new Client({ name: "rc02-starter", version: "1" });
+      await cleanClient.connect(new StreamableHTTPClientTransport(new URL(`${cleanBridge.localBaseUrl()}/mcp`), {
+        requestInit: { headers: { authorization: `Bearer ${tokens.accessToken}` } },
+      }));
+      const parent = path.join(state, "rc02-development-v2");
+      const children = () => fs.existsSync(parent) ? fs.readdirSync(parent) : [];
+      const valid = { goal: "Update index", edit_paths: ["src/index.ts"], acceptance_criteria: ["Index updated"] };
+      for (const args of [
+        { ...valid, extra: "authority" },
+        { ...valid, authority: "approve" },
+        { ...valid, edit_paths: ["../escape"] },
+        { ...valid, edit_paths: ["src/index.ts", "SRC/INDEX.ts"] },
+      ]) {
+        const rejected = await cleanClient.callTool({ name: "start_rc02_development_task", arguments: args });
+        expect(rejected.isError).toBe(true);
+        expect(children()).toEqual([]);
+      }
+      const starts = [];
+      for (let i = 0; i < 2; i++) {
+        const result = await cleanClient.callTool({ name: "start_rc02_development_task", arguments: valid });
+        expect(result.isError ?? false).toBe(false);
+        const started = structuredJsonOf<{ state: string; delegation_id: string; delegation_digest: string;
+          request_id: string; request_digest: string; attempt_id: string; attempt_digest: string;
+          store_anchor: string; authority: string; execution_started: boolean }>(result);
+        expect(Object.keys(started).sort()).toEqual(["attempt_digest", "attempt_id", "authority",
+          "delegation_digest", "delegation_id", "execution_started", "request_digest", "request_id",
+          "state", "store_anchor"]);
+        expect(started).toMatchObject({ state: "ATTEMPT_FIXED", authority: "none", execution_started: false });
+        const recovered = await DevelopmentStore.open(path.join(parent, started.request_id), started.store_anchor).recover();
+        expect(recovered.state.state).toBe("ATTEMPT_FIXED");
+        starts.push(started);
+      }
+      expect(children()).toHaveLength(2);
+      for (const key of ["delegation_id", "request_id", "attempt_id", "store_anchor"] as const) {
+        expect(starts[0][key]).not.toBe(starts[1][key]);
+      }
+    } finally {
+      try { await cleanClient?.close(); } finally {
+        try { await cleanBridge?.close(); } finally {
+          cleanup(cleanRoot);
+          if (previousStateDir === undefined) delete process.env.C2C_STATE_DIR;
+          else process.env.C2C_STATE_DIR = previousStateDir;
+        }
+      }
+    }
+  });
+});
+
 describe("MCP tools over Streamable HTTP", () => {
 beforeAll(async () => {
   researchScratch = createScratch();
@@ -207,6 +268,7 @@ afterAll(async () => {
       "search_workspace",
       "start_bounded_opencode_task",
       "start_orchestration",
+      "start_rc02_development_task",
       "start_test_job",
       "submit_bounded_chatgpt_review",
       "test_status",
@@ -518,6 +580,7 @@ afterAll(async () => {
     for (const [name, args] of [
       ["start_test_job", {}],
       ["start_orchestration", { repo: "pve-doc", mode: "read_only", goal: "inspect" }],
+      ["start_rc02_development_task", { goal: "inspect", edit_paths: ["src/index.ts"], acceptance_criteria: ["No changes"] }],
       ["get_orchestration_status", { id: "unissued" }],
       ["get_orchestration_result", { id: "unissued" }],
       ["get_orchestration_approval", { id: "unissued" }],

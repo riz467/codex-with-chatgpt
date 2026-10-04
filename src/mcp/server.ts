@@ -1,3 +1,13 @@
+import fs from "node:fs";
+import path from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { getStateDir } from "../config/paths.js";
+import { canonicalJson, scopePathSchema } from "../task-contract/contract.js";
+import { runGit } from "../workspace/git.js";
+import { isReviewWorkspace } from "./workspace-info.js";
+import { hashDevelopmentGoal, hashDevelopmentAcceptanceCriteria, prepareRequestInputHandle } from "../execution-orchestrator/development/request-input.js";
+import { hashRecord, type DevelopmentBinding } from "../execution-orchestrator/development/contract.js";
+import { DevelopmentStore } from "../execution-orchestrator/development/store.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
@@ -71,6 +81,83 @@ function requireScope(authInfo: AuthInfo | undefined, scope: string): ToolResult
     return fail("INSUFFICIENT_SCOPE", `This operation requires the '${scope}' scope.`);
   }
   return null;
+}
+
+async function prepareRc02DevelopmentTask(
+  workspace: Workspace,
+  input: { goal: string; edit_paths: string[]; acceptance_criteria: string[] }
+) {
+  if (isReviewWorkspace(workspace)) throw new Error("RC-02 development cannot start in the review workspace");
+  const root = workspace.root;
+  const status = gitStatus(workspace);
+  if (!status.isRepo || status.staged.length || status.unstaged.length || status.untracked.length ||
+      status.conflicted.length || status.hidden.changes || status.hidden.conflicts) {
+    throw new Error("RC-02 development requires a clean Git workspace");
+  }
+  const head = runGit(root, ["rev-parse", "HEAD"]);
+  const baselineHead = head.stdout.trim();
+  if (!head.ok || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(baselineHead)) {
+    throw new Error("RC-02 development requires a valid HEAD commit");
+  }
+  const scope = [...input.edit_paths].sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+  const sha256 = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
+  const files = scope.map((rel) => {
+    const resolved = workspace.resolve(rel);
+    if (resolved.rel !== rel) throw new Error("RC-02 scope path is not canonical");
+    const file = path.join(root, rel);
+    if (!fs.lstatSync(file).isFile()) throw new Error("RC-02 scope requires regular files");
+    const tracked = runGit(root, ["ls-files", "--error-unmatch", "--", rel]);
+    if (!tracked.ok || tracked.stdout.trim() !== rel) throw new Error("RC-02 scope requires tracked files");
+    const bytes = fs.readFileSync(file);
+    return { path: rel, sha256: sha256(bytes), byteLength: bytes.length };
+  });
+  const raw = { goal: { version: 1 as const, text: input.goal },
+    acceptanceCriteria: { version: 1 as const, items: input.acceptance_criteria } };
+  const suffix = randomUUID().replace(/-/g, "");
+  const id = (prefix: string) => `${prefix}${suffix}`;
+  const zero = "0".repeat(64);
+  const seal = <T extends { digest: string }>(x: T): T => ({ ...x, digest: hashRecord(x) });
+  const delegation: DevelopmentBinding["delegation"] = seal({
+    domain: "RC02_DEVELOPMENT_V2_DELEGATION" as const, id: id("dev2-delegation-"),
+    policyId: "dev2-policy-mcp-start-v1",
+    policyDigest: sha256("RC02_MCP_START_POLICY_V1\nrequest-attempt-only"),
+    repositoryId: `dev2-repository-${workspace.id}`, baselineHead, scope, maxAttempts: 1, digest: zero,
+  });
+  const request: DevelopmentBinding["request"] = seal({
+    domain: "RC02_DEVELOPMENT_V2_REQUEST" as const, id: id("dev2-request-"),
+    delegationDigest: delegation.digest, goalDigest: hashDevelopmentGoal(raw.goal),
+    acceptanceCriteriaDigest: hashDevelopmentAcceptanceCriteria(raw.acceptanceCriteria), digest: zero,
+  });
+  const attempt: DevelopmentBinding["attempt"] = seal({
+    domain: "RC02_DEVELOPMENT_V2_ATTEMPT" as const, id: id("dev2-attempt-"),
+    requestDigest: request.digest, sequence: 1, predecessor: null,
+    candidateId: id("dev2-candidate-"), candidateGeneration: 1,
+    sessionId: id("dev2-session-"), executionId: id("dev2-execution-"),
+    inputSnapshotDigest: sha256("RC02_DEVELOPMENT_V2_INPUT_SNAPSHOT_V1\n" +
+      canonicalJson({ baselineHead, scope, files })),
+    manifestId: id("dev2-manifest-"), fastId: id("dev2-fast-"),
+    advisoryReviewId: id("dev2-review-"), materializationId: id("dev2-materialization-"),
+    reviewReceiptId: id("dev2-receipt-"), digest: zero,
+  });
+  const binding: DevelopmentBinding = { delegation, request, attempt };
+  prepareRequestInputHandle(raw, binding, binding);
+  const parent = path.join(getStateDir(), "rc02-development-v2");
+  fs.mkdirSync(parent, { recursive: true });
+  const requestRoot = path.join(parent, request.id);
+  fs.mkdirSync(requestRoot);
+  const { store, receipt } = await DevelopmentStore.create(requestRoot, {
+    operation: "CREATE", transactionId: id("dev2-store-tx-create-"), expectedVersion: 0, binding,
+  }, binding);
+  await store.transact({
+    operation: "ADVANCE", transactionId: id("dev2-store-tx-attempt-"), expectedVersion: receipt.version,
+    binding, to: "ATTEMPT_FIXED", candidateOutcome: "NOT_STARTED", canonicalOutcome: "NOT_STARTED",
+  }, binding);
+  const recovered = await store.recover();
+  if (recovered.state.state !== "ATTEMPT_FIXED") throw new Error("RC-02 attempt was not fixed");
+  return { state: "ATTEMPT_FIXED" as const, delegation_id: delegation.id,
+    delegation_digest: delegation.digest, request_id: request.id, request_digest: request.digest,
+    attempt_id: attempt.id, attempt_digest: attempt.digest, store_anchor: recovered.anchor,
+    authority: "none" as const, execution_started: false as const };
 }
 
 const gitIdentityOutputSchema = z.object({
@@ -325,6 +412,25 @@ export function createMcpServer(ctx: McpContext): McpServer {
   }, async (args, extra) => {
     const denied = requireScope(extra.authInfo, "orchestration.start"); if (denied) return denied;
     try { return okStructured(startOrchestration(args.repo, args.goal, args.mode, undefined, args.edit_paths)); } catch (error) { return mapError(error); }
+  });
+  server.registerTool("start_rc02_development_task", {
+    title: "Start RC-02 development task",
+    description: "Create only a bound RC-02 development request and fixed attempt; no execution or approval.",
+    inputSchema: z.object({
+      goal: z.string().min(1).max(4000).refine((value) => value.trim().length > 0, "Goal must not be blank"),
+      edit_paths: z.array(scopePathSchema).min(1).max(3).refine(
+        (paths) => new Set(paths.map((value) => value.toLowerCase())).size === paths.length,
+        "Edit paths must be unique regardless of case"
+      ),
+      acceptance_criteria: z.array(z.string().min(1).max(2000).refine(
+        (value) => value.trim().length > 0, "Criterion must not be blank"
+      )).min(1).max(6),
+    }).strict(),
+    annotations: { readOnlyHint: false, openWorldHint: false },
+  }, async (args, extra) => {
+    const denied = requireScope(extra.authInfo, "orchestration.start"); if (denied) return denied;
+    try { return okStructured(await prepareRc02DevelopmentTask(workspace, args)); }
+    catch (error) { return mapError(error); }
   });
   server.registerTool("get_orchestration_status", {
     title: "Orchestration status",
