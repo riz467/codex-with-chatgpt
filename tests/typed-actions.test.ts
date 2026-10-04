@@ -481,6 +481,9 @@ describe("retry and empty execution surface", () => {
       "canonicalizeMaintenanceSnapshot", "executableMutationAdapters", "hashActionRequest", "hashMaintenancePlan",
       "hashMaintenanceSnapshot", "maintenanceActionKinds", "maintenanceCheckKinds", "maintenancePlanSchema",
       "maintenanceSnapshotSchema", "parseActionRequest", "parseMaintenancePlan", "parseMaintenanceSnapshot", "typedActionBootstrap",
+      "assessProductionKvmReadiness", "hashProductionKvmCandidate", "hashProductionKvmEvidence",
+      "parseProductionKvmCandidate", "parseProductionKvmEvidence", "productionKvmCandidateSchema",
+      "productionKvmEvidenceSchema", "productionKvmReadinessGateNames",
     ].sort());
   });
 });
@@ -780,5 +783,148 @@ describe("execution attempt identity", () => {
     }
     // An old request clone cannot silently become a new attempt of that request.
     expect(() => core.bindActionAttempt({ ...attempt(previous), sequence: 2, attemptId: nextAttemptId }, previous)).toThrow();
+  });
+});
+
+const requiredKvmGates = [
+  "stage1SubstrateKvm", "negativeCredentials", "negativeRepoExternalReads",
+  "negativeUnapprovedNetwork", "negativeHostProcessSpawn",
+  "negativeCanonicalControllerVerifierMutation", "negativeGenericShellToolEscalation",
+  "negativeOutOfEvidencePathMutation", "cgroupResourceLimits", "providerOnlyEgress",
+  "trustedHostOnlyOAuthCustody", "liveProviderCertification", "productionPlatformDurability",
+  "exclusiveHostCustodyCurrentness",
+];
+function kvmCandidate(): any {
+  return {
+    schemaVersion: 1,
+    identity: {
+      inventory: { inventoryId: uuid, inventoryGeneration: 1, inventorySha256: hash },
+      sourceCommit: structuredClone(commit),
+      executorPackageSha256: hash, executorRuntimeSha256: hash, executorPolicySha256: hash,
+      stage1ProofHashes: { substrateSha256: hash, negativeBoundarySha256: otherHash },
+    },
+    semantics: { oauthCustody: "HOST_ONLY", mutation: "FORBIDDEN", deployment: "FORBIDDEN",
+      reviewSigningApproval: "FORBIDDEN", genericExecution: "FORBIDDEN" },
+  };
+}
+function kvmEvidence(candidate = kvmCandidate()): any {
+  return {
+    schemaVersion: 1, candidateHash: core.hashProductionKvmCandidate(candidate),
+    boundIdentity: structuredClone(candidate.identity),
+    gates: Object.fromEntries(requiredKvmGates.map(name => [name, { result: "PASS", evidenceSha256: hash }])),
+  };
+}
+
+describe("pure Production KVM Executor readiness", () => {
+  it("requires exactly the named gates and never grants authority, execution, a permit or DONE", () => {
+    const candidate = kvmCandidate(), evidence = kvmEvidence(candidate);
+    expect(core.productionKvmReadinessGateNames).toEqual(requiredKvmGates);
+    expect(Object.keys(core.parseProductionKvmEvidence(evidence).gates)).toEqual(requiredKvmGates);
+    const ready = core.assessProductionKvmReadiness(candidate, evidence);
+    expect(ready).toEqual({ candidateHash: evidence.candidateHash,
+      evidenceHash: core.hashProductionKvmEvidence(evidence), status: "READY_FOR_HUMAN_BOUNDARY_REVIEW",
+      authority: "NONE", productionExecution: false, permit: "NOT_ISSUED", done: false });
+    expect(Object.isFrozen(ready)).toBe(true);
+    expect(Object.isFrozen(core.parseProductionKvmCandidate(candidate).identity.sourceCommit)).toBe(true);
+    expect(core.hashProductionKvmCandidate(reverseKeys(candidate))).toBe(ready.candidateHash);
+    expect(core.hashProductionKvmEvidence(reverseKeys(evidence))).toBe(ready.evidenceHash);
+    expect(core.hashProductionKvmCandidate(candidate)).not.toBe(core.hashProductionKvmEvidence(evidence));
+    expect(core.executableMutationAdapters).toEqual([]);
+  });
+
+  it.each(requiredKvmGates)("blocks %s independently on FAIL or UNKNOWN and binds its evidence hash", name => {
+    const candidate = kvmCandidate(), evidence = kvmEvidence(candidate);
+    const baseline = core.assessProductionKvmReadiness(candidate, evidence);
+    for (const result of ["FAIL", "UNKNOWN"]) {
+      const changed = structuredClone(evidence); changed.gates[name].result = result;
+      expect(core.assessProductionKvmReadiness(candidate, changed)).toMatchObject({
+        status: "BLOCKED", authority: "NONE", productionExecution: false, permit: "NOT_ISSUED", done: false,
+      });
+    }
+    const changed = structuredClone(evidence);
+    changed.gates[name].evidenceSha256 = otherHash;
+    const rebound = core.assessProductionKvmReadiness(candidate, changed);
+    expect(rebound.status).toBe("READY_FOR_HUMAN_BOUNDARY_REVIEW");
+    expect(rebound.evidenceHash).not.toBe(baseline.evidenceHash);
+    expect(rebound.candidateHash).toBe(baseline.candidateHash);
+  });
+
+  it("fails closed for missing, extra or malformed gate evidence, without pre-hashing invalid data", () => {
+    const candidate = kvmCandidate(), evidence = kvmEvidence(candidate);
+    for (const name of requiredKvmGates) {
+      const missing = structuredClone(evidence); delete missing.gates[name];
+      expect(() => core.assessProductionKvmReadiness(candidate, missing)).toThrow();
+      const malformed = structuredClone(evidence); malformed.gates[name].evidenceSha256 = "invalid";
+      expect(() => core.assessProductionKvmReadiness(candidate, malformed)).toThrow();
+      const extraField = structuredClone(evidence); extraField.gates[name].approved = true;
+      expect(() => core.assessProductionKvmReadiness(candidate, extraField)).toThrow();
+    }
+    const extra = structuredClone(evidence); extra.gates.genericBoundary = { result: "PASS", evidenceSha256: hash };
+    expect(() => core.assessProductionKvmReadiness(candidate, extra)).toThrow();
+    const substitution = structuredClone(evidence);
+    delete substitution.gates.negativeCredentials;
+    substitution.gates.genericNegative = { result: "PASS", evidenceSha256: hash };
+    expect(() => core.assessProductionKvmReadiness(candidate, substitution)).toThrow();
+    const unknown = structuredClone(evidence); unknown.gates.stage1SubstrateKvm.result = "SKIPPED";
+    expect(() => core.assessProductionKvmReadiness(candidate, unknown)).toThrow();
+  });
+
+  it("blocks mismatched candidate hash or bound identity and hashes each candidate identity field", () => {
+    const candidate = kvmCandidate(), evidence = kvmEvidence(candidate);
+    const blocked = { status: "BLOCKED", authority: "NONE", productionExecution: false,
+      permit: "NOT_ISSUED", done: false };
+    const wrongHash = structuredClone(evidence); wrongHash.candidateHash = otherHash;
+    expect(core.assessProductionKvmReadiness(candidate, wrongHash)).toMatchObject(blocked);
+    const wrongIdentity = structuredClone(evidence); wrongIdentity.boundIdentity.inventory.inventoryId = otherId;
+    expect(core.assessProductionKvmReadiness(candidate, wrongIdentity)).toMatchObject(blocked);
+    for (const path of [
+      ["inventory", "inventoryId"], ["inventory", "inventoryGeneration"], ["inventory", "inventorySha256"],
+      ["sourceCommit", "digest"], ["executorPackageSha256"], ["executorRuntimeSha256"],
+      ["executorPolicySha256"], ["stage1ProofHashes", "substrateSha256"],
+      ["stage1ProofHashes", "negativeBoundarySha256"],
+    ]) {
+      const changed = kvmCandidate();
+      let node = changed.identity;
+      for (const key of path.slice(0, -1)) node = node[key];
+      const key = path.at(-1)!;
+      node[key] = typeof node[key] === "number" ? node[key] + 1
+        : node[key] === uuid ? otherId : node[key] === hash ? otherHash
+          : node[key] === otherHash ? hash : "b".repeat(40);
+      expect(core.hashProductionKvmCandidate(changed)).not.toBe(evidence.candidateHash);
+      expect(core.assessProductionKvmReadiness(changed, evidence)).toMatchObject(blocked);
+    }
+  });
+
+  it("fixes custody and forbidden semantics and rejects unsafe JSON at every boundary", () => {
+    const candidate = kvmCandidate(), evidence = kvmEvidence(candidate);
+    for (const key of Object.keys(candidate.semantics)) {
+      const changed = structuredClone(candidate); changed.semantics[key] = "ALLOWED";
+      expect(() => core.assessProductionKvmReadiness(changed, evidence)).toThrow();
+    }
+    for (const [location, value] of [
+      [candidate, "candidate"], [candidate.identity, "identity"],
+      [candidate.identity.stage1ProofHashes, "proofs"], [evidence, "evidence"],
+      [evidence.boundIdentity, "bound identity"], [evidence.gates, "gates"],
+    ] as const) {
+      const changed = value === "candidate" || value === "identity" || value === "proofs"
+        ? structuredClone(candidate) : structuredClone(evidence);
+      const target = value === "candidate" ? changed : value === "identity" ? changed.identity
+        : value === "proofs" ? changed.identity.stage1ProofHashes
+          : value === "evidence" ? changed : value === "bound identity" ? changed.boundIdentity : changed.gates;
+      target.command = "arbitrary";
+      expect(() => value === "candidate" || value === "identity" || value === "proofs"
+        ? core.assessProductionKvmReadiness(changed, evidence)
+        : core.assessProductionKvmReadiness(candidate, changed)).toThrow();
+      expect(location).toBeDefined();
+    }
+    const accessor = kvmEvidence(candidate);
+    Object.defineProperty(accessor.gates.stage1SubstrateKvm, "result", {
+      get: () => { throw new Error("getter invoked"); }, enumerable: true,
+    });
+    expect(() => core.assessProductionKvmReadiness(candidate, accessor)).toThrow("Invalid JSON property");
+    const prototype = kvmCandidate(); Object.setPrototypeOf(prototype.identity, { command: "arbitrary" });
+    expect(() => core.assessProductionKvmReadiness(prototype, evidence)).toThrow("Expected plain JSON data");
+    const hidden = kvmEvidence(candidate); hidden.gates[Symbol("hidden")] = true;
+    expect(() => core.assessProductionKvmReadiness(candidate, hidden)).toThrow();
   });
 });

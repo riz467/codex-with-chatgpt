@@ -484,3 +484,79 @@ export function assertRetryRequest(previousInput: unknown, receiptInput: unknown
 
 // Deliberately no registration or execution API in this phase.
 export const executableMutationAdapters: readonly never[] = Object.freeze([]);
+
+/** Pure, non-authoritative Production KVM Executor readiness contract.
+ * Evidence digests are references, not independently verified attestations.
+ * No readiness result provisions, deploys, approves, permits or executes.
+ */
+const productionKvmIdentitySchema = z.object({
+  inventory: z.object({ inventoryId: id, inventoryGeneration: generation, inventorySha256: sha256 }).strict(),
+  sourceCommit: commit,
+  executorPackageSha256: sha256,
+  executorRuntimeSha256: sha256,
+  executorPolicySha256: sha256,
+  stage1ProofHashes: z.object({ substrateSha256: sha256, negativeBoundarySha256: sha256 }).strict(),
+}).strict();
+
+export const productionKvmCandidateSchema = z.object({
+  schemaVersion: z.literal(1),
+  identity: productionKvmIdentitySchema,
+  semantics: z.object({
+    oauthCustody: z.literal("HOST_ONLY"),
+    mutation: z.literal("FORBIDDEN"),
+    deployment: z.literal("FORBIDDEN"),
+    reviewSigningApproval: z.literal("FORBIDDEN"),
+    genericExecution: z.literal("FORBIDDEN"),
+  }).strict(),
+}).strict();
+
+export const productionKvmReadinessGateNames = Object.freeze([
+  "stage1SubstrateKvm", "negativeCredentials", "negativeRepoExternalReads",
+  "negativeUnapprovedNetwork", "negativeHostProcessSpawn",
+  "negativeCanonicalControllerVerifierMutation", "negativeGenericShellToolEscalation",
+  "negativeOutOfEvidencePathMutation", "cgroupResourceLimits", "providerOnlyEgress",
+  "trustedHostOnlyOAuthCustody", "liveProviderCertification", "productionPlatformDurability",
+  "exclusiveHostCustodyCurrentness",
+] as const);
+const readinessGateShape = z.object({
+  result: z.enum(["PASS", "FAIL", "UNKNOWN"]), evidenceSha256: sha256,
+}).strict();
+const readinessGatesSchema = z.object(Object.fromEntries(
+  productionKvmReadinessGateNames.map(name => [name, readinessGateShape]),
+) as Record<typeof productionKvmReadinessGateNames[number], typeof readinessGateShape>).strict();
+export const productionKvmEvidenceSchema = z.object({
+  schemaVersion: z.literal(1),
+  candidateHash: sha256,
+  boundIdentity: productionKvmIdentitySchema,
+  gates: readinessGatesSchema,
+}).strict();
+
+export function parseProductionKvmCandidate(input: unknown) {
+  assertJson(input);
+  return freeze(productionKvmCandidateSchema.parse(input));
+}
+export function parseProductionKvmEvidence(input: unknown) {
+  assertJson(input);
+  return freeze(productionKvmEvidenceSchema.parse(input));
+}
+export function hashProductionKvmCandidate(input: unknown): string {
+  return digest("production-kvm-candidate-v1", parseProductionKvmCandidate(input));
+}
+export function hashProductionKvmEvidence(input: unknown): string {
+  return digest("production-kvm-evidence-v1", parseProductionKvmEvidence(input));
+}
+export function assessProductionKvmReadiness(candidateInput: unknown, evidenceInput: unknown) {
+  const candidate = parseProductionKvmCandidate(candidateInput);
+  const evidence = parseProductionKvmEvidence(evidenceInput);
+  const candidateHash = hashProductionKvmCandidate(candidate);
+  const evidenceHash = hashProductionKvmEvidence(evidence);
+  const ready = evidence.candidateHash === candidateHash
+    && canonical(evidence.boundIdentity) === canonical(candidate.identity)
+    && productionKvmReadinessGateNames.every(name => evidence.gates[name].result === "PASS");
+  return freeze({
+    candidateHash, evidenceHash,
+    status: ready ? "READY_FOR_HUMAN_BOUNDARY_REVIEW" as const : "BLOCKED" as const,
+    authority: "NONE" as const, productionExecution: false as const,
+    permit: "NOT_ISSUED" as const, done: false as const,
+  });
+}
