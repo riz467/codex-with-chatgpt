@@ -104,7 +104,9 @@ describe("RC-01_B2 synthetic completed ledger over MCP", () => {
         { task_id: fixture.taskId, repo: "unknown" }, { task_id: fixture.taskId, repo: fixture.repoRoot },
         { task_id: fixture.taskId, repo: fixture.workspaceIdentity }, { task_id: fixture.taskId, root: fixture.reviewRoot },
         { task_id: fixture.taskId, repoRoots: fixture.reads.repoRoots }, { task_id: fixture.taskId, readRoots: fixture.reads.repoRoots },
-        { task_id: fixture.taskId, orchestrationReads: fixture.reads }]) {
+        { task_id: fixture.taskId, orchestrationReads: fixture.reads },
+        ...["platform", "os", "host", "repo_root", "path", "config", "config_path", "reviewRoot"].map(field =>
+          ({ task_id: fixture.taskId, [field]: "/untrusted/root-or-config" }))]) {
         expect((await call(name, args)).isError).toBe(true);
       }
       expect((await call(name)).isError ?? false).toBe(false);
@@ -304,6 +306,7 @@ afterAll(async () => {
     expect(start.properties?.mode?.enum).toEqual(["read_only"]);
     expect(start.properties).toHaveProperty("edit_paths");
     expect(start.required).not.toContain("edit_paths");
+    expect(Object.keys(start.properties ?? {}).sort()).toEqual(["edit_paths", "goal", "mode", "repo"]);
   });
 
   it("documents git_diff pagination with its output field names", async () => {
@@ -339,6 +342,8 @@ afterAll(async () => {
       { repo: "ai-orchestration-config", mode: "change", goal: "edit" },
       { repo: "ai-orchestration-config", mode: "autonomous", goal: "edit" },
       { repo: "unknown", mode: "change", goal: "edit", edit_paths: ["README.md"] },
+      ...["/srv/ai-control/repos/pve-doc", "C:\\work\\pve-doc", "../pve-doc", "pve-doc/README.md", "constructor", "__proto__"].map(repo =>
+        ({ repo, mode: "read_only", goal: "inspect", platform: "linux", root: "/untrusted", config: "/untrusted/config" })),
     ]) {
       const result = await client.callTool({ ...base, arguments: arguments_ });
       expect(result.isError).toBe(true);
@@ -376,7 +381,39 @@ afterAll(async () => {
       { name: "search_repo", arguments: { repo: "unknown", query: "AI-Workspace" } },
       { name: "read_repo_file", arguments: { repo: "pve-doc", path: "../outside" } },
       { name: "read_repo_file", arguments: { repo: "pve-doc", path: "C:\\work\\pve-doc\\00_overview.md" } },
+      ...["/srv/ai-control/repos/pve-doc", "C:\\work\\pve-doc", "../pve-doc", "__proto__", "constructor"].map(repo =>
+        ({ name: "search_repo", arguments: { repo, query: "AI-Workspace" } })),
+      ...["/srv/ai-control/repos/pve-doc/README.md", "a/../../outside", "a\\..\\outside", "//server/share", "C:/work/pve-doc/README.md"].map(path =>
+        ({ name: "read_repo_file", arguments: { repo: "pve-doc", path } })),
     ]) expect((await client.callTool(request)).isError).toBe(true);
+  });
+
+  it("does not let extra host, root or config fields redirect allowlisted research reads", async () => {
+    const canary = researchScratch.write("untrusted-root/README.md", "UNTRUSTED_ROOT_CANARY\n");
+    const untrusted = path.dirname(canary);
+    const base = { repo: "pve-doc", query: "AI-Workspace", max_results: 2 };
+    const expected = structuredJsonOf<{ matches: { path: string }[] }>(await client.callTool({ name: "search_repo", arguments: base }));
+    expect(expected.matches.length).toBeGreaterThan(0);
+    const relative = expected.matches[0].path;
+    const expectedRead = structuredJsonOf(await client.callTool({ name: "read_repo_file", arguments: { repo: "pve-doc", path: relative } }));
+    const overrides = { platform: "win32", os: "linux", root: untrusted, repo_root: untrusted,
+      config: untrusted, config_path: untrusted,
+      repoRoots: { "pve-doc": untrusted, "ai-orchestration-config": untrusted } };
+    const reads = vi.spyOn(fs, "readFileSync");
+    const writes = [vi.spyOn(fs, "writeFileSync"), vi.spyOn(fs, "appendFileSync"), vi.spyOn(fs, "mkdirSync"),
+      vi.spyOn(fs, "rmSync"), vi.spyOn(fs, "unlinkSync"), vi.spyOn(fs, "renameSync")];
+    try {
+      // Legacy raw SDK schemas strip unknown fields; they must never become runtime dependencies.
+      const search = await client.callTool({ name: "search_repo", arguments: { ...base, ...overrides } });
+      expect(search.isError ?? false).toBe(false);
+      expect(structuredJsonOf(search)).toEqual(expected);
+      const read = await client.callTool({ name: "read_repo_file", arguments: { repo: "pve-doc", path: relative, ...overrides } });
+      expect(read.isError ?? false).toBe(false);
+      expect(structuredJsonOf(read)).toEqual(expectedRead);
+      expect(textOf(search) + textOf(read)).not.toContain("UNTRUSTED_ROOT_CANARY");
+      expect(reads.mock.calls.some(([file]) => String(file).startsWith(untrusted))).toBe(false);
+      for (const write of writes) expect(write).not.toHaveBeenCalled();
+    } finally { reads.mockRestore(); for (const write of writes) write.mockRestore(); }
   });
 
   it("workspace_info returns identity and project detection", async () => {

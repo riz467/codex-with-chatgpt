@@ -5,8 +5,9 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { spawn, spawnSync } from "node:child_process";
-import { verifyBundleIntegrity, startTestJob, startOrchestration, getOrchestrationStatus, getOrchestrationResult, getOrchestrationApproval, getOrchestrationRetryPlan, retryOrchestration, validateEditPaths, completeOrchestration, completeIntegratedOrchestration } from "../src/mcp/local-gateway.js";
+import { verifyBundleIntegrity, startTestJob, startOrchestration, getOrchestrationStatus, getOrchestrationResult, getOrchestrationApproval, getOrchestrationRetryPlan, retryOrchestration, validateEditPaths, completeOrchestration, completeIntegratedOrchestration, REPOS, REVIEW_ROOT, safePath } from "../src/mcp/local-gateway.js";
 import { runReadOnlyJob } from "../src/mcp/read-only-worker.js";
+import { searchRepo, readRepoFile } from "../src/mcp/repo-research.js";
 import { createScratch, type Scratch } from "./support/scratch.js";
 import { writeCompletedTask } from "./support/synthetic-review.js";
 import { testPowerShellExecutable } from "./support/powershell.js";
@@ -24,7 +25,36 @@ vi.mock("node:child_process", async (importOriginal) => {
 
 const roots: string[] = [];
 const temp = () => { const root = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-test-")); roots.push(root); return root; };
-afterEach(() => { vi.restoreAllMocks(); vi.mocked(spawn).mockReset(); vi.mocked(spawnSync).mockClear(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.mocked(spawn).mockReset(); vi.mocked(spawnSync).mockClear(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+function usePlatform(platform: string) {
+  vi.stubGlobal("process", new Proxy(process, { get(target, key) {
+    return key === "platform" ? platform : Reflect.get(target, key);
+  } }));
+}
+// Keep true originals so a test can change the simulated host without nesting spies.
+const fixedDirectoryFs = { stat: fs.statSync.bind(fs), realpath: fs.realpathSync.native.bind(fs.realpathSync),
+  readdir: fs.readdirSync.bind(fs) };
+// Mock only the fixed-root filesystem boundary, never create production roots or
+// Windows-shaped filenames. Traversal/reparse checks and job evidence use real IO.
+function fixedRepoDirectories() {
+  const fixed = new Set(Object.values(REPOS));
+  const directory = temp(), directoryStat = fs.statSync(directory);
+  const { stat, realpath, readdir } = fixedDirectoryFs;
+  vi.spyOn(fs, "statSync").mockImplementation(((...args: unknown[]) =>
+    fixed.has(String(args[0])) ? directoryStat : Reflect.apply(stat, fs, args)) as typeof fs.statSync);
+  vi.spyOn(fs.realpathSync, "native").mockImplementation(((...args: unknown[]) =>
+    fixed.has(String(args[0])) ? path.resolve(String(args[0])) : Reflect.apply(realpath, fs.realpathSync, args)) as typeof fs.realpathSync.native);
+  vi.spyOn(fs, "readdirSync").mockImplementation(((...args: unknown[]) =>
+    Reflect.apply(readdir, fs, fixed.has(String(args[0])) ? [directory, ...args.slice(1)] : args)) as typeof fs.readdirSync);
+}
+// Test invocation only: permits a verified portable interpreter without changing
+// production runtime selection or the existing default test discovery helper.
+function adapterTestPowerShellExecutable(): string {
+  const executable = process.env.C2C_TEST_POWERSHELL_EXECUTABLE;
+  if (executable === undefined) return testPowerShellExecutable();
+  if (!path.isAbsolute(executable)) throw new Error("C2C_TEST_POWERSHELL_EXECUTABLE must be an absolute path");
+  return executable;
+}
 const runtimeFiles = ["C:\\Users\\workspace\\.local\\bin\\ai-run.ps1", "C:\\Program Files\\PowerShell\\7\\pwsh.exe"];
 function runtimeAvailable() {
   const exists = fs.existsSync.bind(fs);
@@ -195,6 +225,26 @@ describe("RC-01_B2 synthetic completed ledger gateway reads", () => {
     expect(result()).toMatchObject({ state: "DONE", published: false, review_bundle: null });
   });
 
+  it.each(["win32", "linux", "darwin"])("keeps genuine isolated ledger reads and historical bundle binding independent of %s mapping", platform => {
+    // Only host selection is simulated. All ledger/bundle reads remain real filesystem IO.
+    usePlatform(platform);
+    expect(result()).toMatchObject({ state: "DONE", result_category: "LEGACY_LOCAL_DONE", authoritative_done: false,
+      published: true, review_bundle: path.join(fixture.reviewRoot, fixture.bundle) });
+    const jobId = "historical-bundle-binding";
+    scratch.write(path.join(fixture.reviewRoot, `rpc-jobs/${jobId}/job.json`), JSON.stringify({
+      job_id: jobId, task_id: fixture.taskId, mode: "change", repo_key: "pve-doc", process_id: process.pid, exit_code: 0,
+    }));
+    replace(fixture.statusFile, { ...readJson(fixture.statusFile), state: "READY_FOR_REVIEW" });
+    const pointerFile = path.join(fixture.reviewRoot, "CURRENT_REVIEW.json");
+    const pointer = { task_id: fixture.taskId, source_workspace: fixture.workspaceIdentity, review_bundle: fixture.bundle };
+    scratch.write(pointerFile, JSON.stringify(pointer));
+    expect(result(jobId)).toMatchObject({ state: "READY_FOR_REVIEW", authoritative_done: false, published: true });
+    for (const identity of ["/srv/ai-control/repos/pve-doc", fixture.repoRoot, "pve-doc"]) {
+      replace(pointerFile, { ...pointer, source_workspace: identity });
+      expect(result(jobId)).toMatchObject({ state: "READY_FOR_REVIEW", authoritative_done: false, published: false, review_bundle: null });
+    }
+  });
+
   it("reads normal review completion's DONE transition and READY_FOR_REVIEW without fixed roots", () => {
     const decision = readJson(fixture.decisionFile);
     delete decision.completion_mode;
@@ -207,9 +257,156 @@ describe("RC-01_B2 synthetic completed ledger gateway reads", () => {
   });
 });
 
+const hostPlatforms = [
+  { platform: "win32", roots: { "pve-doc": "C:\\work\\pve-doc", "ai-orchestration-config": "C:\\work\\ai-orchestration-config" } },
+  { platform: "linux", roots: { "pve-doc": "/srv/ai-control/repos/pve-doc", "ai-orchestration-config": "/srv/ai-control/repos/ai-orchestration-config" } },
+] as const;
+
+describe("fixed host repository mapping", () => {
+  it.each(hostPlatforms)("uses only the two immutable $platform roots, ignoring environment overrides", ({ platform, roots }) => {
+    usePlatform(platform);
+    for (const variable of ["REPO_ROOT", "PVE_DOC_ROOT", "C2C_REPO_ROOT", "PLATFORM", "NODE_PLATFORM", "C2C_CONFIG"]) {
+      vi.stubEnv(variable, "/untrusted/repository-or-config");
+    }
+    expect(Object.keys(REPOS)).toEqual(["pve-doc", "ai-orchestration-config"]);
+    expect({ ...REPOS }).toEqual(roots);
+    expect(Object.isFrozen(REPOS)).toBe(true);
+    expect(Reflect.set(REPOS, "pve-doc", "/untrusted")).toBe(false);
+    expect(Reflect.set(REPOS, "other", "/untrusted")).toBe(false);
+    expect({ ...REPOS }).toEqual(roots);
+    expect(REVIEW_ROOT).toBe("C:\\work\\ai-orchestration-review");
+  });
+
+  it.each(["darwin", "freebsd", "openbsd", "aix", "sunos", "win32;linux", "LINUX", ""])(
+    "fails closed on unsupported host %s before filesystem inspection, writes or dispatch", platform => {
+      const root = temp();
+      usePlatform(platform);
+      const reads = [vi.spyOn(fs, "readFileSync"), vi.spyOn(fs, "statSync"), vi.spyOn(fs, "lstatSync"), vi.spyOn(fs, "existsSync")];
+      const writes = [vi.spyOn(fs, "mkdirSync"), vi.spyOn(fs, "writeFileSync"), vi.spyOn(fs, "openSync")];
+      for (const repo of ["pve-doc", "ai-orchestration-config"] as const) {
+        expect(() => REPOS[repo]).toThrow(expect.objectContaining({ code: "UNSUPPORTED_PLATFORM" }));
+        expect(() => startOrchestration(repo, "Read-only inspection", "read_only", root))
+          .toThrow(expect.objectContaining({ code: "UNSUPPORTED_PLATFORM" }));
+        for (const mode of ["change", "autonomous"] as const) {
+          expect(() => startOrchestration(repo, "Legacy action", mode, root))
+            .toThrow(expect.objectContaining({ code: "FRESH_REQUEST_REQUIRED" }));
+        }
+      }
+      for (const read of reads) expect(read).not.toHaveBeenCalled();
+      for (const write of writes) expect(write).not.toHaveBeenCalled();
+      expect(spawn).not.toHaveBeenCalled();
+      expect(spawnSync).not.toHaveBeenCalled();
+      expect(fs.readdirSync(root)).toEqual([]);
+    },
+  );
+
+  it.each(["win32", "linux", "darwin"])("preserves historical review identities independently of %s host roots", platform => {
+    const root = temp(), dir = bundle(root);
+    usePlatform(platform);
+    expect(verifyBundleIntegrity(undefined, root)).toMatchObject({ valid: true, issues: [] });
+    const metadataFile = path.join(dir, "review-bundle.json");
+    const metadata = JSON.parse(fs.readFileSync(metadataFile, "utf8"));
+    for (const identity of ["C:\\work\\pve-doc", "C:\\work\\ai-orchestration-config"]) {
+      fs.writeFileSync(metadataFile, JSON.stringify({ ...metadata, source_workspace: identity }));
+      expect(verifyBundleIntegrity("reviews/demo", root)).toMatchObject({ valid: true, issues: [] });
+    }
+    for (const identity of ["/srv/ai-control/repos/pve-doc", "/srv/ai-control/repos/ai-orchestration-config", "/untrusted", "pve-doc"]) {
+      fs.writeFileSync(metadataFile, JSON.stringify({ ...metadata, source_workspace: identity }));
+      expect(verifyBundleIntegrity("reviews/demo", root).issues).toContainEqual({ kind: "invalid", path: "review-bundle.json" });
+    }
+  });
+
+  it("rejects missing, non-directory, redirected and reparse repository roots before job writes", () => {
+    const root = temp(), repo = REPOS["pve-doc"];
+    const originalStat = fs.statSync.bind(fs), originalLstat = fs.lstatSync.bind(fs);
+    const stat = vi.spyOn(fs, "statSync");
+    const realpath = vi.spyOn(fs.realpathSync, "native");
+    const writes = [vi.spyOn(fs, "mkdirSync"), vi.spyOn(fs, "writeFileSync"), vi.spyOn(fs, "openSync")];
+    stat.mockImplementation(((file: fs.PathLike) => {
+      if (String(file) === repo) throw Object.assign(new Error("Missing fixed repo"), { code: "ENOENT" });
+      return originalStat(file);
+    }) as typeof fs.statSync);
+    expect(() => startOrchestration("pve-doc", "Inspect", "read_only", root)).toThrow(expect.objectContaining({ code: "ENOENT" }));
+    stat.mockReturnValue({ isDirectory: () => false } as fs.Stats);
+    expect(() => startOrchestration("pve-doc", "Inspect", "read_only", root)).toThrow(expect.objectContaining({ code: "INVALID_REPO" }));
+    stat.mockReturnValue({ isDirectory: () => true } as fs.Stats);
+    realpath.mockReturnValue(path.join(root, "redirected"));
+    expect(() => startOrchestration("pve-doc", "Inspect", "read_only", root)).toThrow(expect.objectContaining({ code: "INVALID_REPO" }));
+    vi.spyOn(fs, "lstatSync").mockImplementation(((file: fs.PathLike) =>
+      String(file) === path.resolve(repo) ? { isSymbolicLink: () => true } as fs.Stats : originalLstat(file)) as typeof fs.lstatSync);
+    expect(() => startOrchestration("pve-doc", "Inspect", "read_only", root)).toThrow(expect.objectContaining({ code: "INVALID_PATH" }));
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    expect(spawnSync).not.toHaveBeenCalled();
+    expect(fs.readdirSync(root)).toEqual([]);
+  });
+
+  it.each([
+    ["pve-doc", "root"], ["pve-doc", "ancestor"],
+    ["ai-orchestration-config", "root"], ["ai-orchestration-config", "ancestor"],
+  ] as const)("blocks the %s %s case-variant link for every default read consumer before content access", (repoKey, component) => {
+    const fixture = temp(), outside = temp();
+    const link = path.join(fixture, "isolated-link");
+    fs.writeFileSync(path.join(outside, "README.md"), "ESCAPED_CONTENT_CANARY");
+    fs.symlinkSync(outside, link, process.platform === "win32" ? "junction" : "dir");
+    const linkStat = fs.lstatSync(link), directoryStat = fs.statSync(outside);
+    expect(linkStat.isSymbolicLink()).toBe(true);
+    usePlatform("linux");
+    const fixedRoot = hostPlatforms[1].roots[repoKey];
+    const boundary = component === "root" ? fixedRoot : path.posix.dirname(fixedRoot);
+    const observedBoundary = path.resolve(boundary);
+    const redirected = component === "root" ? path.posix.join(path.posix.dirname(fixedRoot), repoKey.toUpperCase()) :
+      path.posix.join(path.posix.dirname(path.posix.dirname(fixedRoot)), "REPOS", repoKey);
+    // Linux's distinct target would pass the consumers' old lowercase comparison.
+    expect(redirected).not.toBe(fixedRoot);
+    expect(redirected.toLowerCase()).toBe(fixedRoot.toLowerCase());
+    const originalLstat = fs.lstatSync.bind(fs), originalStat = fs.statSync.bind(fs);
+    const originalRealpath = fs.realpathSync.native.bind(fs.realpathSync);
+    // Simulate only fixed deployment paths; lstat evidence comes from a real isolated
+    // symlink. Never create or alter /srv roots or pretend to execute Windows binaries.
+    const lstat = vi.spyOn(fs, "lstatSync").mockImplementation(((file: fs.PathLike) =>
+      String(file) === observedBoundary ? linkStat : originalLstat(file)) as typeof fs.lstatSync);
+    const stat = vi.spyOn(fs, "statSync").mockImplementation(((file: fs.PathLike) =>
+      String(file) === fixedRoot ? directoryStat : originalStat(file)) as typeof fs.statSync);
+    const realpath = vi.spyOn(fs.realpathSync, "native").mockImplementation(((file: fs.PathLike) =>
+      String(file) === fixedRoot ? redirected : originalRealpath(file)) as typeof fs.realpathSync.native);
+    const reads = vi.spyOn(fs, "readFileSync");
+    const writes = [vi.spyOn(fs, "mkdirSync"), vi.spyOn(fs, "writeFileSync"), vi.spyOn(fs, "appendFileSync"),
+      vi.spyOn(fs, "openSync"), vi.spyOn(fs, "renameSync")];
+    for (const read of [
+      () => REPOS[repoKey],
+      () => searchRepo(repoKey, "ESCAPED_CONTENT_CANARY"),
+      () => readRepoFile(repoKey, "README.md"),
+      () => runReadOnlyJob(repoKey, "blocked-worker", "rpc-blocked-worker", fixture),
+      () => startOrchestration(repoKey, "Inspect", "read_only", fixture),
+    ]) expect(read).toThrow(expect.objectContaining({ code: "INVALID_PATH" }));
+    expect(lstat.mock.calls.some(([file]) => String(file) === observedBoundary)).toBe(true);
+    expect(stat).not.toHaveBeenCalled();
+    expect(realpath).not.toHaveBeenCalled();
+    expect(reads).not.toHaveBeenCalled();
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    expect(spawnSync).not.toHaveBeenCalled();
+  });
+
+  it("keeps traversal, absolute paths and real symlink/junction ancestors out of safePath", () => {
+    const root = temp(), outside = temp();
+    fs.mkdirSync(path.join(outside, "nested"));
+    fs.symlinkSync(outside, path.join(root, "escape"), process.platform === "win32" ? "junction" : "dir");
+    expect(safePath(root, "new/file.txt")).toBe(path.join(root, "new", "file.txt"));
+    for (const relative of ["../outside", "a/../../outside", "./file", "/etc/passwd", "C:\\work\\pve-doc", "C:/work/pve-doc",
+      "\\\\server\\share", "a\\..\\outside", "a//file", "escape/nested/file", "escape"]) {
+      expect(() => safePath(root, relative)).toThrow(expect.objectContaining({ code: "INVALID_PATH" }));
+    }
+    expect(() => safePath(path.join(root, "escape", "nested"), "file"))
+      .toThrow(expect.objectContaining({ code: "INVALID_PATH" }));
+  });
+});
+
 describe("bounded actions", () => {
+  beforeEach(() => fixedRepoDirectories());
   it("reads normal review DONE and READY_FOR_REVIEW from a fixed ledger, failing closed on ambiguity and traversal", () => {
-    const root = temp(), id = "rpc-fallback-test", repo = "C:\\work\\pve-doc", other = "C:\\work\\ai-orchestration-config";
+    const root = temp(), id = "rpc-fallback-test", repo = REPOS["pve-doc"], other = REPOS["ai-orchestration-config"];
     const ledger = path.join(repo, ".ai", "tasks", id, "status.json");
     const duplicate = path.join(other, ".ai", "tasks", id, "status.json");
     const decision = path.join(repo, ".ai", "tasks", id, "review-decision.json");
@@ -240,7 +437,7 @@ describe("bounded actions", () => {
   });
   it("rejects a reparse-point task directory before reading ledger evidence", () => {
     const root = temp(), id = "rpc-symlink-escape";
-    const directory = path.join("C:\\work\\pve-doc", ".ai", "tasks", id);
+    const directory = path.join(REPOS["pve-doc"], ".ai", "tasks", id);
     const original = fs.lstatSync.bind(fs);
     const lstat = vi.spyOn(fs, "lstatSync").mockImplementation(((file: string) =>
       String(file) === directory ? { isSymbolicLink: () => true } as fs.Stats : original(file)) as typeof fs.lstatSync);
@@ -339,8 +536,10 @@ describe("bounded actions", () => {
       expect(write).not.toHaveBeenCalled();
     } finally { observation.mockRestore(); write.mockRestore(); }
   });
-  it("read_only dispatches only the fixed Node worker, never ai-run or a caller command", () => {
+  it.each(hostPlatforms)("$platform read_only dispatches only the fixed Node worker, never ai-run or a caller command", ({ platform, roots }) => {
     const root = temp();
+    usePlatform(platform);
+    fixedRepoDirectories();
     const exists = fs.existsSync.bind(fs);
     const existsMock = vi.spyOn(fs, "existsSync").mockImplementation((file) => String(file).endsWith("read-only-worker.js") || exists(file));
     const child = Object.assign(new EventEmitter(), { pid: process.pid, unref: vi.fn() });
@@ -352,7 +551,7 @@ describe("bounded actions", () => {
     expect(args?.[0]).toMatch(/read-only-worker\.js$/);
     expect(args?.slice(1)).toEqual(["ai-orchestration-config", job.job_id, job.task_id]);
     expect(JSON.stringify(args)).not.toContain("現在状態");
-    expect(opts).toMatchObject({ shell: false, cwd: "C:\\work\\ai-orchestration-config" });
+    expect(opts).toMatchObject({ shell: false, cwd: roots["ai-orchestration-config"] });
     expect(getOrchestrationStatus(job.job_id, root).mode).toBe("read_only");
     expect(getOrchestrationResult(job.task_id, root)).toMatchObject({ mode: "read_only", changed_paths: [], published: false });
     expect(() => startOrchestration("ai-orchestration-config", "goal", "read_only", root, ["README.md"])).toThrow();
@@ -368,12 +567,24 @@ describe("bounded actions", () => {
     expect(spawn).not.toHaveBeenCalled();
     expect(fs.readdirSync(root)).toEqual([]);
   });
+  it("limits the optional test-only PowerShell override to an absolute path and preserves default discovery", () => {
+    vi.stubEnv("C2C_TEST_POWERSHELL_EXECUTABLE", undefined);
+    expect(adapterTestPowerShellExecutable()).toBe(testPowerShellExecutable());
+    for (const executable of ["", "pwsh", "./pwsh", "../pwsh"]) {
+      vi.stubEnv("C2C_TEST_POWERSHELL_EXECUTABLE", executable);
+      expect(() => adapterTestPowerShellExecutable()).toThrow(/must be an absolute path/);
+    }
+    const executable = path.join(temp(), process.platform === "win32" ? "pwsh.exe" : "pwsh");
+    vi.stubEnv("C2C_TEST_POWERSHELL_EXECUTABLE", executable);
+    expect(adapterTestPowerShellExecutable()).toBe(executable);
+    expect(spawnSync).not.toHaveBeenCalled();
+  });
   it("PowerShell adapter binds multiple EditPaths as an array to ai-run", () => {
     const dir = temp(), stub = path.join(dir, "ai-run.ps1"), wrapper = path.join(dir, "invoke-ai-run.ps1");
     fs.writeFileSync(stub, 'param([string]$Repo,[string]$TaskId,[string]$Goal,[string[]]$EditPaths)\nConvertTo-Json -InputObject @($EditPaths) -Compress\n');
     fs.writeFileSync(wrapper, fs.readFileSync("src/mcp/invoke-ai-run.ps1", "utf8").replace("C:\\Users\\workspace\\.local\\bin\\ai-run.ps1", stub.replaceAll("'", "''")));
     const encoded = Buffer.from(JSON.stringify(["README.md", "docs/guide.md"]), "utf8").toString("base64");
-    const output = spawnSync(testPowerShellExecutable(), ["-NoProfile", "-NonInteractive", "-File", wrapper, "-Repo", "test-repo", "-TaskId", "test-task", "-Goal", "test-goal", "-EditPathsBase64", encoded], { encoding: "utf8", shell: false });
+    const output = spawnSync(adapterTestPowerShellExecutable(), ["-NoProfile", "-NonInteractive", "-File", wrapper, "-Repo", "test-repo", "-TaskId", "test-task", "-Goal", "test-goal", "-EditPathsBase64", encoded], { encoding: "utf8", shell: false });
     expect(output.status).toBe(0);
     expect(JSON.parse(output.stdout.trim())).toEqual(["README.md", "docs/guide.md"]);
   });
@@ -383,10 +594,16 @@ describe("bounded actions", () => {
     fs.mkdirSync(dir, { recursive: true });
     expect(() => runReadOnlyJob("../outside" as "pve-doc", id, task, root)).toThrow();
     expect(() => runReadOnlyJob("ai-orchestration-config", "../outside", task, root)).toThrow();
-    runReadOnlyJob("ai-orchestration-config", id, task, root);
+    vi.mocked(spawnSync).withImplementation((_exe, args) => ({
+      status: 0, error: undefined,
+      stdout: args?.includes("--abbrev-ref") ? "main\n" : args?.includes("HEAD") ? "a".repeat(40) + "\n" : "",
+      stderr: "", pid: 12345, output: [], signal: null,
+    }) as ReturnType<typeof spawnSync>, () => runReadOnlyJob("ai-orchestration-config", id, task, root));
     expect(vi.mocked(spawnSync).mock.calls.every(([exe, args, opts]) =>
       exe === "C:\\Program Files\\Git\\cmd\\git.exe" && opts?.shell === false &&
+      args?.[args.indexOf("-C") + 1] === REPOS["ai-orchestration-config"] &&
       !args?.some((arg) => /^(commit|push|add|reset|checkout|clean)$/.test(arg)))).toBe(true);
+    expect(spawnSync).toHaveBeenCalledTimes(5);
     expect(fs.readdirSync(dir)).toEqual(["read-only-result.json"]);
     const result = JSON.parse(fs.readFileSync(path.join(dir, "read-only-result.json"), "utf8"));
     expect(result).toMatchObject({ state: "DONE", mode: "read_only", changed_paths: [], published: false });
@@ -419,7 +636,7 @@ describe("bounded actions", () => {
     const root = temp(), id = "ledger-job", task = "rpc-ledger-task", dir = path.join(root, "rpc-jobs", id);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "job.json"), JSON.stringify({ job_id: id, task_id: task, repo_key: "pve-doc", process_id: process.pid, started_at: new Date().toISOString(), exit_code: 2 }));
-    const ledger = path.join("C:\\work\\pve-doc", ".ai", "tasks", task, "status.json");
+    const ledger = path.join(REPOS["pve-doc"], ".ai", "tasks", task, "status.json");
     const exists = fs.existsSync.bind(fs), read = fs.readFileSync.bind(fs);
     let state = "BLOCKED";
     const existsMock = vi.spyOn(fs, "existsSync").mockImplementation((file) => String(file) === ledger || exists(file));
@@ -439,8 +656,8 @@ describe("bounded actions", () => {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "job.json"), JSON.stringify({ job_id: id, task_id: task, mode: "change", repo_key: "pve-doc", process_id: process.pid, exit_code: 2 }));
     fs.writeFileSync(path.join(dir, "stdout.log"), "RESULT: HUMAN_APPROVAL_REQUIRED\n");
-    const ledger = path.join("C:\\work\\pve-doc", ".ai", "tasks", task, "status.json");
-    const proposalFile = path.join("C:\\work\\pve-doc", ".ai", "tasks", task, "codex-attempt-1.stdout.txt");
+    const ledger = path.join(REPOS["pve-doc"], ".ai", "tasks", task, "status.json");
+    const proposalFile = path.join(REPOS["pve-doc"], ".ai", "tasks", task, "codex-attempt-1.stdout.txt");
     const status = { task_id: task, state: "NEEDS_APPROVAL", approval_required: true, message: "Codex structured proposal requests approval", edit_paths: ["README.md"],
       allowed_paths: ["README.md", `.ai/tasks/${task}/**`], codex_attempts: 1, verify_completed: false, edits: [] };
     const proposal = { task_id: task, state: "NEEDS_APPROVAL", approval_required: true, message: "Human decision requested", proposed_command: "git push origin main",
@@ -531,8 +748,8 @@ describe("bounded actions", () => {
     const parentBytes = JSON.stringify(parent);
     fs.writeFileSync(path.join(dir, "job.json"), parentBytes);
     fs.writeFileSync(path.join(dir, "stdout.log"), "RESULT: HUMAN_APPROVAL_REQUIRED\n");
-    const statusFile = path.join("C:\\work\\ai-orchestration-config", ".ai", "tasks", task, "status.json");
-    const proposalFile = path.join("C:\\work\\ai-orchestration-config", ".ai", "tasks", task, "codex-attempt-1.stdout.txt");
+    const statusFile = path.join(REPOS["ai-orchestration-config"], ".ai", "tasks", task, "status.json");
+    const proposalFile = path.join(REPOS["ai-orchestration-config"], ".ai", "tasks", task, "codex-attempt-1.stdout.txt");
     const status = { task_id: task, state: "NEEDS_APPROVAL", goal, message: "Codex structured proposal requests approval", codex_attempts: 1,
       edit_paths: ["README.md"], allowed_paths: ["README.md", `.ai/tasks/${task}/**`], edits: [] };
     const proposal = { task_id: task, state: "EXECUTING", approval_required: true, message: "Repository read timed out; insufficient evidence",
@@ -572,8 +789,8 @@ describe("bounded actions", () => {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "job.json"), JSON.stringify({ job_id: id, task_id: task, mode: "change", repo_key: "ai-orchestration-config",
       process_id: process.pid, exit_code: 2, goal_sha256: sha(Buffer.from(goal)), goal, edit_paths: ["README.md"] }));
-    const statusFile = path.join("C:\\work\\ai-orchestration-config", ".ai", "tasks", task, "status.json");
-    const proposalFile = path.join("C:\\work\\ai-orchestration-config", ".ai", "tasks", task, "codex-attempt-1.stdout.txt");
+    const statusFile = path.join(REPOS["ai-orchestration-config"], ".ai", "tasks", task, "status.json");
+    const proposalFile = path.join(REPOS["ai-orchestration-config"], ".ai", "tasks", task, "codex-attempt-1.stdout.txt");
     const status = { task_id: task, state: "NEEDS_APPROVAL", goal, message: "Approval needed", codex_attempts: 1,
       edit_paths: ["README.md"], allowed_paths: ["README.md", `.ai/tasks/${task}/**`], edits: [] };
     const proposal = { task_id: task, message: "Approval required", proposed_command: "git push origin main", edits: [] };
@@ -614,7 +831,7 @@ describe("bounded actions", () => {
       process_id: process.pid, exit_code: 2, goal_sha256: sha(Buffer.from(goal)), goal, edit_paths: ["README.md"] });
     const jobFile = path.join(dir, "job.json");
     fs.writeFileSync(jobFile, parent);
-    const statusFile = path.join("C:\\work\\ai-orchestration-config", ".ai", "tasks", task, "status.json");
+    const statusFile = path.join(REPOS["ai-orchestration-config"], ".ai", "tasks", task, "status.json");
     const status: Record<string, unknown> = { task_id: task, state: "BLOCKED", goal,
       message: "VerifyInternal failed: check", verify_exit_code: 1,
       state_transition_history: [{ from: "VERIFYING", to: "BLOCKED" }],

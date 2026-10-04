@@ -8,11 +8,37 @@ import { reviewProfiles, reviewWorkspaces } from "./review-profiles.js";
 import { autonomousObservation } from "./autonomous-gateway.js";
 
 export const REVIEW_ROOT = "C:\\work\\ai-orchestration-review";
-export const REPOS = {
+// Historical review-bundle identities are metadata, not host filesystem locations.
+const REVIEW_REPO_IDENTITIES = Object.freeze({
   "pve-doc": "C:\\work\\pve-doc",
   "ai-orchestration-config": "C:\\work\\ai-orchestration-config",
-} as const;
-/** Filesystem locations for legacy read-only lookup. Logical identities remain fixed in REPOS. */
+} as const);
+const LINUX_REPO_ROOTS = Object.freeze({
+  "pve-doc": "/srv/ai-control/repos/pve-doc",
+  "ai-orchestration-config": "/srv/ai-control/repos/ai-orchestration-config",
+} as const);
+// Host selection is private and has no caller, configuration or environment override.
+function hostRepoRoots(): Readonly<Record<keyof typeof REVIEW_REPO_IDENTITIES, string>> {
+  switch (process.platform) {
+    case "win32": return REVIEW_REPO_IDENTITIES;
+    case "linux": return LINUX_REPO_ROOTS;
+    default: throw new GatewayError("UNSUPPORTED_PLATFORM", "Repository reads support only Windows and Linux hosts");
+  }
+}
+function hostRepoRoot(key: keyof typeof REVIEW_REPO_IDENTITIES): string {
+  const root = hostRepoRoots()[key]; // Reject unsupported hosts before filesystem access.
+  // Every default consumer must reject links at the root AND its ancestors before
+  // its own canonical-path comparison, which may ignore Linux case differences.
+  safePath(root);
+  return root; // Keep the host-owned literal path, never a caller or resolved substitute.
+}
+// Resolve lazily so unrelated review evidence remains readable on unsupported hosts.
+// Accessors also preserve the existing string-valued mapping for read-only consumers.
+export const REPOS = Object.freeze({
+  get "pve-doc"(): string { return hostRepoRoot("pve-doc"); },
+  get "ai-orchestration-config"(): string { return hostRepoRoot("ai-orchestration-config"); },
+});
+/** Filesystem locations for legacy read-only lookup; logical keys stay fixed. */
 export type LedgerReadRoots = Readonly<Record<keyof typeof REPOS, string>>;
 /** Trusted in-process composition only; never a tool argument or mutation dependency. */
 export type OrchestrationReadDependencies = Readonly<{ reviewRoot: string; repoRoots: LedgerReadRoots }>;
@@ -79,7 +105,7 @@ export function verifyBundleIntegrity(bundle?: string, root = REVIEW_ROOT) {
   catch { return { bundle: pointer, valid: false, issues: [{ kind: "invalid" as const, path: "metadata/manifest" }] }; }
   if (metadata.version !== 1 || manifest.version !== 1 || !Array.isArray(manifest.files)) report("invalid", "metadata/manifest");
   if (typeof metadata.task_id !== "string" || !idPattern.test(metadata.task_id) ||
-    typeof metadata.source_workspace !== "string" || ![...Object.values(REPOS), ...reviewWorkspaces].some((repo) => repo.toLowerCase() === (metadata.source_workspace as string).toLowerCase())) {
+    typeof metadata.source_workspace !== "string" || ![...Object.values(REVIEW_REPO_IDENTITIES), ...reviewWorkspaces].some((repo) => repo.toLowerCase() === (metadata.source_workspace as string).toLowerCase())) {
     report("invalid", "review-bundle.json");
   }
   if (typeof metadata.manifest_sha256 !== "string" || metadata.manifest_sha256 !== hash(fs.readFileSync(manifestPath))) report("mismatch", "manifest.json");
@@ -345,7 +371,7 @@ function bundleFor(job: Job, root: string): string | null {
   const current = safePath(root, "CURRENT_REVIEW.json");
   if (!fs.existsSync(current)) return null;
   const pointer = jsonFile(current);
-  if (pointer.task_id !== job.task_id || String(pointer.source_workspace).toLowerCase() !== REPOS[job.repo_key].toLowerCase()) return null;
+  if (pointer.task_id !== job.task_id || String(pointer.source_workspace).toLowerCase() !== REVIEW_REPO_IDENTITIES[job.repo_key].toLowerCase()) return null;
   try { return verifyBundleIntegrity(pointer.review_bundle as string, root).valid ? pointer.review_bundle as string : null; }
   catch { return null; }
 }
@@ -372,7 +398,7 @@ function completionDetails(taskId: string, repo: keyof typeof REPOS, status: Rec
     const metadataFile = safePath(root, `${pointer}/review-bundle.json`);
     if (fs.existsSync(metadataFile)) {
       const metadata = jsonFile(metadataFile);
-      if (metadata.task_id === taskId && metadata.source_workspace === REPOS[repo] &&
+      if (metadata.task_id === taskId && metadata.source_workspace === REVIEW_REPO_IDENTITIES[repo] &&
         metadata.manifest_sha256 === decision.manifest_sha256 && verifyBundleIntegrity(pointer, root).valid) bundle = safePath(root, pointer);
     }
   }
