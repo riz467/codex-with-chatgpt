@@ -247,11 +247,16 @@ const workerSettleGraceMs = 500;
 const controllerWorkerGraceMs = workerTreeKillTimeoutMs + workerSettleGraceMs + 500;
 type SpawnedChild = ReturnType<typeof spawn>;
 
-const terminateWorkerTree = (child: SpawnedChild) => {
-  if (process.platform === "win32" && child.pid) {
-    const killed = spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"],
-      { windowsHide: true, stdio: "ignore", timeout: workerTreeKillTimeoutMs });
-    if (!killed.error && killed.status === 0) return;
+const terminateWorkerTree = (child: SpawnedChild, launch: ReturnType<typeof workerLaunchPaths>) => {
+  if (child.pid) {
+    if (launch.detached) {
+      // The Linux child is the leader of a new, controller-owned process group.
+      try { process.kill(-child.pid, "SIGKILL"); return; } catch { /* best-effort fallback below */ }
+    } else {
+      const killed = spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"],
+        { windowsHide: true, stdio: "ignore", timeout: workerTreeKillTimeoutMs });
+      if (!killed.error && killed.status === 0) return;
+    }
   }
   try { child.kill(); } catch { /* best-effort non-Windows/fallback termination */ }
 };
@@ -291,11 +296,28 @@ const withWorkerDeadline = <T>(operation: Promise<T>, timeout: number): Promise<
     reject(error);
   });
 });
+// Deployment paths are fixed by the host OS, never by contracts, prompts or environment overrides.
+const workerLaunchPaths = (platform: NodeJS.Platform) => {
+  switch (platform) {
+    case "win32": return {
+      executable: "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      script: "C:\\work\\ai-orchestration-config\\scripts\\bounded-opencode-proposal.ps1",
+      detached: false,
+    };
+    case "linux": return {
+      executable: "/usr/local/bin/pwsh",
+      script: "/srv/ai-control/repos/ai-orchestration-config/scripts/bounded-opencode-proposal.ps1",
+      detached: true,
+    };
+    default: return fail("UNSUPPORTED_PLATFORM");
+  }
+};
 // Only a dedicated read-only agent may propose edits; it is not allowed to write, shell, or invoke Codex.
 export const opencodeWorker: Worker = (repo, prompt, timeout, promptTimeout = workerPromptBudgetMs) => new Promise((resolve, reject) => {
-  const script = "C:\\work\\ai-orchestration-config\\scripts\\bounded-opencode-proposal.ps1";
-  const child = spawn("C:\\Program Files\\PowerShell\\7\\pwsh.exe", ["-NoProfile", "-NonInteractive", "-File", script, "-Repo", repo, "-PromptTimeoutMs", String(promptTimeout)],
-    { cwd: repo, shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+  const launch = workerLaunchPaths(process.platform);
+  const { executable, script } = launch;
+  const child = spawn(executable, ["-NoProfile", "-NonInteractive", "-File", script, "-Repo", repo, "-PromptTimeoutMs", String(promptTimeout)],
+    { cwd: repo, shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"], ...(launch.detached ? { detached: true } : {}) });
   let out = "", err = "";
   let settled = false;
   let termination: "WORKER_TIMEOUT" | "WORKER_FAILED" | null = null;
@@ -340,7 +362,7 @@ export const opencodeWorker: Worker = (repo, prompt, timeout, promptTimeout = wo
   const terminate = (code: "WORKER_TIMEOUT" | "WORKER_FAILED") => {
     if (settled || termination) return;
     termination = code;
-    terminateWorkerTree(child);
+    terminateWorkerTree(child, launch);
 
     // taskkill /T /F normally causes "close" immediately. Do not trust that
     // contract indefinitely: descendants may retain inherited stdio handles.
@@ -380,7 +402,7 @@ export const opencodeWorker: Worker = (repo, prompt, timeout, promptTimeout = wo
       const result = JSON.parse(out) as WorkerResult;
       if (result.worker !== "opencode" || result.state !== "completed" || !/^ses_/.test(result.session_id ?? "") ||
           !/^msg_/.test(result.execution_id ?? "") || typeof result.output !== "string" || result.output.length > 65536 ||
-          typeof result.tools !== "number" || result.tools > 12) fail("WORKER_EVIDENCE_INVALID");
+          result.tools !== 0) fail("WORKER_EVIDENCE_INVALID");
       settleResolve(result);
     } catch (e) {
       settleReject(e);

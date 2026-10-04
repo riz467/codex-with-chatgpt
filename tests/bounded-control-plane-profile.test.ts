@@ -65,8 +65,16 @@ describe("bounded control-plane profile", () => {
     };
 
     expect(() => tasks.start({ ...base, edit_paths: ["src/mcp/bounded-task.ts"] })).toThrow("INVALID_CONTRACT");
+    expect(() => tasks.start({ ...base, edit_paths: ["tests/bounded-task.test.ts"] })).toThrow("INVALID_CONTRACT");
+    expect(() => tasks.start({ ...base, edit_paths: ["tests/bounded-control-plane-profile.test.ts"] })).toThrow("INVALID_CONTRACT");
     expect(() => tasks.start({ ...base, edit_paths: ["src/mcp/local-gateway.ts"] })).toThrow("INVALID_CONTRACT");
     expect(() => tasks.start({ ...base, execution_profile: "tracked_typescript_dashboard" })).toThrow("INVALID_CONTRACT");
+    for (const key of ["platform", "executable", "script", "worker_path", "env", "provider", "model", "session_id", "execution_id", "prompt_timeout_ms"]) {
+      expect(() => tasks.start({ ...base, [key]: "untrusted override" })).toThrow("INVALID_CONTRACT");
+    }
+    expect(observedBudgets).toEqual([]);
+    expect(fs.existsSync(path.join(root, "store"))).toBe(false);
+    expect(fs.existsSync(path.join(root, "bounded-repo-locks-v2"))).toBe(false);
 
     const integrationOnly = tasks.start({ ...base, edit_paths: ["tests/mcp-integration.test.ts"] });
     await expect(tasks.execute(integrationOnly.task_id)).rejects.toThrow("INVALID_PROPOSAL");
