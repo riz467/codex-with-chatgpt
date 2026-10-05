@@ -1,2 +1,6 @@
 allowBuilds:
+  '@parcel/watcher': false
   esbuild: true
+  msgpackr-extract: false
+  tree-sitter-bash: false
+  tree-sitter-powershell: false

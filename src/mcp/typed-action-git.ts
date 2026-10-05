@@ -4,7 +4,7 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, realpath, readFile, readlink, readdir, open, unlink } from "node:fs/promises";
+import { lstat, realpath, readFile, readlink, readdir, open, unlink, mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -38,9 +38,8 @@ export const gitIntegrateMainFixturePolicy = Object.freeze({
 
 // No dynamic executable, shell, argv, refs, strategies or messages at the API boundary.
 const executable = process.platform === "win32" ? "C:\\Program Files\\Git\\cmd\\git.exe" : "/usr/bin/git";
-const nullFile = process.platform === "win32" ? "NUL" : "/dev/null";
-const prefix = ["--no-pager", "-c", `core.hooksPath=${nullFile}`, "-c", "core.fsmonitor=false",
-  "-c", `core.attributesFile=${nullFile}`,
+const nullFile = "/dev/null";
+const prefix = ["--no-pager", "-c", "core.fsmonitor=false",
   "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "credential.helper=",
   "-c", "core.askPass=", "-c", "commit.gpgSign=false", "-c", "merge.gpgSign=false",
   "-c", "merge.autoStash=false", "-c", "merge.ff=true", "-c", "merge.renames=false",
@@ -130,19 +129,51 @@ class RepositorySession {
   readonly invocations: GitInvocation[] = [];
   fileMode = false;
   algorithm: "sha1" | "sha256" = "sha1";
+  private isolation?: { directory: string; config: string; hooks: string; configIdentity: FileIdentity; hooksIdentity: FileIdentity; directoryIdentity: FileIdentity };
   constructor(readonly repository: TrustedFixtureRepository) {}
+
+  private async gitIsolation() {
+    if (process.platform !== "win32") return { config: nullFile, hooks: nullFile };
+    if (!this.isolation) {
+      const directory = await mkdtemp(path.join(await realpath(tmpdir()), "typed-git-isolation-"));
+      const config = path.join(directory, "empty"), hooks = path.join(directory, "hooks");
+      await writeFile(config, "", { flag: "wx", mode: 0o600 });
+      await mkdir(hooks, { mode: 0o700 });
+      const file = await lstat(config), dir = await lstat(hooks), guard = await lstat(directory);
+      this.isolation = { directory, config, hooks,
+        configIdentity: { device: file.dev, inode: file.ino }, hooksIdentity: { device: dir.dev, inode: dir.ino }, directoryIdentity: { device: guard.dev, inode: guard.ino } };
+    }
+    const isolation = this.isolation;
+    await noLinks(isolation.config); await noLinks(isolation.hooks);
+    const file = await lstat(isolation.config);
+    check(file.isFile() && file.nlink === 1 && file.dev === isolation.configIdentity.device
+      && file.ino === isolation.configIdentity.inode && (await readFile(isolation.config)).length === 0,
+      "Git isolation config changed");
+    await identity(isolation.hooks, isolation.hooksIdentity);
+    check((await readdir(isolation.hooks)).length === 0, "Git isolation hooks changed");
+    return isolation;
+  }
+  async dispose(): Promise<void> {
+    if (this.isolation && !this.quarantined) {
+      check(inside(await realpath(tmpdir()), path.resolve(this.isolation.directory)), "Unsafe isolation cleanup path");
+      await identity(this.isolation.directory, this.isolation.directoryIdentity);
+      await rm(this.isolation.directory, { recursive: true, force: true });
+    }
+  }
 
   async git(operation: Command): Promise<Buffer> {
     const timeout = Math.min(30_000, this.deadline - Date.now());
     check(timeout > 0, "Phase timeout: reconcile before retry");
-    const argv = [...prefix, ...commands[operation]];
+    const isolation = await this.gitIsolation();
+    const argv = [...prefix, "-c", `core.hooksPath=${isolation.hooks.replaceAll("\\", "/")}`,
+      "-c", `core.attributesFile=${isolation.config.replaceAll("\\", "/")}`, ...commands[operation]];
     this.invocations.push(Object.freeze({ operation, argv: Object.freeze([...argv]) }));
     // Do not inherit GIT_*, editors, shell startup, loaders, SSH, or global config.
     const env: NodeJS.ProcessEnv = {
       SYSTEMROOT: process.env.SYSTEMROOT, WINDIR: process.env.WINDIR,
       PATH: process.platform === "win32" ? "C:\\Program Files\\Git\\cmd;C:\\Windows\\System32" : "/usr/bin:/bin",
       HOME: this.repository.root, USERPROFILE: this.repository.root,
-      GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: nullFile,
+      GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: isolation.config, GIT_CONFIG_SYSTEM: isolation.config,
       GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "Never", GIT_OPTIONAL_LOCKS: "0",
       GIT_ATTR_NOSYSTEM: "1", GIT_NO_REPLACE_OBJECTS: "1", GIT_MERGE_AUTOEDIT: "no",
       LC_ALL: "C", LANG: "C",
@@ -339,6 +370,7 @@ export function createGitIntegrateMainFixtureAdapter(inventory: readonly Trusted
     try { return await operation(session); }
     finally {
       await lock.close();
+      await session.dispose();
       // Timeout/output termination can leave descendant processes in flight.
       // Retain the fence until the trusted fixture host reconciles/disposes it.
       if (!session.quarantined) await unlink(lockPath);

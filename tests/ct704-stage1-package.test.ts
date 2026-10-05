@@ -17,6 +17,7 @@ const fixedFastFiles = {
 // No platform-specific native binary, root privileges or provisioning is needed.
 function runtimeFixture(options: { output?: string; lddError?: boolean; entry?: "symlink" | "special" | "directory"; uid?: number } = {}) {
   const source = fs.readFileSync(path.resolve(import.meta.dirname, "../scripts/ct704-stage1-runtime.mjs"), "utf8")
+    .replaceAll("\r\n", "\n")
     .replace(/^import .*;\n/gm, "")
     .replaceAll("import.meta.dirname", JSON.stringify("/reviewed/scripts"));
   const entries = new Map<string, { kind: string; mode: number; content?: string }>();
@@ -96,7 +97,7 @@ it("Stage 1 materializes exact sealed FAST-only local name-service and Git exclu
 it("FAST inspection requires exact reviewed regular files and rejects additional etc configuration", () => {
   const fixture = runtimeFixture();
   fixture.run();
-  const source = fs.readFileSync(path.resolve(import.meta.dirname, "../src/execution-orchestrator/development/fast-sandbox.ts"), "utf8");
+  const source = fs.readFileSync(path.resolve(import.meta.dirname, "../src/execution-orchestrator/development/fast-sandbox.ts"), "utf8").replaceAll("\r\n", "\n");
   // Exercise the actual inspector with virtual Linux custody/snapshot imports.
   const inspect = source.slice(source.indexOf("export function inspectFastRuntime()"), source.indexOf("\ntype SandboxResult"))
     .replace("export function", "function").replace("n: string", "n").replaceAll(".sha256!", ".sha256");
@@ -323,7 +324,7 @@ it("Stage 1 package contains fixture closure, no credentials or authority servic
 
 it("retired Stage 1 LXC human wrapper is an inert fail-closed sentinel", () => {
   const root = path.resolve(import.meta.dirname, "..");
-  const wrapper = fs.readFileSync(path.join(root, "scripts/ct704-stage1-human.sh"), "utf8");
+  const wrapper = fs.readFileSync(path.join(root, "scripts/ct704-stage1-human.sh"), "utf8").replaceAll("\r\n", "\n");
   expect(wrapper).toBe([
     "#!/bin/bash",
     "set -euo pipefail",
@@ -371,6 +372,7 @@ it.each([
   const root = path.resolve(import.meta.dirname, "..");
   // Execute the actual runner with mocked imports/platform: no Linux probe or live fixture runs here.
   const source = fs.readFileSync(path.join(root, "scripts/ct704-stage1-live.mjs"), "utf8")
+    .replaceAll("\r\n", "\n")
     .replace(/^import .*;\n/gm, "")
     .replaceAll("import.meta.dirname", JSON.stringify(path.join(root, "scripts")))
     .replaceAll("import.meta.url", JSON.stringify("file:///ct704-stage1-live.mjs"));

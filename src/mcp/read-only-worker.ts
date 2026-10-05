@@ -1,6 +1,7 @@
 /** Fixed, non-agent inspection worker. No caller-supplied commands or paths. */
 import fs from "node:fs";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { REPOS, REVIEW_ROOT } from "./local-gateway.js";
@@ -9,12 +10,24 @@ const GIT = "C:\\Program Files\\Git\\cmd\\git.exe";
 const idPattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/;
 
 function inspect(repo: string, args: string[]): string {
-  const result = spawnSync(GIT, ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-C", repo, ...args], {
-    shell: false, windowsHide: true, encoding: "utf8", timeout: 30_000, maxBuffer: 1024 * 1024,
-    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "NUL" },
-  });
-  if (result.status !== 0 || result.error) throw new Error("Git read-only inspection failed");
-  return result.stdout;
+  // Git for Windows rejects NUL as a config path. Keep global config disabled
+  // with an exclusive host-created empty file outside the inspected repository.
+  const directory = fs.mkdtempSync(path.join(fs.realpathSync.native(tmpdir()), "read-only-git-isolation-"));
+  const configFile = path.join(directory, "empty");
+  try {
+    fs.writeFileSync(configFile, "", { flag: "wx", mode: 0o600 });
+    const result = spawnSync(GIT, ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-C", repo, ...args], {
+      shell: false, windowsHide: true, encoding: "utf8", timeout: 30_000, maxBuffer: 1024 * 1024,
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: configFile },
+    });
+    if (result.status !== 0 || result.error) throw new Error("Git read-only inspection failed");
+    return result.stdout;
+  } finally {
+    const relative = path.relative(fs.realpathSync.native(tmpdir()), directory);
+    if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)
+      || fs.lstatSync(directory).isSymbolicLink()) throw new Error("Unsafe Git isolation cleanup path");
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 export function runReadOnlyJob(repoKey: keyof typeof REPOS, jobId: string, taskId: string, root = REVIEW_ROOT): void {

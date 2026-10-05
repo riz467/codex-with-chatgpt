@@ -6,8 +6,10 @@ import { validateBinding } from "./contract.js";
 import { canonicalJson } from "../../task-contract/contract.js";
 
 // Installation-owned primitives, never resolved through PATH or supplied by a request.
-const gitExecutable = process.platform === "win32" ? "C:\\Program Files\\Git\\cmd\\git.exe" : "/usr/bin/git";
-const nullFile = process.platform === "win32" ? "NUL" : "/dev/null";
+// Bind isolation to the same host platform as the executable for the module lifetime.
+const hostPlatform = process.platform;
+const gitExecutable = hostPlatform === "win32" ? "C:\\Program Files\\Git\\cmd\\git.exe" : "/usr/bin/git";
+const nullFile = "/dev/null";
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const requestSchema = z.object({ binding: z.unknown(), candidateRoot: z.string().min(1) }).strict();
 const hostSchema = z.object({ expectedBinding: z.unknown(), canonicalRoot: z.string().min(1),
@@ -49,19 +51,75 @@ function plainTree(path: string): void {
   }
 }
 
+function gitIsolationPaths(root: string): { configFile: string; hooksDir: string } {
+  if (hostPlatform !== "win32") {
+    return { configFile: nullFile, hooksDir: nullFile };
+  }
+
+  const guard = root + ".git-isolation";
+  return {
+    configFile: join(guard, "empty"),
+    hooksDir: join(guard, "hooks"),
+  };
+}
+
+function prepareGitIsolation(root: string): void {
+  if (hostPlatform !== "win32") return;
+
+  const { configFile, hooksDir } = gitIsolationPaths(root);
+  const guard = dirname(configFile);
+
+  if (existsSync(guard)) throw new Error("Git isolation path already exists");
+
+  mkdirSync(guard, { mode: 0o700 });
+  writeFileSync(configFile, "", { flag: "wx", mode: 0o600 });
+  mkdirSync(hooksDir, { mode: 0o700 });
+}
+
+function validatedGitIsolation(root: string): { configFile: string; hooksDir: string } {
+  const isolation = gitIsolationPaths(root);
+  if (hostPlatform !== "win32") return isolation;
+
+  plainPath(dirname(isolation.configFile));
+  plainPath(isolation.configFile);
+  plainPath(isolation.hooksDir);
+
+  const config = lstatSync(isolation.configFile);
+  const hooks = lstatSync(isolation.hooksDir);
+
+  if (
+    !config.isFile() ||
+    config.nlink !== 1 ||
+    readFileSync(isolation.configFile).length !== 0 ||
+    !hooks.isDirectory() ||
+    readdirSync(isolation.hooksDir).length !== 0
+  ) {
+    throw new Error("Git isolation path changed");
+  }
+
+  return isolation;
+}
+
+function gitConfigPath(value: string): string {
+  return hostPlatform === "win32" ? value.replaceAll("\\", "/") : value;
+}
+
 function git(root: string, args: readonly string[], input?: Buffer | string, sourceObjects?: string): Buffer {
+  const isolation = validatedGitIsolation(root);
   // No inherited environment. The canonical config is never opened by Git: even pack-objects
   // runs with the NEW repository's config and reads only the explicit source object directory.
   const env: NodeJS.ProcessEnv = {
-    GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_SYSTEM: nullFile, GIT_CONFIG_GLOBAL: nullFile,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_SYSTEM: isolation.configFile,
+    GIT_CONFIG_GLOBAL: isolation.configFile,
     GIT_ATTR_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_NO_REPLACE_OBJECTS: "1",
     GIT_ALLOW_PROTOCOL: "", GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C",
-    ...(process.platform === "win32" ? { SystemRoot: "C:\\Windows" } : {}),
+    ...(hostPlatform === "win32" ? { SystemRoot: "C:\\Windows" } : {}),
     ...(sourceObjects ? { GIT_OBJECT_DIRECTORY: sourceObjects } : {}),
   };
-  const result = spawnSync(gitExecutable, ["-c", "core.hooksPath=" + nullFile,
+  const result = spawnSync(gitExecutable, ["-c", "core.hooksPath=" + gitConfigPath(isolation.hooksDir),
     "-c", "credential.helper=", "-c", "protocol.allow=never", "-c", "submodule.recurse=false",
-    "-c", "core.attributesFile=" + nullFile, "-c", "core.fsmonitor=false", "-C", root, ...args],
+    "-c", "core.attributesFile=" + gitConfigPath(isolation.configFile), "-c", "core.fsmonitor=false", "-C", root, ...args],
   { env, input, shell: false, timeout: 60_000, maxBuffer: 128 * 1024 * 1024, windowsHide: true });
   if (result.error || result.status !== 0) throw new Error("Candidate Git primitive failed", { cause: result.error });
   return result.stdout;
@@ -109,11 +167,13 @@ export function prepareCandidateRepository(requestInput: unknown, hostInput: unk
   rejectRelationships(sourceGit); plainTree(objects);
   if (sourceHead(sourceGit) !== baseline) throw new Error("Trusted committed baseline mismatch");
   mkdirSync(root, { mode: 0o700 });
+  prepareGitIsolation(root);
   git(root, ["init", "--template=", `--object-format=${baseline.length === 64 ? "sha256" : "sha1"}`]);
   const gitDir = join(root, ".git");
+  const isolation = validatedGitIsolation(root);
   // Replace init's configuration with a closed, host-owned configuration. There are no includes,
   // remotes, helpers, filters, merge drivers, templates, or hooks copied from the canonical repo.
-  writeFileSync(join(gitDir, "config"), `[core]\nrepositoryformatversion = ${baseline.length === 64 ? 1 : 0}\nbare = false\nfilemode = false\nhooksPath = ${nullFile}\nlogAllRefUpdates = false\n${baseline.length === 64 ? "[extensions]\nobjectFormat = sha256\n" : ""}[protocol]\nallow = never\n[submodule]\nrecurse = false\n`);
+  writeFileSync(join(gitDir, "config"), `[core]\nrepositoryformatversion = ${baseline.length === 64 ? 1 : 0}\nbare = false\nfilemode = false\nhooksPath = ${gitConfigPath(isolation.hooksDir)}\nlogAllRefUpdates = false\n${baseline.length === 64 ? "[extensions]\nobjectFormat = sha256\n" : ""}[protocol]\nallow = never\n[submodule]\nrecurse = false\n`);
   const pack = git(root, ["pack-objects", "--stdout", "--revs"], `${baseline}\n`, objects);
   git(root, ["index-pack", "--stdin", "--strict"], pack);
   git(root, ["update-ref", "--no-deref", "HEAD", baseline]);
@@ -157,7 +217,8 @@ export function inspectCandidateRepository(candidate: CandidateRepository) {
   if (within(canonical, candidate.root) || !lstatSync(gitDir).isDirectory()) throw new Error("Unsafe candidate storage");
   // Config must stay exactly host-generated: do not run Git after candidate mutation of config.
   const config = readFileSync(join(gitDir, "config"), "utf8");
-  const expected = `[core]\nrepositoryformatversion = ${candidate.head.length === 64 ? 1 : 0}\nbare = false\nfilemode = false\nhooksPath = ${nullFile}\nlogAllRefUpdates = false\n${candidate.head.length === 64 ? "[extensions]\nobjectFormat = sha256\n" : ""}[protocol]\nallow = never\n[submodule]\nrecurse = false\n`;
+  const isolation = validatedGitIsolation(candidate.root);
+  const expected = `[core]\nrepositoryformatversion = ${candidate.head.length === 64 ? 1 : 0}\nbare = false\nfilemode = false\nhooksPath = ${gitConfigPath(isolation.hooksDir)}\nlogAllRefUpdates = false\n${candidate.head.length === 64 ? "[extensions]\nobjectFormat = sha256\n" : ""}[protocol]\nallow = never\n[submodule]\nrecurse = false\n`;
   if (config !== expected || readdirSync(gitDir).some(n => ["hooks", "config.worktree"].includes(n))) throw new Error("Candidate config changed");
   const text = (args: string[]) => git(candidate.root, args).toString().trim();
   // One fixed read-only invocation observes the same five identities. No cache:

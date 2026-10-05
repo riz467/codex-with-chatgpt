@@ -387,6 +387,13 @@ describe("bounded actions", () => {
     expect(vi.mocked(spawnSync).mock.calls.every(([exe, args, opts]) =>
       exe === "C:\\Program Files\\Git\\cmd\\git.exe" && opts?.shell === false &&
       !args?.some((arg) => /^(commit|push|add|reset|checkout|clean)$/.test(arg)))).toBe(true);
+    for (const [, , opts] of vi.mocked(spawnSync).mock.calls) {
+      const configFile = opts?.env?.GIT_CONFIG_GLOBAL;
+      expect(configFile).not.toBe("NUL");
+      expect(path.isAbsolute(configFile!)).toBe(true);
+      expect(fs.existsSync(configFile!)).toBe(false); // disposed after each inspection
+      expect(opts?.env?.GIT_CONFIG_NOSYSTEM).toBe("1");
+    }
     expect(fs.readdirSync(dir)).toEqual(["read-only-result.json"]);
     const result = JSON.parse(fs.readFileSync(path.join(dir, "read-only-result.json"), "utf8"));
     expect(result).toMatchObject({ state: "DONE", mode: "read_only", changed_paths: [], published: false });

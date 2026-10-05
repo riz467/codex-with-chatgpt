@@ -34,12 +34,14 @@ vi.mock("node:child_process", async (original) => {
 });
 
 const gitExe = process.platform === "win32" ? "C:\\Program Files\\Git\\cmd\\git.exe" : "/usr/bin/git";
-const nullFile = process.platform === "win32" ? "NUL" : "/dev/null";
+const nullFile = "/dev/null";
+let isolationDirectory: string | undefined;
+let configFile = nullFile, hooksDirectory = nullFile;
 const dirs: string[] = [];
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync(gitExe, ["-c", `core.hooksPath=${nullFile}`, ...args], {
+  return execFileSync(gitExe, ["-c", `core.hooksPath=${hooksDirectory.replaceAll("\\", "/")}`, ...args], {
     cwd, shell: false, timeout: 30_000, encoding: "utf8", maxBuffer: 8 * 1024 * 1024,
-    env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: nullFile, GIT_TERMINAL_PROMPT: "0" },
+    env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: configFile, GIT_CONFIG_SYSTEM: configFile, GIT_TERMINAL_PROMPT: "0" },
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
 }
@@ -60,6 +62,11 @@ let template: string;
 beforeAll(async () => {
   const base = path.join(await realpath(tmpdir()), "opencode"); await mkdir(base, { recursive: true });
   template = await mkdtemp(path.join(base, "typed-git-template-"));
+  if (process.platform === "win32") {
+    isolationDirectory = await mkdtemp(path.join(base, "typed-git-test-isolation-"));
+    configFile = path.join(isolationDirectory, "empty"); hooksDirectory = path.join(isolationDirectory, "hooks");
+    writeFileSync(configFile, "", { flag: "wx" }); await mkdir(hooksDirectory);
+  }
   const directory = template;
   const origin = path.join(directory, "origin.git"), seed = path.join(directory, "seed"), root = path.join(directory, "local");
   await mkdir(origin); await mkdir(seed);
@@ -70,7 +77,7 @@ beforeAll(async () => {
   git(seed, "remote", "add", "origin", origin); git(seed, "push", "-u", "origin", "main");
   git(directory, "clone", "--single-branch", "--branch", "main", origin, root); configure(root);
 });
-afterAll(async () => { if (template) await rm(template, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
+afterAll(async () => { if (isolationDirectory) await rm(isolationDirectory, { recursive: true, force: true }); if (template) await rm(template, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
 async function fixture() {
   const directory = await mkdtemp(path.join(path.dirname(template), "typed-git-")); dirs.push(directory);
   // Only immutable baseline bytes are reused. Each case gets independent copies
@@ -162,7 +169,12 @@ describe("GitIntegrateMain real Git fixture", () => {
       expect(call.options.timeout).toBeGreaterThan(0); expect(call.options.timeout).toBeLessThanOrEqual(30_000);
       expect(call.options.maxBuffer).toBe(8 * 1024 * 1024);
       expect(call.options.env.GIT_TERMINAL_PROMPT).toBe("0");
-      expect(call.options.env.GIT_CONFIG_GLOBAL).toBe(nullFile);
+      if (process.platform === "win32") {
+        expect(path.isAbsolute(call.options.env.GIT_CONFIG_GLOBAL)).toBe(true);
+        expect(call.options.env.GIT_CONFIG_GLOBAL).not.toBe("NUL");
+        expect(call.options.env.GIT_CONFIG_SYSTEM).toBe(call.options.env.GIT_CONFIG_GLOBAL);
+        expect(call.argv).toContain(`core.attributesFile=${call.options.env.GIT_CONFIG_GLOBAL.replaceAll("\\", "/")}`);
+      } else expect(call.options.env.GIT_CONFIG_GLOBAL).toBe(nullFile);
       expect(call.options.env).not.toHaveProperty("GIT_CONFIG_COUNT");
       const index = call.argv.findIndex((arg) => ["config", "rev-parse", "for-each-ref", "symbolic-ref", "ls-tree", "ls-files", "fetch", "rev-list", "diff", "merge", "push"].includes(arg));
       expect(allowed.has(call.argv.slice(index).join(" "))).toBe(true);
@@ -171,6 +183,28 @@ describe("GitIntegrateMain real Git fixture", () => {
       }
     }
   }, 120_000);
+
+  it.skipIf(process.platform !== "win32").each(["config", "hooks"])("rejects changed Windows Git isolation %s before another invocation", async (target) => {
+    const f = await fixture(), r = await request(f);
+    interception.calls = [];
+    let changed = false;
+    interception.after = () => {
+      if (changed) return;
+      changed = true;
+      const call = interception.calls.at(-1)!;
+      const config = call.options.env.GIT_CONFIG_GLOBAL;
+      expect(readFileSync(config, "utf8")).toBe("");
+      if (target === "config") writeFileSync(config, "[alias]\nunsafe = !whoami\n");
+      else {
+        const option = call.argv.find((arg) => arg.startsWith("core.hooksPath="))!;
+        writeFileSync(path.join(option.slice("core.hooksPath=".length), "pre-merge-commit"), "exit 1\n");
+      }
+    };
+    const result = blocked(await f.adapter.execute(r, attempt(r)), /Git isolation/);
+    expect(changed).toBe(true);
+    expect(interception.calls).toHaveLength(1);
+    expect(mutations(result)).toEqual([]);
+  });
 
   it("clean fast-forward", async () => {
     const f = await fixture(); publish(f); const r = await request(f);
