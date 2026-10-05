@@ -6,7 +6,7 @@ Local, read-only view of the existing orchestration evidence. It is **not** an o
 
 ## Start
 
-Manual foreground development: from this repository run `corepack pnpm build`, then `corepack pnpm dashboard` (or `corepack pnpm dashboard:dev`). Manual production-style launch, without pnpm: run `& 'C:\Users\workspace\AppData\Local\Author Software\nvm\installs\v24.16.0\node.exe' 'C:\work\codex-with-chatgpt\scripts\run-ai-workspace-dashboard.mjs'` as `workspace` with **no additional arguments**. Stop that foreground process with Ctrl+C. Do not run it alongside the Scheduled Task. Visit **http://127.0.0.1:48766/** on the Windows Server 2022 host. The port differs from the Bridge ports 48765 and 54108. Loopback only: do not publish through Cloudflare or a LAN reverse proxy; this version has no authentication. On a remote workstation use an operator-managed local-only transport rather than exposing the HTTP listener.
+Manual foreground development: from this repository run `corepack pnpm build`, then `corepack pnpm dashboard` (or `corepack pnpm dashboard:dev`). Manual production-style launch, without pnpm: run `& 'C:\Program Files\nodejs\node.exe' 'C:\work\codex-with-chatgpt\scripts\run-ai-workspace-dashboard.mjs'` as `workspace` with **no additional arguments**. Stop that foreground process with Ctrl+C. Do not run it alongside the Scheduled Task. Visit **http://127.0.0.1:48766/** on the Windows Server 2022 host. The port differs from the Bridge ports 48765 and 54108. Loopback only: do not publish through Cloudflare or a LAN reverse proxy; this version has no authentication. On a remote workstation use an operator-managed local-only transport rather than exposing the HTTP listener.
 
 ## Optional independent Scheduled Task (not installed by this change)
 

@@ -6,8 +6,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = 'C:\work\pve-doc'
 $logDir = $LogDir
-$node = 'C:\Users\workspace\AppData\Local\Author Software\nvm\installs\v24.16.0\node.exe'
-$codex = 'C:\Users\workspace\AppData\Local\Author Software\nvm\installs\v24.16.0\node_modules\@openai\codex\bin\codex.js'
+$node = 'C:\Program Files\nodejs\node.exe'
+$codex = 'C:\Program Files\nodejs\node_modules\@openai\codex\bin\codex.js'
 $prompt = 'Fixed read-only runner diagnostic. In C:\work\pve-doc, run commands to (1) report pwd/current directory, (2) git status --short, (3) read AGENTS.md, (4) read the first 40 lines of 03_services/ai-workspace.md. Do not write or edit any files, run an orchestration task, commit, or push. Report briefly whether all four reads succeeded.'
 
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null

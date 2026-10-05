@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { REVIEW_ROOT } from "./local-gateway.js";
 
 const agentID = "c2c-semantic-reviewer";
-const exe = "C:\\Users\\workspace\\AppData\\Local\\Author Software\\nvm\\installs\\v24.16.0\\node_modules\\@opencode\\cli\\bin\\opencode.exe";
+const exe = "C:\\Program Files\\nodejs\\node_modules\\@opencode\\cli\\bin\\opencode.exe";
 const port = 41740;
 const base = `http://127.0.0.1:${port}`;
 const sourceAgent = "C:\\work\\ai-orchestration-config\\agents\\c2c-semantic-reviewer.md";

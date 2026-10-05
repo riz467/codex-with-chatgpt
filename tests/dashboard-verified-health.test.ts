@@ -64,7 +64,7 @@ describe.skipIf(process.platform !== "win32")("fixed PowerShell OS verifier", ()
     $script:taskState = 'Running'; $script:taskOK = $true;
     $script:ownerSid = 'S-1-5-21-1389881484-3427664689-3699660927-1000';
     $script:sessions = @([pscustomobject]@{ User = "$env:COMPUTERNAME\\workspace"; SessionId = 1; State = 'Disconnected' });
-    $node = 'C:\\Users\\workspace\\AppData\\Local\\Author Software\\nvm\\installs\\v24.16.0\\node.exe';
+    $node = 'C:\\Program Files\\nodejs\\node.exe';
     $script:processes = @([pscustomobject]@{ ProcessId=42; Name='node.exe'; SessionId=1; ExecutablePath=$node; CommandLine=('"'+$node+'" "C:\\work\\codex-with-chatgpt\\dist\\worker\\cli.js" worker') });
     $beat = [pscustomobject]@{ pid=42; session_id=1; observed_utc=[DateTimeOffset]::UtcNow.ToString('o') };`;
   const worker = (alter = "") => ps(`${prelude} ${alter}; $result=Observe-Worker $beat; $result | ConvertTo-Json -Compress -Depth 4`);
@@ -87,7 +87,7 @@ describe.skipIf(process.platform !== "win32")("fixed PowerShell OS verifier", ()
   ])("fails closed for %s", (_name, change) => { expect(worker(change).worker.status).toBe("unknown"); });
   it("distinguishes expected tunnel, inaccessible command line, wrong executable and absent process", () => {
     const base = `function Get-CimInstance { $script:processes }
-      $script:processes=@([pscustomobject]@{ ProcessId=55; ExecutablePath='C:\\Program Files (x86)\\cloudflared\\cloudflared.exe'; CommandLine='cloudflared --config C:\\Users\\workspace\\.cloudflared\\config.yml tunnel run ai-workspace-mcp' });`;
+      $script:processes=@([pscustomobject]@{ ProcessId=55; ExecutablePath='C:\\Program Files\\Cloudflared\\cloudflared.exe'; CommandLine='cloudflared --config C:\\Users\\workspace\\.cloudflared\\config.yml tunnel run ai-workspace-mcp' });`;
     const tunnel = (change = "") => ps(`${base} ${change}; Observe-Tunnel | ConvertTo-Json -Compress`);
     expect(tunnel().status).toBe("verified");
     expect(tunnel("$script:processes[0].CommandLine=$null").status).toBe("degraded");

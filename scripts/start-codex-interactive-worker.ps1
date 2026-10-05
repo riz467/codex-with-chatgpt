@@ -4,7 +4,7 @@ $started = [DateTimeOffset]::UtcNow
 $exitCode = 1
 $nodeStarted = $false
 $root = 'C:\work\codex-with-chatgpt'
-$node = 'C:\Users\workspace\AppData\Local\Author Software\nvm\installs\v24.16.0\node.exe'
+$node = 'C:\Program Files\nodejs\node.exe'
 try {
     . "$PSScriptRoot\codex-interactive-logon.ps1"
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()

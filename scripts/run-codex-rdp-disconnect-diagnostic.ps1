@@ -2,7 +2,7 @@
 param([switch] $Start, [switch] $Status, [switch] $Review)
 $ErrorActionPreference = 'Stop'
 if (@($Start, $Status, $Review).Where({ $_ }).Count -gt 1) { throw 'Choose -Start, -Status or -Review.' }
-$node = 'C:\Users\workspace\AppData\Local\Author Software\nvm\installs\v24.16.0\node.exe'
+$node = 'C:\Program Files\nodejs\node.exe'
 $cli = 'C:\work\codex-with-chatgpt\dist\worker\cli.js'
 $logDir = 'C:\work\ai-workspace-logs\codex-rdp-disconnect-diagnostic'
 

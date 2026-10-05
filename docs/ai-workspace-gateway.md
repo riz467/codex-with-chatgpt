@@ -36,9 +36,9 @@ The deployment scripts register one Task Scheduler **AtStartup** task, `AI-Works
 The task runs the fixed Node supervisor `scripts/run-ai-workspace-gateway.mjs`. It starts (and retries after exit) the following commands, with a preflight port/tunnel check to avoid known duplicates:
 
 ```
-"C:\Users\workspace\AppData\Local\Author Software\nvm\installs\v24.16.0\node.exe" C:\work\codex-with-chatgpt\.tooling\ai-workspace-execution-runtime\dist\cli\index.js serve --workspace C:\work\codex-with-chatgpt --port 48765
-"C:\Users\workspace\AppData\Local\Author Software\nvm\installs\v24.16.0\node.exe" C:\work\codex-with-chatgpt\dist\cli\index.js serve --workspace C:\work\ai-orchestration-review --port 54108
-"C:\Program Files (x86)\cloudflared\cloudflared.exe" --config C:\Users\workspace\.cloudflared\config.yml tunnel run ai-workspace-mcp
+"C:\Program Files\nodejs\node.exe" C:\work\codex-with-chatgpt\.tooling\ai-workspace-execution-runtime\dist\cli\index.js serve --workspace C:\work\codex-with-chatgpt --port 48765
+"C:\Program Files\nodejs\node.exe" C:\work\codex-with-chatgpt\dist\cli\index.js serve --workspace C:\work\ai-orchestration-review --port 54108
+"C:\Program Files\Cloudflared\cloudflared.exe" --config C:\Users\workspace\.cloudflared\config.yml tunnel run ai-workspace-mcp
 ```
 
 Output from children is intentionally discarded to prevent credentials, pairing codes or auth headers from entering logs. The supervisor writes only its own bounded PID/exit events to `C:\work\ai-workspace-logs\execution-bridge.log`, `review-bridge.log`, `cloudflared.log` (5 MiB per active file, three rotated files). Task Scheduler records task start failures and last result. Bridges may still use their own user-profile application logs: protect the workspace account and state directory. Cloudflared reconnects while a Bridge is warming up; `/health` on each public route is the readiness check. Note that the underlying Bridge can fall back to an ephemeral port on a *race* after the port preflight: always check both fixed listeners and health after cutover.

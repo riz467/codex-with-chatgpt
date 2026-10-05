@@ -1,7 +1,7 @@
 # Engine-only adapter. Call after engine has saved prompt.txt and argv.json.
 param([Parameter(Mandatory)][string]$Repo, [Parameter(Mandatory)][string]$TaskId, [Parameter(Mandatory)][ValidateRange(1,2)][int]$Attempt)
 $ErrorActionPreference = 'Stop'
-$node = 'C:\Users\workspace\AppData\Local\Author Software\nvm\installs\v24.16.0\node.exe'
+$node = 'C:\Program Files\nodejs\node.exe'
 $cli = 'C:\work\codex-with-chatgpt\dist\worker\cli.js'
 $raw = & $node $cli engine $Repo $TaskId "$Attempt"
 if ($LASTEXITCODE -ne 0) { throw 'Interactive Codex worker unavailable or request rejected' }

@@ -4,12 +4,12 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, renameSync, statSync, appendFileSync, rmSync } from 'node:fs';
 import net from 'node:net';
 
-const node = 'C:\\Users\\workspace\\AppData\\Local\\Author Software\\nvm\\installs\\v24.16.0\\node.exe';
+const node = 'C:\\Program Files\\nodejs\\node.exe';
 const executionCli = 'C:\\work\\codex-with-chatgpt\\.tooling\\ai-workspace-execution-runtime\\dist\\cli\\index.js';
 const reviewCli = 'C:\\work\\codex-with-chatgpt\\dist\\cli\\index.js';
 const executionStateDir = 'C:\\Users\\workspace\\AppData\\Local\\codex-with-chatgpt';
 const boundedReviewerClientId = 'c2c_client_Um175Y3xYaj2RoCN';
-const cloudflared = 'C:\\Program Files (x86)\\cloudflared\\cloudflared.exe';
+const cloudflared = 'C:\\Program Files\\Cloudflared\\cloudflared.exe';
 const config = 'C:\\Users\\workspace\\.cloudflared\\config.yml';
 const logDir = 'C:\\work\\ai-workspace-logs';
 const {
@@ -67,7 +67,7 @@ function tunnelAlreadyRunning() {
   // Only check the exact configured tunnel; avoid a second connector for the same name.
   const ps = spawnSync('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', [
     '-NoProfile', '-NonInteractive', '-Command',
-    "$p=Get-CimInstance Win32_Process -Filter \"Name='cloudflared.exe'\"; @($p | Where-Object { $_.ExecutablePath -eq 'C:\\Program Files (x86)\\cloudflared\\cloudflared.exe' -and $_.CommandLine -match 'tunnel run ai-workspace-mcp' }).Count",
+    "$p=Get-CimInstance Win32_Process -Filter \"Name='cloudflared.exe'\"; @($p | Where-Object { $_.ExecutablePath -eq 'C:\\Program Files\\Cloudflared\\cloudflared.exe' -and $_.CommandLine -match 'tunnel run ai-workspace-mcp' }).Count",
   ], { encoding: 'utf8', windowsHide: true, timeout: 8000 });
   // Query failures must not turn into a duplicate tunnel.
   return ps.status !== 0 || Number(ps.stdout.trim()) > 0 || !/^\d+$/.test(ps.stdout.trim());

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = 'C:\\work\\codex-with-chatgpt';
-const node = 'C:\\Users\\workspace\\AppData\\Local\\Author Software\\nvm\\installs\\v24.16.0\\node.exe';
+const node = 'C:\\Program Files\\nodejs\\node.exe';
 const launcher = path.join(root, 'scripts', 'run-ai-workspace-dashboard.mjs');
 const server = path.join(root, 'dist', 'dashboard', 'server.js');
 

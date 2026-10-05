@@ -1,7 +1,7 @@
 # Fixed deployment identity. This file defines inspection helpers; dot-sourcing it never changes a task.
 $DashboardTask = 'AI-Workspace-Dashboard'
 $DashboardRoot = 'C:\work\codex-with-chatgpt'
-$DashboardNode = 'C:\Users\workspace\AppData\Local\Author Software\nvm\installs\v24.16.0\node.exe'
+$DashboardNode = 'C:\Program Files\nodejs\node.exe'
 $DashboardLauncher = 'C:\work\codex-with-chatgpt\scripts\run-ai-workspace-dashboard.mjs'
 $DashboardServer = 'C:\work\codex-with-chatgpt\dist\dashboard\server.js'
 $DashboardAccount = "$env:COMPUTERNAME\workspace"

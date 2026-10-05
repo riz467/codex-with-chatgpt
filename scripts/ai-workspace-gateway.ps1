@@ -1,13 +1,13 @@
 # Fixed deployment settings; no credentials belong in this file.
 $GatewayTask = 'AI-Workspace-Gateway'
 $GatewayRoot = 'C:\work\codex-with-chatgpt'
-$GatewayNode = 'C:\Users\workspace\AppData\Local\Author Software\nvm\installs\v24.16.0\node.exe'
+$GatewayNode = 'C:\Program Files\nodejs\node.exe'
 $GatewayAccount = 'workspace'
 $GatewayReviewRoot = 'C:\work\ai-orchestration-review'
 $GatewayExecutionCli = "$GatewayRoot\.tooling\ai-workspace-execution-runtime\dist\cli\index.js"
 $GatewayReviewCli = "$GatewayRoot\dist\cli\index.js"
 $GatewayStateDir = 'C:\Users\workspace\AppData\Local\codex-with-chatgpt'
-$GatewayTunnel = 'C:\Program Files (x86)\cloudflared\cloudflared.exe'
+$GatewayTunnel = 'C:\Program Files\Cloudflared\cloudflared.exe'
 $GatewayConfig = 'C:\Users\workspace\.cloudflared\config.yml'
 $GatewayLogDir = 'C:\work\ai-workspace-logs'
 

@@ -16,14 +16,14 @@ function Get-CimInstance {
         [pscustomobject]@{
             ProcessId = 13800
             Name = 'cloudflared.exe'
-            ExecutablePath = 'C:\\Program Files (x86)\\cloudflared\\cloudflared.exe'
+            ExecutablePath = 'C:\\Program Files\\Cloudflared\\cloudflared.exe'
             CommandLine = ${commandLine === null ? '$null' : `'${commandLine}'`}
         }
     }
 }
 function Get-Process {
     if (${present ? '$true' : '$false'}) {
-        [pscustomobject]@{ Id = 13800; Path = 'C:\\Program Files (x86)\\cloudflared\\cloudflared.exe' }
+        [pscustomobject]@{ Id = 13800; Path = 'C:\\Program Files\\Cloudflared\\cloudflared.exe' }
     }
 }
 function Get-NetTCPConnection { $null }
@@ -85,7 +85,7 @@ function Get-Process { param($Id) if (${alive ? '$true' : '$false'} -and $Id -eq
 function Get-CimInstance {
     param($ClassName, $Filter)
     if (${alive ? '$true' : '$false'} -and $Filter -eq 'ProcessId=12345') {
-        [pscustomobject]@{ ExecutablePath = 'C:\\Users\\workspace\\AppData\\Local\\Author Software\\nvm\\installs\\v24.16.0\\node.exe'; CommandLine = 'node C:\\work\\codex-with-chatgpt\\dist\\worker\\cli.js worker' }
+        [pscustomobject]@{ ExecutablePath = 'C:\\Program Files\\nodejs\\node.exe'; CommandLine = 'node C:\\work\\codex-with-chatgpt\\dist\\worker\\cli.js worker' }
     }
 }
 function Get-NetTCPConnection { $null }
