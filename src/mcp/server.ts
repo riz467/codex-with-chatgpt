@@ -27,11 +27,12 @@ import { BoundedTasks } from "./bounded-task.js";
 import type { OrchestrationReadDependencies } from "./local-gateway.js";
 
 // The new ledger is not the legacy Codex execution/approval path. Repository/profile pairings are fixed here.
-const boundedTasks = new BoundedTasks({
+const boundedRepos: Record<string, string> = {
   "autonomous-fixture": "C:\\work\\bounded-review-live-fixture",
   "codex-with-chatgpt": "C:\\work\\codex-with-chatgpt",
   "codex-with-chatgpt-control-plane": "C:\\work\\codex-with-chatgpt",
-}, undefined, undefined, {
+};
+const boundedTasks = new BoundedTasks(boundedRepos, undefined, undefined, {
   "codex-with-chatgpt": "tracked_typescript_dashboard",
   "codex-with-chatgpt-control-plane": "tracked_typescript_control_plane",
 }); // Never pve-doc.
@@ -355,6 +356,68 @@ export function createMcpServer(ctx: McpContext): McpServer {
       });
     } catch (error) { return mapError(error); }
   });
+  if (!ctx.boundedTasks && !isReviewWorkspace(workspace) &&
+      Object.values(boundedRepos).some((root) => path.resolve(root).toLowerCase() === path.resolve(workspace.root).toLowerCase())) {
+    server.registerTool("recover_failed_bounded_task", {
+      title: "Recover failed bounded task workspace",
+      description: "Restore observed in-scope unstaged changes after a revision-zero verification failure; leave the failed task ledger unchanged.",
+      inputSchema: z.object({ task_id: boundedId }).strict(),
+      annotations: { readOnlyHint: false, openWorldHint: false },
+    }, async (args, extra) => {
+      const denied = requireScope(extra.authInfo, "orchestration.start"); if (denied) return denied;
+      try {
+        const task = tasks.status(args.task_id);
+        const root = boundedRepos[task.contract.repo];
+        if (!root || path.resolve(root).toLowerCase() !== path.resolve(workspace.root).toLowerCase() ||
+            task.state !== "ESCALATE" || task.revisions.length !== 0 ||
+            (task.stop_reason !== "VERIFY_FAILED" && task.stop_reason !== "VERIFY_TIMEOUT") ||
+            tasks.executing(args.task_id) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(task.baseline_head)) {
+          throw new GatewayError("RECOVERY_NOT_ALLOWED", "This task is not eligible for workspace recovery");
+        }
+        const head = () => {
+          const result = runGit(root, ["rev-parse", "HEAD"]);
+          return result.ok ? result.stdout.trim() : null;
+        };
+        const status = gitStatus(workspace);
+        if (head() !== task.baseline_head || !status.isRepo || status.staged.length ||
+            status.untracked.length || status.conflicted.length || status.hidden.changes ||
+            status.hidden.conflicts) {
+          throw new GatewayError("RECOVERY_NOT_ALLOWED", "Workspace is not at a safe recovery baseline");
+        }
+        const scope = new Set(task.contract.edit_paths);
+        const observed = status.unstaged.map((change) => change.path);
+        if (new Set(observed.map((rel) => rel.toLowerCase())).size !== observed.length ||
+            observed.some((rel) => !scope.has(rel))) {
+          throw new GatewayError("RECOVERY_NOT_ALLOWED", "Unstaged changes exceed the task scope");
+        }
+        try {
+          if (observed.length) {
+            if (tasks.executing(args.task_id) || head() !== task.baseline_head) {
+              throw new Error("Recovery baseline changed before restore");
+            }
+            const restore = runGit(root, ["restore", "--source", task.baseline_head, "--worktree", "--", ...observed]);
+            if (!restore.ok) throw new Error("Git restore failed");
+          }
+          const after = gitStatus(workspace);
+          if (head() !== task.baseline_head || !after.isRepo || after.staged.length ||
+              after.unstaged.length || after.untracked.length || after.conflicted.length ||
+              after.hidden.changes || after.hidden.conflicts) {
+            throw new Error("Workspace is not clean at the baseline after recovery");
+          }
+          for (const rel of task.contract.edit_paths) {
+            const file = path.join(root, rel);
+            if (!fs.lstatSync(file).isFile() ||
+                createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== task.baseline[rel]) {
+              throw new Error("Recovered file does not match its baseline digest");
+            }
+          }
+        } catch {
+          throw new GatewayError("RECOVERY_FAILED", "Workspace recovery could not establish the clean task baseline");
+        }
+        return okStructured({ task_id: args.task_id, result: observed.length ? "recovered" : "already_clean" });
+      } catch (error) { return mapError(error); }
+    });
+  }
   server.registerTool("get_bounded_task", {
     title: "Get bounded task state", description: "Read durable contract, revisions and review state.",
     inputSchema: { task_id: boundedId }, annotations: { readOnlyHint: true },
