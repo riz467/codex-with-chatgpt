@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { typedActionBootstrap } from "../src/mcp/typed-actions.js";
 import { createHash } from "node:crypto";
 import * as core from "../src/mcp/typed-actions.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { canonicalJson } from "../src/task-contract/contract.js";
+import type { BoundedTasks } from "../src/mcp/bounded-task.js";
 
 describe("typed-action bootstrap seam", () => {
   it("starts with no executable action surface", () => {
@@ -481,7 +487,7 @@ describe("retry and empty execution surface", () => {
       "canonicalizeMaintenanceSnapshot", "executableMutationAdapters", "hashActionRequest", "hashMaintenancePlan",
       "hashMaintenanceSnapshot", "maintenanceActionKinds", "maintenanceCheckKinds", "maintenancePlanSchema",
       "maintenanceSnapshotSchema", "parseActionRequest", "parseMaintenancePlan", "parseMaintenanceSnapshot", "typedActionBootstrap",
-      "prepareBoundedCommit", "getBoundedCommitStatus",
+      "prepareBoundedCommit", "commitBoundedPatch", "getBoundedCommitStatus",
       "assessProductionKvmReadiness", "hashProductionKvmCandidate", "hashProductionKvmEvidence",
       "parseProductionKvmCandidate", "parseProductionKvmEvidence", "productionKvmCandidateSchema",
       "productionKvmEvidenceSchema", "productionKvmReadinessGateNames",
@@ -927,5 +933,112 @@ describe("pure Production KVM Executor readiness", () => {
     expect(() => core.assessProductionKvmReadiness(prototype, evidence)).toThrow("Expected plain JSON data");
     const hidden = kvmEvidence(candidate); hidden.gates[Symbol("hidden")] = true;
     expect(() => core.assessProductionKvmReadiness(candidate, hidden)).toThrow();
+  });
+});
+
+describe("bounded local commit", () => {
+  function fixture(large = false) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bounded-commit-"));
+    const repo = path.join(dir, "repo"), stateDir = path.join(dir, "state");
+    fs.mkdirSync(repo); fs.mkdirSync(stateDir);
+    const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "core.fsmonitor=false",
+      "-c", "core.untrackedCache=false", ...args], { encoding: "utf8" }).trim();
+    git("init", "-q");
+    git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@localhost");
+    fs.writeFileSync(path.join(repo, "scope.txt"), "before\n");
+    fs.writeFileSync(path.join(repo, "other.txt"), "other\n");
+    git("add", "--", "scope.txt", "other.txt"); git("commit", "-qm", "baseline");
+    const baseline = git("rev-parse", "HEAD");
+    fs.writeFileSync(path.join(repo, "scope.txt"), large ? "after\n".repeat(1800) : "after\n");
+    const patch = execFileSync("git", ["-C", repo, "diff", "--binary", "HEAD", "--", "scope.txt"]);
+    const sha = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
+    const taskId = `bounded-${"1".repeat(32)}`, reviewId = `review-${uuid}`;
+    const contractHash = sha("contract"), manifestHash = sha("manifest");
+    const task: any = { task_id: taskId, state: "REVIEW_ACCEPTED", contract_sha256: contractHash,
+      baseline_head: baseline, baseline: { "scope.txt": sha("before\n") },
+      contract: { edit_paths: ["scope.txt"] },
+      revisions: [{ revision: 1, manifest_sha256: manifestHash,
+        review: { review_id: reviewId, task_id: taskId, revision: 1,
+          contract_sha256: contractHash, manifest_sha256: manifestHash, verdict: "PASS" } }] };
+    const artifact = { name: "revision-1-diff.patch", size: patch.length, sha256: sha(patch) };
+    const tasks = {
+      status: () => task,
+      artifacts: () => ({ task_id: taskId, revision: 1, contract_sha256: contractHash,
+        manifest_sha256: manifestHash, files: [artifact] }),
+      readArtifact: (_id: string, _revision: number, _name: string, offset: number) => {
+        const page = patch.subarray(offset, offset + 8192);
+        return { manifest_sha256: manifestHash, file_sha256: artifact.sha256, offset,
+          content_base64: page.toString("base64"), next_offset: offset + page.length === patch.length ? null : offset + page.length };
+      },
+      acceptedSnapshot: () => { throw new Error("Commit must not call acceptedSnapshot"); },
+    } as unknown as BoundedTasks;
+    const prepared = { task_id: taskId, revision: 1, review_id: reviewId,
+      contract_sha256: contractHash, manifest_sha256: manifestHash, diff_sha256: artifact.sha256,
+      baseline_head: baseline, baseline: task.baseline, edit_paths: ["scope.txt"], artifact,
+      state: "PREPARED", authoritative_done: false };
+    const file = path.join(stateDir, "bounded-prepared-v1", `${taskId}.json`);
+    fs.mkdirSync(path.dirname(file));
+    fs.writeFileSync(file, JSON.stringify({ receipt: prepared, seal: sha(canonicalJson(prepared)) }));
+    return { dir, repo, stateDir, git, task, tasks, taskId, file, prepared, sha };
+  }
+  it.each([false, true])("commits exact prepared bytes once (large=%s), survives restart", large => {
+    const f = fixture(large);
+    try {
+      if (large) expect(f.prepared.artifact.size).toBeGreaterThan(8192);
+      expect(core.getBoundedCommitStatus(f.tasks, f.taskId, f.stateDir).state).toBe("PREPARED");
+      const committed = core.commitBoundedPatch(f.tasks, f.taskId, f.stateDir, f.repo);
+      expect(committed).toMatchObject({ state: "COMMITTED", authoritative_done: false,
+        prepared_receipt_digest: f.sha(canonicalJson(f.prepared)) });
+      expect(f.git("rev-list", "--count", `${f.prepared.baseline_head}..HEAD`)).toBe("1");
+      expect(f.git("rev-parse", "HEAD^")).toBe(f.prepared.baseline_head);
+      expect(f.git("diff", "--name-only", "--no-renames", f.prepared.baseline_head, "HEAD")).toBe("scope.txt");
+      const committedPatch = execFileSync("git", ["-C", f.repo, "diff", "--binary",
+        f.prepared.baseline_head, "HEAD", "--", "scope.txt"]);
+      expect(committedPatch.length).toBe(f.prepared.artifact.size);
+      expect(f.sha(committedPatch)).toBe(f.prepared.diff_sha256);
+      expect(f.git("status", "--porcelain=v1", "--untracked-files=all")).toBe("");
+      expect(core.getBoundedCommitStatus(f.tasks, f.taskId, f.stateDir)).toEqual(committed);
+      expect(core.commitBoundedPatch(f.tasks, f.taskId, f.stateDir, f.repo)).toEqual(committed);
+      expect(f.git("rev-list", "--count", `${f.prepared.baseline_head}..HEAD`)).toBe("1");
+    } finally { fs.rmSync(f.dir, { recursive: true, force: true }); }
+  });
+  it("reconciles the exact post-commit/pre-receipt crash without another commit", () => {
+    const f = fixture();
+    try {
+      const first = core.commitBoundedPatch(f.tasks, f.taskId, f.stateDir, f.repo);
+      fs.unlinkSync(path.join(f.stateDir, "bounded-committed-v1", `${f.taskId}.json`));
+      expect(core.commitBoundedPatch(f.tasks, f.taskId, f.stateDir, f.repo)).toEqual(first);
+      expect(f.git("rev-list", "--count", `${f.prepared.baseline_head}..HEAD`)).toBe("1");
+    } finally { fs.rmSync(f.dir, { recursive: true, force: true }); }
+  });
+  it.each(["staged", "untracked", "out-of-scope", "stale", "tampered"])("rejects %s before committing", kind => {
+    const f = fixture();
+    try {
+      if (kind === "staged") f.git("add", "--", "scope.txt");
+      if (kind === "untracked") fs.writeFileSync(path.join(f.repo, "new.txt"), "new\n");
+      if (kind === "out-of-scope") fs.writeFileSync(path.join(f.repo, "other.txt"), "changed\n");
+      if (kind === "stale") f.task.revisions[0].review.review_id = `review-${otherId}`;
+      if (kind === "tampered") fs.appendFileSync(f.file, " ");
+      if (kind === "tampered") {
+        const value = JSON.parse(fs.readFileSync(f.file, "utf8"));
+        value.receipt.diff_sha256 = "0".repeat(64);
+        fs.writeFileSync(f.file, JSON.stringify(value));
+      }
+      expect(() => core.commitBoundedPatch(f.tasks, f.taskId, f.stateDir, f.repo)).toThrow();
+      expect(f.git("rev-parse", "HEAD")).toBe(f.prepared.baseline_head);
+    } finally { fs.rmSync(f.dir, { recursive: true, force: true }); }
+  });
+  it("rejects a tampered COMMITTED seal and never runs remote Git", () => {
+    const f = fixture();
+    try {
+      core.commitBoundedPatch(f.tasks, f.taskId, f.stateDir, f.repo);
+      const file = path.join(f.stateDir, "bounded-committed-v1", `${f.taskId}.json`);
+      const record = JSON.parse(fs.readFileSync(file, "utf8"));
+      record.receipt.commit = f.prepared.baseline_head;
+      fs.writeFileSync(file, JSON.stringify(record));
+      expect(() => core.getBoundedCommitStatus(f.tasks, f.taskId, f.stateDir)).toThrow();
+      expect(() => core.commitBoundedPatch(f.tasks, f.taskId, f.stateDir, f.repo)).toThrow();
+      expect(f.git("remote")).toBe("");
+    } finally { fs.rmSync(f.dir, { recursive: true, force: true }); }
   });
 });

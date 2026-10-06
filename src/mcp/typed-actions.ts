@@ -10,6 +10,7 @@ export const typedActionBootstrap = Object.freeze({ version: 1 as const });
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { z } from "zod";
 import { canonicalJson, scopePathSchema } from "../task-contract/contract.js";
 import type { BoundedTasks } from "./bounded-task.js";
@@ -707,12 +708,156 @@ export function prepareBoundedCommit(tasks: BoundedTasks, taskId: string, stateD
   return writePrepared(stateDir, receipt);
 }
 
-export function getBoundedCommitStatus(tasks: BoundedTasks, taskId: string, stateDir: string):
-  PreparedReceipt | { task_id: string; state: "NOT_PREPARED"; authoritative_done: false } {
-  const { task, latest } = checkedPreparedTask(tasks, taskId);
-  const receipt = readPrepared(stateDir, taskId);
-  if (!receipt) return { task_id: taskId, state: "NOT_PREPARED", authoritative_done: false };
-  checkPreparedBinding(receipt, task, latest);
-  verifyPreparedArtifact(tasks, receipt);
+// COMMITTED is a separate, write-once local receipt, never authoritative DONE.
+const committedReceiptSchema = z.object({
+  task_id: preparedReceiptSchema.shape.task_id,
+  prepared_receipt_digest: preparedDigest,
+  commit: preparedReceiptSchema.shape.baseline_head,
+  state: z.literal("COMMITTED"), authoritative_done: z.literal(false),
+}).strict();
+type CommittedReceipt = z.infer<typeof committedReceiptSchema>;
+const sealedCommittedSchema = z.object({ receipt: committedReceiptSchema, seal: preparedDigest }).strict();
+const committedFile = (dir: string, taskId: string) => path.join(dir, "bounded-committed-v1", `${taskId}.json`);
+function readCommitted(dir: string, taskId: string): CommittedReceipt | null {
+  const file = committedFile(dir, taskId);
+  if (!fs.existsSync(file)) return null;
+  if (!fs.lstatSync(file).isFile()) throw new Error("COMMITTED receipt is not a regular file");
+  const record = sealedCommittedSchema.parse(JSON.parse(fs.readFileSync(file, "utf8")));
+  if (record.receipt.task_id !== taskId || record.seal !== preparedHash(record.receipt))
+    throw new Error("COMMITTED receipt integrity failure");
+  return record.receipt;
+}
+function writeCommitted(dir: string, receipt: CommittedReceipt): CommittedReceipt {
+  const file = committedFile(dir, receipt.task_id);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (!fs.lstatSync(path.dirname(file)).isDirectory()) throw new Error("Invalid COMMITTED storage");
+  try {
+    fs.writeFileSync(file, JSON.stringify({ receipt, seal: preparedHash(receipt) }) + "\n", { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const existing = readCommitted(dir, receipt.task_id);
+    if (!existing || canonicalJson(existing) !== canonicalJson(receipt)) throw new Error("Conflicting COMMITTED receipt");
+    return existing;
+  }
   return receipt;
+}
+// Never accept Git's text decoding for patch comparison: compare the exact bytes.
+function boundedGit(root: string, args: string[], options?: { env?: NodeJS.ProcessEnv }): Buffer {
+  const result = spawnSync("git", ["-C", root, "-c", "core.fsmonitor=false",
+    "-c", "core.untrackedCache=false", ...args], {
+    encoding: "buffer", maxBuffer: 64 * 1024 * 1024, env: options?.env ?? process.env,
+  });
+  if (result.error || result.status !== 0 || !Buffer.isBuffer(result.stdout))
+    throw new Error(`Bounded local Git failed: ${args[0]}`);
+  return result.stdout;
+}
+const gitText = (root: string, args: string[]) => boundedGit(root, args).toString("utf8").trim();
+function gitPaths(root: string, args: string[]): string[] {
+  return boundedGit(root, args).toString("utf8").split("\0").filter(Boolean).sort();
+}
+function assertPaths(actual: string[], expected: readonly string[]): void {
+  if (canonicalJson(actual) !== canonicalJson([...expected].sort())) throw new Error("Bounded diff path set mismatch");
+}
+function assertClean(root: string): void {
+  if (boundedGit(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all",
+    "--ignore-submodules=none", "--no-renames"]).length) throw new Error("Bounded Git tree is not clean");
+}
+function verifyCommittedTree(root: string, prepared: PreparedReceipt, head: string): void {
+  if (gitText(root, ["rev-parse", "HEAD"]) !== head ||
+      gitText(root, ["rev-parse", "HEAD^"]) !== prepared.baseline_head)
+    throw new Error("COMMITTED parent or HEAD mismatch");
+  assertClean(root);
+  assertPaths(gitPaths(root, ["diff", "--name-only", "-z", "--no-renames",
+    prepared.baseline_head, "HEAD"]), prepared.edit_paths);
+  const patch = boundedGit(root, ["diff", "--binary", prepared.baseline_head, "HEAD", "--", ...prepared.edit_paths]);
+  if (patch.length !== prepared.artifact.size ||
+      createHash("sha256").update(patch).digest("hex") !== prepared.diff_sha256)
+    throw new Error("COMMITTED patch does not match PREPARED artifact");
+}
+function preparedForCommit(tasks: BoundedTasks, taskId: string, stateDir: string): PreparedReceipt {
+  const { task, latest } = checkedPreparedTask(tasks, taskId);
+  const prepared = readPrepared(stateDir, taskId);
+  if (!prepared) throw new Error("A valid PREPARED receipt is required");
+  checkPreparedBinding(prepared, task, latest);
+  verifyPreparedArtifact(tasks, prepared);
+  return prepared;
+}
+function checkCommittedBinding(receipt: CommittedReceipt, prepared: PreparedReceipt): void {
+  if (receipt.task_id !== prepared.task_id ||
+      receipt.prepared_receipt_digest !== preparedHash(prepared) ||
+      receipt.commit === prepared.baseline_head) throw new Error("COMMITTED receipt binding mismatch");
+}
+export function commitBoundedPatch(tasks: BoundedTasks, taskId: string, stateDir: string, repoRoot: string): CommittedReceipt {
+  const prepared = preparedForCommit(tasks, taskId, stateDir);
+  const existing = readCommitted(stateDir, taskId);
+  const root = path.resolve(repoRoot);
+  if (existing) {
+    checkCommittedBinding(existing, prepared);
+    verifyCommittedTree(root, prepared, existing.commit);
+    return existing;
+  }
+  let head = gitText(root, ["rev-parse", "HEAD"]);
+  if (head !== prepared.baseline_head) {
+    // Only the exact, clean, single-child commit can be reconciled after a receipt-write crash.
+    verifyCommittedTree(root, prepared, head);
+  } else {
+    const status = boundedGit(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all",
+      "--ignore-submodules=none", "--no-renames"]).toString("utf8").split("\0").filter(Boolean);
+    if (!status.length || status.some(entry => entry.slice(0, 2) !== " M"))
+      throw new Error("Bounded Git requires only unstaged tracked changes");
+    assertPaths(status.map(entry => entry.slice(3)).sort(), prepared.edit_paths);
+    assertPaths(gitPaths(root, ["diff", "--name-only", "-z", "--no-renames", "HEAD"]), prepared.edit_paths);
+    const patch = boundedGit(root, ["diff", "--binary", "HEAD", "--", ...prepared.edit_paths]);
+    if (patch.length !== prepared.artifact.size ||
+        createHash("sha256").update(patch).digest("hex") !== prepared.diff_sha256)
+      throw new Error("Live patch differs from PREPARED artifact");
+    const hooks = path.join(stateDir, "bounded-empty-hooks-v1");
+    fs.mkdirSync(hooks, { recursive: true });
+    if (!fs.lstatSync(hooks).isDirectory() || fs.readdirSync(hooks).length)
+      throw new Error("Commit hooks directory is not empty");
+    // Only the reviewed paths enter the index; verify its bytes before creating a commit.
+    if (gitText(root, ["rev-parse", "HEAD"]) !== prepared.baseline_head) throw new Error("Baseline changed");
+    boundedGit(root, ["add", "--", ...prepared.edit_paths]);
+    if (gitText(root, ["rev-parse", "HEAD"]) !== prepared.baseline_head) throw new Error("Baseline changed");
+    assertPaths(gitPaths(root, ["diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD"]), prepared.edit_paths);
+    const staged = boundedGit(root, ["diff", "--cached", "--binary", "HEAD", "--", ...prepared.edit_paths]);
+    if (staged.length !== prepared.artifact.size ||
+        createHash("sha256").update(staged).digest("hex") !== prepared.diff_sha256)
+      throw new Error("Staged patch differs from PREPARED artifact");
+    if (boundedGit(root, ["diff", "--binary"]).length)
+      throw new Error("Unstaged changes remain after staging");
+    const stagedStatus = boundedGit(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all",
+      "--ignore-submodules=none", "--no-renames"]).toString("utf8").split("\0").filter(Boolean);
+    if (stagedStatus.some(entry => entry.slice(0, 2) !== "M "))
+      throw new Error("Unexpected Git changes after staging");
+    assertPaths(stagedStatus.map(entry => entry.slice(3)).sort(), prepared.edit_paths);
+    const env = { ...process.env, GIT_AUTHOR_NAME: "Bounded Commit", GIT_AUTHOR_EMAIL: "bounded@localhost",
+      GIT_COMMITTER_NAME: "Bounded Commit", GIT_COMMITTER_EMAIL: "bounded@localhost" };
+    boundedGit(root, ["-c", `core.hooksPath=${hooks}`, "-c", "commit.gpgsign=false",
+      "-c", "user.name=Bounded Commit", "-c", "user.email=bounded@localhost",
+      "commit", "-m", `Bounded patch ${taskId}`], { env });
+    head = gitText(root, ["rev-parse", "HEAD"]);
+    verifyCommittedTree(root, prepared, head);
+  }
+  const current = preparedForCommit(tasks, taskId, stateDir);
+  if (canonicalJson(current) !== canonicalJson(prepared)) throw new Error("PREPARED changed during commit");
+  return writeCommitted(stateDir, committedReceiptSchema.parse({ task_id: taskId,
+    prepared_receipt_digest: preparedHash(prepared), commit: head,
+    state: "COMMITTED", authoritative_done: false }));
+}
+
+export function getBoundedCommitStatus(tasks: BoundedTasks, taskId: string, stateDir: string):
+  PreparedReceipt | CommittedReceipt | { task_id: string; state: "NOT_PREPARED"; authoritative_done: false } {
+  const { task, latest } = checkedPreparedTask(tasks, taskId);
+  const prepared = readPrepared(stateDir, taskId);
+  const committed = readCommitted(stateDir, taskId);
+  if (!prepared) {
+    if (committed) throw new Error("COMMITTED receipt without PREPARED receipt");
+    return { task_id: taskId, state: "NOT_PREPARED", authoritative_done: false };
+  }
+  checkPreparedBinding(prepared, task, latest);
+  verifyPreparedArtifact(tasks, prepared);
+  if (!committed) return prepared;
+  checkCommittedBinding(committed, prepared);
+  return committed;
 }

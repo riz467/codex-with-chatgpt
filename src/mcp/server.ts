@@ -24,7 +24,7 @@ import { completeCurrentAutonomous } from "./autonomous-approval.js";
 import { searchRepo, readRepoFile } from "./repo-research.js";
 import type { RepoResearchRoots } from "./repo-research.js";
 import { BoundedTasks } from "./bounded-task.js";
-import { prepareBoundedCommit, getBoundedCommitStatus } from "./typed-actions.js";
+import { prepareBoundedCommit, commitBoundedPatch, getBoundedCommitStatus } from "./typed-actions.js";
 import type { OrchestrationReadDependencies } from "./local-gateway.js";
 
 // The new ledger is not the legacy Codex execution/approval path. Repository/profile pairings are fixed here.
@@ -431,8 +431,17 @@ export function createMcpServer(ctx: McpContext): McpServer {
         return okStructured(prepareBoundedCommit(tasks, args.task_id, getStateDir()));
       } catch (error) { return mapError(error); }
     });
+    server.registerTool("commit_bounded_patch", {
+      title: "Commit accepted bounded patch", description: "Make one verified local commit from sealed PREPARED evidence; never push or complete DONE.",
+      inputSchema, annotations: { readOnlyHint: false, openWorldHint: false },
+    }, async (args, extra) => {
+      const denied = requireScope(extra.authInfo, "orchestration.start"); if (denied) return denied;
+      try {
+        return okStructured(commitBoundedPatch(tasks, args.task_id, getStateDir(), workspace.root));
+      } catch (error) { return mapError(error); }
+    });
     server.registerTool("get_bounded_commit_status", {
-      title: "Inspect sealed bounded preparation", description: "Read and revalidate PREPARED evidence without accepting a new snapshot.",
+      title: "Inspect bounded commit phase", description: "Read and revalidate NOT_PREPARED, PREPARED or sealed COMMITTED evidence without mutation.",
       inputSchema, annotations: { readOnlyHint: true, openWorldHint: false },
     }, async (args, extra) => {
       const denied = requireScope(extra.authInfo, "review.read"); if (denied) return denied;
