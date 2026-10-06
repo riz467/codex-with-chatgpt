@@ -116,7 +116,7 @@ function renderTaskBoard(snapshot) {
       const item = document.createElement('li');
       if (bounded) {
         const safe = normalizeBoundedTask(task);
-        const label = `${displayValue(safe.task_id)} · ${displayValue(safe.state)}`;
+        const label = `${displayValue(safe.task_id)} · ${safe.progress_mode}`;
         if (task?.state === 'REVIEW_PENDING' || task?.state === 'REVIEW_ACCEPTED') {
           const button = document.createElement('button'); button.type = 'button';
           button.textContent = label;
@@ -173,9 +173,12 @@ function showBoundedReviewSummary(task) {
     fields.className = 'task-grid'; section.append(fields);
   }
   clear(fields);
+  const safe = normalizeBoundedTask(task);
   const paths = Array.isArray(task.edit_paths) ? task.edit_paths.filter(path => typeof path === 'string').join(', ') : null;
   for (const [label, value] of [
     ['\u76ee\u7684', typeof task.goal === 'string' ? task.goal : null],
+    ['進行状況', safe.progress_mode],
+    ['実行プロファイル', safe.execution_profile],
     ['\u5909\u66f4\u30d1\u30b9', paths],
     ['\u30ea\u30d3\u30b8\u30e7\u30f3', task.latest_revision],
     ['\u691c\u8a3c\u72b6\u614b', task.verification_present === true ? '\u3042\u308a' : '\u306a\u3057'],
@@ -185,7 +188,8 @@ function showBoundedReviewSummary(task) {
   ]) pair(fields, label, value);
 }
 const boundedFields = [
-  ['task_id', 'Task ID'], ['state', '\u72b6\u614b'], ['stop_reason_present', '\u505c\u6b62\u7406\u7531'],
+  ['task_id', 'Task ID'], ['state', '\u72b6\u614b'], ['progress_mode', '進行状況'], ['execution_profile', '実行プロファイル'],
+  ['stop_reason_present', '\u505c\u6b62\u7406\u7531'],
   ['contract_sha256', 'Contract SHA256'], ['edit_paths_count', '\u5909\u66f4\u5bfe\u8c61\u6570'],
   ['latest_revision', '\u6700\u65b0\u30ea\u30d3\u30b8\u30e7\u30f3'], ['manifest_sha256', 'Manifest SHA256'],
   ['verification_present', '\u691c\u8a3c'], ['file_count', '\u30d5\u30a1\u30a4\u30eb\u6570'],

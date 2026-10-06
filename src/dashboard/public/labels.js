@@ -65,6 +65,15 @@ const boundedStates = {
   REVIEW_ACCEPTED: '\u30ec\u30d3\u30e5\u30fc\u627f\u8a8d\u6e08\u307f',
   ESCALATE: '\u8981\u78ba\u8a8d'
 };
+const boundedExecutionProfiles = {
+  tracked_typescript_dashboard: 'TypeScript ダッシュボード',
+  tracked_typescript_control_plane: 'TypeScript 制御プレーン'
+};
+const boundedProgressModes = {
+  EXECUTION: '実行中', AUTO_REVISION: '自動修正中', REVIEW_PENDING: 'レビュー待ち',
+  REVIEW_ACCEPTED: 'レビュー承認済み', ESCALATE: '要確認'
+};
+const boundedLabel = (values, value) => typeof value === 'string' && Object.hasOwn(values, value) ? values[value] : boundedUnknown;
 const boundedHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) ? value : boundedUnknown;
 const boundedBoolean = value => value === true ? '\u3042\u308a' : value === false ? '\u306a\u3057' : boundedUnknown;
 const boundedCount = value => Number.isSafeInteger(value) && value >= 0 ? String(value) : boundedUnknown;
@@ -74,6 +83,8 @@ export const normalizeBoundedTask = task => {
   return {
     task_id: typeof item.task_id === 'string' && /^bounded-[a-f0-9]{32}$/.test(item.task_id) ? item.task_id : boundedUnknown,
     state: typeof item.state === 'string' && Object.hasOwn(boundedStates, item.state) ? boundedStates[item.state] : boundedUnknown,
+    progress_mode: boundedLabel(boundedProgressModes, item.progress_mode),
+    execution_profile: boundedLabel(boundedExecutionProfiles, item.execution_profile),
     stop_reason_present: boundedBoolean(item.stop_reason_present),
     contract_sha256: boundedHash(item.contract_sha256),
     edit_paths_count: Array.isArray(item.edit_paths) ? boundedCount(item.edit_paths.length) : boundedUnknown,
