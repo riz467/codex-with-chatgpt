@@ -297,6 +297,109 @@ const executionOutputOutputSchema = {
   text: z.string().optional().describe("Sanitized command output returned by the read operation"),
 };
 
+const preparedHash = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
+const preparedDigest = z.string().regex(/^[a-f0-9]{64}$/);
+const preparedReceiptSchema = z.object({
+  task_id: z.string().regex(/^bounded-[a-f0-9]{32}$/), revision: z.number().int().positive(),
+  review_id: z.string().regex(/^review-[a-f0-9-]{36}$/), contract_sha256: preparedDigest,
+  manifest_sha256: preparedDigest, diff_sha256: preparedDigest,
+  baseline_head: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/),
+  baseline: z.record(preparedDigest), edit_paths: z.array(scopePathSchema).min(1),
+  artifact: z.object({ name: z.string(), size: z.number().int().positive(), sha256: preparedDigest }).strict(),
+  state: z.literal("PREPARED"), authoritative_done: z.literal(false),
+}).strict();
+type PreparedReceipt = z.infer<typeof preparedReceiptSchema>;
+const sealedPreparedSchema = z.object({ receipt: preparedReceiptSchema, seal: preparedDigest }).strict();
+function preparedFile(taskId: string): string {
+  return path.join(getStateDir(), "bounded-prepared-v1", `${taskId}.json`);
+}
+function readPrepared(taskId: string): PreparedReceipt | null {
+  const file = preparedFile(taskId);
+  if (!fs.existsSync(file)) return null;
+  if (!fs.lstatSync(file).isFile()) throw new Error("PREPARED receipt is not a regular file");
+  const record = sealedPreparedSchema.parse(JSON.parse(fs.readFileSync(file, "utf8")));
+  if (record.receipt.task_id !== taskId || record.seal !== preparedHash(record.receipt)) {
+    throw new Error("PREPARED receipt integrity failure");
+  }
+  return record.receipt;
+}
+function writePrepared(receipt: PreparedReceipt): PreparedReceipt {
+  const file = preparedFile(receipt.task_id);
+  const parent = path.dirname(file);
+  fs.mkdirSync(parent, { recursive: true });
+  if (!fs.lstatSync(parent).isDirectory()) throw new Error("PREPARED storage is not a directory");
+  const serialized = JSON.stringify({ receipt, seal: preparedHash(receipt) }) + "\n";
+  try {
+    fs.writeFileSync(file, serialized, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const existing = readPrepared(receipt.task_id);
+    if (!existing || canonicalJson(existing) !== canonicalJson(receipt)) {
+      throw new Error("Conflicting PREPARED receipt");
+    }
+    return existing;
+  }
+  return receipt;
+}
+function checkedPreparedTask(tasks: BoundedTasks, taskId: string) {
+  const task = tasks.status(taskId);
+  const latest = task.revisions.at(-1);
+  if (task.state !== "REVIEW_ACCEPTED" || !latest || latest.review?.verdict !== "PASS" ||
+      latest.review.task_id !== taskId || latest.review.revision !== latest.revision ||
+      latest.review.contract_sha256 !== task.contract_sha256 ||
+      latest.review.manifest_sha256 !== latest.manifest_sha256 ||
+      !latest.review.review_id || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(task.baseline_head)) {
+    throw new Error("Task has no latest accepted PASS review");
+  }
+  return { task, latest };
+}
+function checkPreparedBinding(receipt: PreparedReceipt, task: ReturnType<BoundedTasks["status"]>,
+  latest: ReturnType<BoundedTasks["status"]>["revisions"][number]): void {
+  const paths = [...task.contract.edit_paths].sort();
+  if (receipt.task_id !== task.task_id || receipt.revision !== latest.revision ||
+      receipt.review_id !== latest.review?.review_id || receipt.contract_sha256 !== task.contract_sha256 ||
+      receipt.manifest_sha256 !== latest.manifest_sha256 || receipt.baseline_head !== task.baseline_head ||
+      canonicalJson(receipt.baseline) !== canonicalJson(task.baseline) ||
+      canonicalJson(receipt.edit_paths) !== canonicalJson(paths)) {
+    throw new Error("PREPARED receipt is stale or conflicts with the ledger");
+  }
+}
+function verifyPreparedArtifact(tasks: BoundedTasks, receipt: PreparedReceipt): void {
+  const { task_id, revision, manifest_sha256, artifact } = receipt;
+  const listing = tasks.artifacts(task_id, revision);
+  if (listing.task_id !== task_id || listing.revision !== revision ||
+      listing.contract_sha256 !== receipt.contract_sha256 ||
+      listing.manifest_sha256 !== manifest_sha256 || !Array.isArray(listing.files)) {
+    throw new Error("PREPARED manifest mismatch");
+  }
+  const matches = listing.files.filter((file) => file.name === artifact.name);
+  if (matches.length !== 1 || matches[0].sha256 !== artifact.sha256 || matches[0].size !== artifact.size ||
+      artifact.name !== `revision-${revision}-diff.patch` || !Number.isSafeInteger(artifact.size) || artifact.size <= 0) {
+    throw new Error("PREPARED diff artifact mismatch");
+  }
+  const hash = createHash("sha256");
+  let offset = 0;
+  while (offset < artifact.size) {
+    const page = tasks.readArtifact(task_id, revision, artifact.name, offset);
+    if (page.manifest_sha256 !== manifest_sha256 || page.file_sha256 !== artifact.sha256 ||
+        page.offset !== offset || typeof page.content_base64 !== "string" ||
+        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(page.content_base64)) {
+      throw new Error("Invalid PREPARED artifact page");
+    }
+    const bytes = Buffer.from(page.content_base64, "base64");
+    if (!bytes.length || bytes.toString("base64") !== page.content_base64 ||
+        offset + bytes.length > artifact.size ||
+        page.next_offset !== (offset + bytes.length === artifact.size ? null : offset + bytes.length)) {
+      throw new Error("Noncontiguous PREPARED artifact page");
+    }
+    hash.update(bytes);
+    offset += bytes.length;
+  }
+  if (offset !== artifact.size || hash.digest("hex") !== artifact.sha256 || artifact.sha256 !== receipt.diff_sha256) {
+    throw new Error("PREPARED artifact digest mismatch");
+  }
+}
+
 export interface McpContext {
   workspace: Workspace;
   logger: Logger;
@@ -415,6 +518,67 @@ export function createMcpServer(ctx: McpContext): McpServer {
           throw new GatewayError("RECOVERY_FAILED", "Workspace recovery could not establish the clean task baseline");
         }
         return okStructured({ task_id: args.task_id, result: observed.length ? "recovered" : "already_clean" });
+      } catch (error) { return mapError(error); }
+    });
+  }
+  if (!ctx.boundedTasks && !isReviewWorkspace(workspace) &&
+      path.resolve(workspace.root).toLowerCase() === path.resolve(boundedRepos["codex-with-chatgpt-control-plane"]).toLowerCase()) {
+    const inputSchema = z.object({ task_id: boundedId }).strict();
+    server.registerTool("prepare_bounded_commit", {
+      title: "Seal accepted bounded diff", description: "Bind the latest accepted PASS to a verified diff; no commit or completion.",
+      inputSchema, annotations: { readOnlyHint: false, openWorldHint: false },
+    }, async (args, extra) => {
+      const denied = requireScope(extra.authInfo, "orchestration.start"); if (denied) return denied;
+      try {
+        const { task, latest } = checkedPreparedTask(tasks, args.task_id);
+        const existing = readPrepared(args.task_id);
+        if (existing) {
+          checkPreparedBinding(existing, task, latest);
+          verifyPreparedArtifact(tasks, existing);
+          return okStructured(existing);
+        }
+        const snapshot = tasks.acceptedSnapshot(args.task_id);
+        if (!snapshot || snapshot.task_id !== args.task_id || snapshot.review_result !== "PASS" ||
+            snapshot.revision !== latest.revision || snapshot.review_id !== latest.review?.review_id ||
+            snapshot.contract_sha256 !== task.contract_sha256 || snapshot.manifest_sha256 !== latest.manifest_sha256 ||
+            !preparedDigest.safeParse(snapshot.diff_sha256).success) {
+          throw new Error("Accepted snapshot does not match latest ledger review");
+        }
+        const listing = tasks.artifacts(args.task_id, latest.revision);
+        const name = `revision-${latest.revision}-diff.patch`;
+        const matches = listing.files.filter((file) => file.name === name);
+        if (listing.task_id !== args.task_id || listing.revision !== latest.revision ||
+            listing.contract_sha256 !== task.contract_sha256 ||
+            listing.manifest_sha256 !== snapshot.manifest_sha256 || matches.length !== 1 ||
+            matches[0].sha256 !== snapshot.diff_sha256 || !Number.isSafeInteger(matches[0].size) || matches[0].size <= 0) {
+          throw new Error("Accepted diff artifact missing or invalid");
+        }
+        const receipt = preparedReceiptSchema.parse({ task_id: args.task_id, revision: latest.revision,
+          review_id: snapshot.review_id, contract_sha256: snapshot.contract_sha256,
+          manifest_sha256: snapshot.manifest_sha256, diff_sha256: snapshot.diff_sha256,
+          baseline_head: task.baseline_head, baseline: task.baseline,
+          edit_paths: [...task.contract.edit_paths].sort(),
+          artifact: { name, size: matches[0].size, sha256: matches[0].sha256 },
+          state: "PREPARED", authoritative_done: false });
+        verifyPreparedArtifact(tasks, receipt);
+        // A concurrent review or revision must not be sealed as the latest accepted review.
+        const current = checkedPreparedTask(tasks, args.task_id);
+        checkPreparedBinding(receipt, current.task, current.latest);
+        return okStructured(writePrepared(receipt));
+      } catch (error) { return mapError(error); }
+    });
+    server.registerTool("get_bounded_commit_status", {
+      title: "Inspect sealed bounded preparation", description: "Read and revalidate PREPARED evidence without accepting a new snapshot.",
+      inputSchema, annotations: { readOnlyHint: true, openWorldHint: false },
+    }, async (args, extra) => {
+      const denied = requireScope(extra.authInfo, "review.read"); if (denied) return denied;
+      try {
+        const { task, latest } = checkedPreparedTask(tasks, args.task_id);
+        const receipt = readPrepared(args.task_id);
+        if (!receipt) return okStructured({ task_id: args.task_id, state: "NOT_PREPARED", authoritative_done: false });
+        checkPreparedBinding(receipt, task, latest);
+        verifyPreparedArtifact(tasks, receipt);
+        return okStructured(receipt);
       } catch (error) { return mapError(error); }
     });
   }

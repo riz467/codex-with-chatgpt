@@ -1,4 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createMcpServer } from "../src/mcp/server.js";
+import { BoundedTasks } from "../src/mcp/bounded-task.js";
+import type { Workspace } from "../src/workspace/manager.js";
+import type { Logger } from "../src/logger/index.js";
+import { canonicalJson } from "../src/task-contract/contract.js";
 import fs from "node:fs";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -202,6 +209,194 @@ describe("RC-02 request-only startup over MCP", () => {
   });
 });
 
+describe("bounded PREPARED over the fixed execution MCP workspace", () => {
+  const taskId = `bounded-${"a".repeat(32)}`;
+  const reviewId = `review-${"a".repeat(8)}-${"b".repeat(4)}-${"c".repeat(4)}-${"d".repeat(4)}-${"e".repeat(12)}`;
+  const contract = "1".repeat(64);
+  const manifest = "2".repeat(64);
+  const bytes = Buffer.from("reviewed diff\n".repeat(900));
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const name = "revision-1-diff.patch";
+  let previousState: string | undefined;
+  let storage: string;
+  let localClient: Client;
+  let localServer: ReturnType<typeof createMcpServer>;
+  let task: Record<string, any>;
+  let snapshot: Record<string, unknown>;
+  let listing: Record<string, any>;
+  let pages: (offset: number) => Record<string, unknown>;
+  let statusSpy: ReturnType<typeof vi.spyOn>;
+  let snapshotSpy: ReturnType<typeof vi.spyOn>;
+  let artifactsSpy: ReturnType<typeof vi.spyOn>;
+  let pageSpy: ReturnType<typeof vi.spyOn>;
+  const receiptFile = () => path.join(storage, "bounded-prepared-v1", `${taskId}.json`);
+  const call = (name: string, args: Record<string, unknown> = { task_id: taskId }) =>
+    localClient.callTool({ name, arguments: args });
+  const rejected = async (name: string) => expect((await call(name)).isError).toBe(true);
+
+  beforeEach(async () => {
+    previousState = process.env.C2C_STATE_DIR;
+    storage = isolateStateDir();
+    task = { task_id: taskId, state: "REVIEW_ACCEPTED", contract_sha256: contract,
+      contract: { edit_paths: ["src/mcp/server.ts", "tests/mcp-integration.test.ts"] },
+      baseline_head: "f".repeat(40), baseline: { "src/mcp/server.ts": "3".repeat(64),
+        "tests/mcp-integration.test.ts": "4".repeat(64) },
+      revisions: [{ revision: 1, manifest_sha256: manifest, review: {
+        task_id: taskId, revision: 1, review_id: reviewId, verdict: "PASS",
+        contract_sha256: contract, manifest_sha256: manifest } }] };
+    snapshot = { task_id: taskId, revision: 1, review_id: reviewId, review_result: "PASS",
+      contract_sha256: contract, manifest_sha256: manifest, diff_sha256: digest };
+    listing = { task_id: taskId, revision: 1, contract_sha256: contract, manifest_sha256: manifest,
+      files: [{ name: "other.log", sha256: "5".repeat(64), size: 1 },
+        { name, sha256: digest, size: bytes.length }] };
+    pages = (offset) => { const end = Math.min(offset + 8192, bytes.length); return {
+      manifest_sha256: manifest, file_sha256: digest, offset,
+      next_offset: end === bytes.length ? null : end,
+      content_base64: bytes.subarray(offset, end).toString("base64") }; };
+    statusSpy = vi.spyOn(BoundedTasks.prototype, "status").mockImplementation(() => task as any);
+    snapshotSpy = vi.spyOn(BoundedTasks.prototype, "acceptedSnapshot").mockImplementation(() => snapshot as any);
+    artifactsSpy = vi.spyOn(BoundedTasks.prototype, "artifacts").mockImplementation(() => listing as any);
+    pageSpy = vi.spyOn(BoundedTasks.prototype, "readArtifact")
+      .mockImplementation((_id, _revision, _name, offset) => pages(offset) as any);
+    localServer = createMcpServer({ workspace: { root: "C:\\work\\codex-with-chatgpt" } as Workspace,
+      logger: {} as Logger });
+    localClient = new Client({ name: "prepared-integration", version: "1" });
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+    await localServer.connect(serverTransport);
+    await localClient.connect(clientTransport);
+  });
+  afterEach(async () => {
+    try { await localClient.close(); await localServer.close(); } finally {
+      vi.restoreAllMocks();
+      cleanup(storage);
+      if (previousState === undefined) delete process.env.C2C_STATE_DIR;
+      else process.env.C2C_STATE_DIR = previousState;
+    }
+  });
+
+  it("seals a multi-page diff once, remains idempotent and never changes the repo", async () => {
+    const before = fs.readFileSync(path.resolve("src/mcp/server.ts"));
+    const first = await call("prepare_bounded_commit");
+    expect(first.isError ?? false).toBe(false);
+    const receipt = structuredJsonOf<any>(first);
+    expect(receipt).toMatchObject({ task_id: taskId, revision: 1, review_id: reviewId,
+      contract_sha256: contract, manifest_sha256: manifest, diff_sha256: digest,
+      artifact: { name, size: bytes.length, sha256: digest }, state: "PREPARED", authoritative_done: false });
+    expect(receipt.edit_paths).toEqual(["src/mcp/server.ts", "tests/mcp-integration.test.ts"]);
+    expect(fs.existsSync(receiptFile())).toBe(true);
+    expect(fs.readFileSync(receiptFile(), "utf8")).not.toContain("reviewed diff");
+    for (const tool of ["prepare_bounded_commit", "get_bounded_commit_status", "prepare_bounded_commit"]) {
+      const result = await call(tool);
+      expect(result.isError ?? false).toBe(false);
+      expect(structuredJsonOf(result)).toEqual(receipt);
+    }
+    expect(snapshotSpy).toHaveBeenCalledTimes(1);
+    expect(statusSpy).toHaveBeenCalled();
+    expect(artifactsSpy).toHaveBeenCalled();
+    expect(pageSpy.mock.calls.some(([, , , offset]) => offset === 8192)).toBe(true);
+    expect(fs.readFileSync(path.resolve("src/mcp/server.ts"))).toEqual(before);
+  });
+
+  it("keeps status read-only and rejects extra input fields", async () => {
+    expect(structuredJsonOf(await call("get_bounded_commit_status"))).toEqual({
+      task_id: taskId, state: "NOT_PREPARED", authoritative_done: false });
+    expect(snapshotSpy).not.toHaveBeenCalled();
+    for (const tool of ["prepare_bounded_commit", "get_bounded_commit_status"]) {
+      expect((await call(tool, { task_id: taskId, repo: "other" })).isError).toBe(true);
+    }
+  });
+
+  it("rejects missing snapshot bindings and mismatched PASS review records", async () => {
+    for (const [key, value] of [["task_id", `bounded-${"b".repeat(32)}`],
+      ["review_result", "NEEDS_WORK"], ["diff_sha256", "0".repeat(64)]] as const) {
+      snapshot[key] = value;
+      await rejected("prepare_bounded_commit");
+      expect(fs.existsSync(receiptFile())).toBe(false);
+      snapshot[key] = key === "task_id" ? taskId : key === "review_result" ? "PASS" : digest;
+    }
+    for (const [key, value] of [["task_id", `bounded-${"b".repeat(32)}`],
+      ["revision", 2], ["contract_sha256", "0".repeat(64)],
+      ["manifest_sha256", "0".repeat(64)]] as const) {
+      task.revisions[0].review[key] = value;
+      await rejected("prepare_bounded_commit");
+      task.revisions[0].review[key] = key === "task_id" ? taskId :
+        key === "revision" ? 1 : key === "contract_sha256" ? contract : manifest;
+    }
+    expect(fs.existsSync(receiptFile())).toBe(false);
+  });
+
+  it("rejects mismatched listings, duplicate diffs and invalid artifact metadata", async () => {
+    for (const [key, value] of [["task_id", "wrong"], ["revision", 2],
+      ["contract_sha256", "0".repeat(64)], ["manifest_sha256", "0".repeat(64)]] as const) {
+      const original = listing[key];
+      listing[key] = value;
+      await rejected("prepare_bounded_commit");
+      listing[key] = original;
+    }
+    listing.files.push({ ...listing.files[1] });
+    await rejected("prepare_bounded_commit");
+    listing.files.pop();
+    for (const size of [0, Number.MAX_SAFE_INTEGER + 1]) {
+      listing.files[1].size = size;
+      await rejected("prepare_bounded_commit");
+    }
+    expect(fs.existsSync(receiptFile())).toBe(false);
+  });
+
+  it("rejects malformed, noncontiguous and modified pages without writing PREPARED", async () => {
+    const valid = pages;
+    for (const corrupt of [
+      (page: any) => ({ ...page, content_base64: "!!!!" }),
+      (page: any) => ({ ...page, offset: page.offset + 1 }),
+      (page: any) => ({ ...page, next_offset: null }),
+      (page: any) => ({ ...page, manifest_sha256: "0".repeat(64) }),
+      (page: any) => ({ ...page, file_sha256: "0".repeat(64) }),
+      (page: any) => ({ ...page, content_base64: Buffer.from("x").toString("base64") }),
+    ]) {
+      pages = (offset) => corrupt(valid(offset));
+      await rejected("prepare_bounded_commit");
+      expect(fs.existsSync(receiptFile())).toBe(false);
+    }
+  });
+
+  it("fails closed for tampered, conflicting and stale sealed receipts", async () => {
+    expect((await call("prepare_bounded_commit")).isError ?? false).toBe(false);
+    const original = fs.readFileSync(receiptFile(), "utf8");
+    const sealed = JSON.parse(original);
+    sealed.receipt.authoritative_done = true;
+    fs.writeFileSync(receiptFile(), JSON.stringify(sealed));
+    await rejected("prepare_bounded_commit");
+    await rejected("get_bounded_commit_status");
+    fs.writeFileSync(receiptFile(), original);
+    const conflicting = JSON.parse(original);
+    conflicting.receipt.baseline_head = "e".repeat(40);
+    conflicting.seal = createHash("sha256").update(canonicalJson(conflicting.receipt)).digest("hex");
+    fs.writeFileSync(receiptFile(), JSON.stringify(conflicting));
+    await rejected("prepare_bounded_commit");
+    await rejected("get_bounded_commit_status");
+    fs.writeFileSync(receiptFile(), original);
+    task.revisions[0].review.review_id = `review-${"9".repeat(36)}`;
+    await rejected("prepare_bounded_commit");
+    await rejected("get_bounded_commit_status");
+    expect(snapshotSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("revalidates the artifact on both tools without consulting the snapshot again", async () => {
+    expect((await call("prepare_bounded_commit")).isError ?? false).toBe(false);
+    listing.files[1].sha256 = "0".repeat(64);
+    await rejected("get_bounded_commit_status");
+    await rejected("prepare_bounded_commit");
+    listing.files[1].sha256 = digest;
+    pages = (offset) => ({ ...{
+      manifest_sha256: manifest, file_sha256: digest, offset,
+      next_offset: offset + 8192 >= bytes.length ? null : offset + 8192,
+      content_base64: Buffer.alloc(Math.min(8192, bytes.length - offset), 120).toString("base64") } });
+    await rejected("get_bounded_commit_status");
+    await rejected("prepare_bounded_commit");
+    expect(snapshotSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("MCP tools over Streamable HTTP", () => {
 beforeAll(async () => {
   researchScratch = createScratch();
@@ -275,6 +470,8 @@ afterAll(async () => {
       "verify_bundle_integrity",
       "workspace_info",
     ]);
+    expect(names).not.toContain("prepare_bounded_commit");
+    expect(names).not.toContain("get_bounded_commit_status");
     // no write tools in V1
     for (const forbidden of ["write_file", "delete_file", "execute_shell", "git_commit", "install_package"]) {
       expect(names).not.toContain(forbidden);
