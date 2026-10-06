@@ -571,7 +571,7 @@ const preparedHash = (value: unknown) => createHash("sha256").update(canonicalJs
 const preparedDigest = z.string().regex(/^[a-f0-9]{64}$/);
 const preparedReceiptSchema = z.object({
   task_id: z.string().regex(/^bounded-[a-f0-9]{32}$/), revision: z.number().int().positive(),
-  review_id: z.string().regex(/^review-[a-f0-9-]{36}$/), contract_sha256: preparedDigest,
+  review_id: z.string().regex(/^review-[a-f0-9-]{36}$/), reviewer: z.enum(["chatgpt", "opencode-semantic"]).optional(), contract_sha256: preparedDigest,
   manifest_sha256: preparedDigest, diff_sha256: preparedDigest,
   baseline_head: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/),
   baseline: z.record(preparedDigest), edit_paths: z.array(scopePathSchema).min(1),
@@ -627,7 +627,9 @@ function checkPreparedBinding(receipt: PreparedReceipt, task: ReturnType<Bounded
   latest: ReturnType<BoundedTasks["status"]>["revisions"][number]): void {
   const paths = [...task.contract.edit_paths].sort();
   if (receipt.task_id !== task.task_id || receipt.revision !== latest.revision ||
-      receipt.review_id !== latest.review?.review_id || receipt.contract_sha256 !== task.contract_sha256 ||
+      receipt.review_id !== latest.review?.review_id ||
+      (receipt.reviewer === undefined ? latest.review?.reviewer !== "chatgpt" : receipt.reviewer !== latest.review?.reviewer) ||
+      receipt.contract_sha256 !== task.contract_sha256 ||
       receipt.manifest_sha256 !== latest.manifest_sha256 || receipt.baseline_head !== task.baseline_head ||
       canonicalJson(receipt.baseline) !== canonicalJson(task.baseline) ||
       canonicalJson(receipt.edit_paths) !== canonicalJson(paths)) {
@@ -678,9 +680,10 @@ export function prepareBoundedCommit(tasks: BoundedTasks, taskId: string, stateD
     verifyPreparedArtifact(tasks, existing);
     return existing;
   }
-  const snapshot = tasks.acceptedSnapshot(taskId);
+  const snapshot = tasks.localCommitSnapshot(taskId);
   if (!snapshot || snapshot.task_id !== taskId || snapshot.review_result !== "PASS" ||
       snapshot.revision !== latest.revision || snapshot.review_id !== latest.review?.review_id ||
+      snapshot.reviewer !== latest.review?.reviewer ||
       snapshot.contract_sha256 !== task.contract_sha256 || snapshot.manifest_sha256 !== latest.manifest_sha256 ||
       !preparedDigest.safeParse(snapshot.diff_sha256).success) {
     throw new Error("Accepted snapshot does not match latest ledger review");
@@ -695,7 +698,7 @@ export function prepareBoundedCommit(tasks: BoundedTasks, taskId: string, stateD
     throw new Error("Accepted diff artifact missing or invalid");
   }
   const receipt = preparedReceiptSchema.parse({ task_id: taskId, revision: latest.revision,
-    review_id: snapshot.review_id, contract_sha256: snapshot.contract_sha256,
+    review_id: snapshot.review_id, reviewer: snapshot.reviewer, contract_sha256: snapshot.contract_sha256,
     manifest_sha256: snapshot.manifest_sha256, diff_sha256: snapshot.diff_sha256,
     baseline_head: task.baseline_head, baseline: task.baseline,
     edit_paths: [...task.contract.edit_paths].sort(),

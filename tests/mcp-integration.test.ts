@@ -242,9 +242,9 @@ describe("bounded PREPARED over the fixed execution MCP workspace", () => {
       baseline_head: "f".repeat(40), baseline: { "src/mcp/server.ts": "3".repeat(64),
         "tests/mcp-integration.test.ts": "4".repeat(64) },
       revisions: [{ revision: 1, manifest_sha256: manifest, review: {
-        task_id: taskId, revision: 1, review_id: reviewId, verdict: "PASS",
+        task_id: taskId, revision: 1, review_id: reviewId, reviewer: "chatgpt", verdict: "PASS",
         contract_sha256: contract, manifest_sha256: manifest } }] };
-    snapshot = { task_id: taskId, revision: 1, review_id: reviewId, review_result: "PASS",
+    snapshot = { task_id: taskId, revision: 1, review_id: reviewId, reviewer: "chatgpt", review_result: "PASS",
       contract_sha256: contract, manifest_sha256: manifest, diff_sha256: digest };
     listing = { task_id: taskId, revision: 1, contract_sha256: contract, manifest_sha256: manifest,
       files: [{ name: "other.log", sha256: "5".repeat(64), size: 1 },
@@ -254,7 +254,7 @@ describe("bounded PREPARED over the fixed execution MCP workspace", () => {
       next_offset: end === bytes.length ? null : end,
       content_base64: bytes.subarray(offset, end).toString("base64") }; };
     statusSpy = vi.spyOn(BoundedTasks.prototype, "status").mockImplementation(() => task as any);
-    snapshotSpy = vi.spyOn(BoundedTasks.prototype, "acceptedSnapshot").mockImplementation(() => snapshot as any);
+    snapshotSpy = vi.spyOn(BoundedTasks.prototype, "localCommitSnapshot").mockImplementation(() => snapshot as any);
     artifactsSpy = vi.spyOn(BoundedTasks.prototype, "artifacts").mockImplementation(() => listing as any);
     pageSpy = vi.spyOn(BoundedTasks.prototype, "readArtifact")
       .mockImplementation((_id, _revision, _name, offset) => pages(offset) as any);
@@ -279,7 +279,7 @@ describe("bounded PREPARED over the fixed execution MCP workspace", () => {
     const first = await call("prepare_bounded_commit");
     expect(first.isError ?? false).toBe(false);
     const receipt = structuredJsonOf<any>(first);
-    expect(receipt).toMatchObject({ task_id: taskId, revision: 1, review_id: reviewId,
+    expect(receipt).toMatchObject({ task_id: taskId, revision: 1, review_id: reviewId, reviewer: "chatgpt",
       contract_sha256: contract, manifest_sha256: manifest, diff_sha256: digest,
       artifact: { name, size: bytes.length, sha256: digest }, state: "PREPARED", authoritative_done: false });
     expect(receipt.edit_paths).toEqual(["src/mcp/server.ts", "tests/mcp-integration.test.ts"]);
@@ -395,6 +395,33 @@ describe("bounded PREPARED over the fixed execution MCP workspace", () => {
     await rejected("prepare_bounded_commit");
     expect(snapshotSpy).toHaveBeenCalledTimes(1);
   });
+  it("reconciles reviewer-less receipts only for the latest ChatGPT PASS", async () => {
+    expect((await call("prepare_bounded_commit")).isError ?? false).toBe(false);
+    const record = JSON.parse(fs.readFileSync(receiptFile(), "utf8"));
+    delete record.receipt.reviewer;
+    record.seal = createHash("sha256").update(canonicalJson(record.receipt)).digest("hex");
+    fs.writeFileSync(receiptFile(), JSON.stringify(record));
+    expect(structuredJsonOf(await call("get_bounded_commit_status"))).toEqual(record.receipt);
+    expect(structuredJsonOf(await call("prepare_bounded_commit"))).toEqual(record.receipt);
+    task.revisions[0].review.reviewer = "opencode-semantic";
+    await rejected("get_bounded_commit_status");
+    await rejected("prepare_bounded_commit");
+  });
+
+  it("binds semantic reviewer and rejects a sealed reviewer mismatch", async () => {
+    task.revisions[0].review.reviewer = "opencode-semantic";
+    snapshot.reviewer = "opencode-semantic";
+    const result = await call("prepare_bounded_commit");
+    expect(result.isError ?? false).toBe(false);
+    expect(structuredJsonOf<any>(result)).toMatchObject({ reviewer: "opencode-semantic", state: "PREPARED", authoritative_done: false });
+    const record = JSON.parse(fs.readFileSync(receiptFile(), "utf8"));
+    record.receipt.reviewer = "chatgpt";
+    record.seal = createHash("sha256").update(canonicalJson(record.receipt)).digest("hex");
+    fs.writeFileSync(receiptFile(), JSON.stringify(record));
+    await rejected("get_bounded_commit_status");
+    await rejected("prepare_bounded_commit");
+  });
+
 });
 
 describe("MCP tools over Streamable HTTP", () => {

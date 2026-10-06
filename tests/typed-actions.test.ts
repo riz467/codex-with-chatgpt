@@ -958,7 +958,7 @@ describe("bounded local commit", () => {
       baseline_head: baseline, baseline: { "scope.txt": sha("before\n") },
       contract: { edit_paths: ["scope.txt"] },
       revisions: [{ revision: 1, manifest_sha256: manifestHash,
-        review: { review_id: reviewId, task_id: taskId, revision: 1,
+        review: { review_id: reviewId, reviewer: "chatgpt", task_id: taskId, revision: 1,
           contract_sha256: contractHash, manifest_sha256: manifestHash, verdict: "PASS" } }] };
     const artifact = { name: "revision-1-diff.patch", size: patch.length, sha256: sha(patch) };
     const tasks = {
@@ -972,7 +972,7 @@ describe("bounded local commit", () => {
       },
       acceptedSnapshot: () => { throw new Error("Commit must not call acceptedSnapshot"); },
     } as unknown as BoundedTasks;
-    const prepared = { task_id: taskId, revision: 1, review_id: reviewId,
+    const prepared = { task_id: taskId, revision: 1, review_id: reviewId, reviewer: "chatgpt",
       contract_sha256: contractHash, manifest_sha256: manifestHash, diff_sha256: artifact.sha256,
       baseline_head: baseline, baseline: task.baseline, edit_paths: ["scope.txt"], artifact,
       state: "PREPARED", authoritative_done: false };
@@ -1009,6 +1009,14 @@ describe("bounded local commit", () => {
       fs.unlinkSync(path.join(f.stateDir, "bounded-committed-v1", `${f.taskId}.json`));
       expect(core.commitBoundedPatch(f.tasks, f.taskId, f.stateDir, f.repo)).toEqual(first);
       expect(f.git("rev-list", "--count", `${f.prepared.baseline_head}..HEAD`)).toBe("1");
+    } finally { fs.rmSync(f.dir, { recursive: true, force: true }); }
+  });
+  it("rejects reviewer drift before a local commit", () => {
+    const f = fixture();
+    try {
+      f.task.revisions[0].review.reviewer = "opencode-semantic";
+      expect(() => core.commitBoundedPatch(f.tasks, f.taskId, f.stateDir, f.repo)).toThrow();
+      expect(f.git("rev-parse", "HEAD")).toBe(f.prepared.baseline_head);
     } finally { fs.rmSync(f.dir, { recursive: true, force: true }); }
   });
   it.each(["staged", "untracked", "out-of-scope", "stale", "tampered"])("rejects %s before committing", kind => {
