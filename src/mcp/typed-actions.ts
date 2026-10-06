@@ -7,8 +7,12 @@
  */
 export const typedActionBootstrap = Object.freeze({ version: 1 as const });
 
+import fs from "node:fs";
+import path from "node:path";
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { canonicalJson, scopePathSchema } from "../task-contract/contract.js";
+import type { BoundedTasks } from "./bounded-task.js";
 
 const id = z.string().uuid().regex(/^[0-9a-f-]+$/);
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
@@ -559,4 +563,156 @@ export function assessProductionKvmReadiness(candidateInput: unknown, evidenceIn
     authority: "NONE" as const, productionExecution: false as const,
     permit: "NOT_ISSUED" as const, done: false as const,
   });
+}
+
+// PREPARED is sealed local evidence, not a commit or completion authority.
+const preparedHash = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
+const preparedDigest = z.string().regex(/^[a-f0-9]{64}$/);
+const preparedReceiptSchema = z.object({
+  task_id: z.string().regex(/^bounded-[a-f0-9]{32}$/), revision: z.number().int().positive(),
+  review_id: z.string().regex(/^review-[a-f0-9-]{36}$/), contract_sha256: preparedDigest,
+  manifest_sha256: preparedDigest, diff_sha256: preparedDigest,
+  baseline_head: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/),
+  baseline: z.record(preparedDigest), edit_paths: z.array(scopePathSchema).min(1),
+  artifact: z.object({ name: z.string(), size: z.number().int().positive(), sha256: preparedDigest }).strict(),
+  state: z.literal("PREPARED"), authoritative_done: z.literal(false),
+}).strict();
+type PreparedReceipt = z.infer<typeof preparedReceiptSchema>;
+const sealedPreparedSchema = z.object({ receipt: preparedReceiptSchema, seal: preparedDigest }).strict();
+function preparedFile(stateDir: string, taskId: string): string {
+  return path.join(stateDir, "bounded-prepared-v1", `${taskId}.json`);
+}
+function readPrepared(stateDir: string, taskId: string): PreparedReceipt | null {
+  const file = preparedFile(stateDir, taskId);
+  if (!fs.existsSync(file)) return null;
+  if (!fs.lstatSync(file).isFile()) throw new Error("PREPARED receipt is not a regular file");
+  const record = sealedPreparedSchema.parse(JSON.parse(fs.readFileSync(file, "utf8")));
+  if (record.receipt.task_id !== taskId || record.seal !== preparedHash(record.receipt)) {
+    throw new Error("PREPARED receipt integrity failure");
+  }
+  return record.receipt;
+}
+function writePrepared(stateDir: string, receipt: PreparedReceipt): PreparedReceipt {
+  const file = preparedFile(stateDir, receipt.task_id);
+  const parent = path.dirname(file);
+  fs.mkdirSync(parent, { recursive: true });
+  if (!fs.lstatSync(parent).isDirectory()) throw new Error("PREPARED storage is not a directory");
+  const serialized = JSON.stringify({ receipt, seal: preparedHash(receipt) }) + "\n";
+  try {
+    fs.writeFileSync(file, serialized, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const existing = readPrepared(stateDir, receipt.task_id);
+    if (!existing || canonicalJson(existing) !== canonicalJson(receipt)) {
+      throw new Error("Conflicting PREPARED receipt");
+    }
+    return existing;
+  }
+  return receipt;
+}
+function checkedPreparedTask(tasks: BoundedTasks, taskId: string) {
+  const task = tasks.status(taskId);
+  const latest = task.revisions.at(-1);
+  if (task.state !== "REVIEW_ACCEPTED" || !latest || latest.review?.verdict !== "PASS" ||
+      latest.review.task_id !== taskId || latest.review.revision !== latest.revision ||
+      latest.review.contract_sha256 !== task.contract_sha256 ||
+      latest.review.manifest_sha256 !== latest.manifest_sha256 ||
+      !latest.review.review_id || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(task.baseline_head)) {
+    throw new Error("Task has no latest accepted PASS review");
+  }
+  return { task, latest };
+}
+function checkPreparedBinding(receipt: PreparedReceipt, task: ReturnType<BoundedTasks["status"]>,
+  latest: ReturnType<BoundedTasks["status"]>["revisions"][number]): void {
+  const paths = [...task.contract.edit_paths].sort();
+  if (receipt.task_id !== task.task_id || receipt.revision !== latest.revision ||
+      receipt.review_id !== latest.review?.review_id || receipt.contract_sha256 !== task.contract_sha256 ||
+      receipt.manifest_sha256 !== latest.manifest_sha256 || receipt.baseline_head !== task.baseline_head ||
+      canonicalJson(receipt.baseline) !== canonicalJson(task.baseline) ||
+      canonicalJson(receipt.edit_paths) !== canonicalJson(paths)) {
+    throw new Error("PREPARED receipt is stale or conflicts with the ledger");
+  }
+}
+function verifyPreparedArtifact(tasks: BoundedTasks, receipt: PreparedReceipt): void {
+  const { task_id, revision, manifest_sha256, artifact } = receipt;
+  const listing = tasks.artifacts(task_id, revision);
+  if (listing.task_id !== task_id || listing.revision !== revision ||
+      listing.contract_sha256 !== receipt.contract_sha256 ||
+      listing.manifest_sha256 !== manifest_sha256 || !Array.isArray(listing.files)) {
+    throw new Error("PREPARED manifest mismatch");
+  }
+  const matches = listing.files.filter((file) => file.name === artifact.name);
+  if (matches.length !== 1 || matches[0].sha256 !== artifact.sha256 || matches[0].size !== artifact.size ||
+      artifact.name !== `revision-${revision}-diff.patch` || !Number.isSafeInteger(artifact.size) || artifact.size <= 0) {
+    throw new Error("PREPARED diff artifact mismatch");
+  }
+  const hash = createHash("sha256");
+  let offset = 0;
+  while (offset < artifact.size) {
+    const page = tasks.readArtifact(task_id, revision, artifact.name, offset);
+    if (page.manifest_sha256 !== manifest_sha256 || page.file_sha256 !== artifact.sha256 ||
+        page.offset !== offset || typeof page.content_base64 !== "string" ||
+        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(page.content_base64)) {
+      throw new Error("Invalid PREPARED artifact page");
+    }
+    const bytes = Buffer.from(page.content_base64, "base64");
+    if (!bytes.length || bytes.toString("base64") !== page.content_base64 ||
+        offset + bytes.length > artifact.size ||
+        page.next_offset !== (offset + bytes.length === artifact.size ? null : offset + bytes.length)) {
+      throw new Error("Noncontiguous PREPARED artifact page");
+    }
+    hash.update(bytes);
+    offset += bytes.length;
+  }
+  if (offset !== artifact.size || hash.digest("hex") !== artifact.sha256 || artifact.sha256 !== receipt.diff_sha256) {
+    throw new Error("PREPARED artifact digest mismatch");
+  }
+}
+
+export function prepareBoundedCommit(tasks: BoundedTasks, taskId: string, stateDir: string): PreparedReceipt {
+  const { task, latest } = checkedPreparedTask(tasks, taskId);
+  const existing = readPrepared(stateDir, taskId);
+  if (existing) {
+    checkPreparedBinding(existing, task, latest);
+    verifyPreparedArtifact(tasks, existing);
+    return existing;
+  }
+  const snapshot = tasks.acceptedSnapshot(taskId);
+  if (!snapshot || snapshot.task_id !== taskId || snapshot.review_result !== "PASS" ||
+      snapshot.revision !== latest.revision || snapshot.review_id !== latest.review?.review_id ||
+      snapshot.contract_sha256 !== task.contract_sha256 || snapshot.manifest_sha256 !== latest.manifest_sha256 ||
+      !preparedDigest.safeParse(snapshot.diff_sha256).success) {
+    throw new Error("Accepted snapshot does not match latest ledger review");
+  }
+  const listing = tasks.artifacts(taskId, latest.revision);
+  const name = `revision-${latest.revision}-diff.patch`;
+  const matches = listing.files.filter((file) => file.name === name);
+  if (listing.task_id !== taskId || listing.revision !== latest.revision ||
+      listing.contract_sha256 !== task.contract_sha256 ||
+      listing.manifest_sha256 !== snapshot.manifest_sha256 || matches.length !== 1 ||
+      matches[0].sha256 !== snapshot.diff_sha256 || !Number.isSafeInteger(matches[0].size) || matches[0].size <= 0) {
+    throw new Error("Accepted diff artifact missing or invalid");
+  }
+  const receipt = preparedReceiptSchema.parse({ task_id: taskId, revision: latest.revision,
+    review_id: snapshot.review_id, contract_sha256: snapshot.contract_sha256,
+    manifest_sha256: snapshot.manifest_sha256, diff_sha256: snapshot.diff_sha256,
+    baseline_head: task.baseline_head, baseline: task.baseline,
+    edit_paths: [...task.contract.edit_paths].sort(),
+    artifact: { name, size: matches[0].size, sha256: matches[0].sha256 },
+    state: "PREPARED", authoritative_done: false });
+  verifyPreparedArtifact(tasks, receipt);
+  // A concurrent review or revision must not be sealed as the latest accepted review.
+  const current = checkedPreparedTask(tasks, taskId);
+  checkPreparedBinding(receipt, current.task, current.latest);
+  return writePrepared(stateDir, receipt);
+}
+
+export function getBoundedCommitStatus(tasks: BoundedTasks, taskId: string, stateDir: string):
+  PreparedReceipt | { task_id: string; state: "NOT_PREPARED"; authoritative_done: false } {
+  const { task, latest } = checkedPreparedTask(tasks, taskId);
+  const receipt = readPrepared(stateDir, taskId);
+  if (!receipt) return { task_id: taskId, state: "NOT_PREPARED", authoritative_done: false };
+  checkPreparedBinding(receipt, task, latest);
+  verifyPreparedArtifact(tasks, receipt);
+  return receipt;
 }

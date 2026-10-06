@@ -481,6 +481,7 @@ describe("retry and empty execution surface", () => {
       "canonicalizeMaintenanceSnapshot", "executableMutationAdapters", "hashActionRequest", "hashMaintenancePlan",
       "hashMaintenanceSnapshot", "maintenanceActionKinds", "maintenanceCheckKinds", "maintenancePlanSchema",
       "maintenanceSnapshotSchema", "parseActionRequest", "parseMaintenancePlan", "parseMaintenanceSnapshot", "typedActionBootstrap",
+      "prepareBoundedCommit", "getBoundedCommitStatus",
       "assessProductionKvmReadiness", "hashProductionKvmCandidate", "hashProductionKvmEvidence",
       "parseProductionKvmCandidate", "parseProductionKvmEvidence", "productionKvmCandidateSchema",
       "productionKvmEvidenceSchema", "productionKvmReadinessGateNames",
