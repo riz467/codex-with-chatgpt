@@ -186,10 +186,48 @@ describe("bounded OpenCode contract and review", () => {
     const started = tasks.start(f.contract), done = await tasks.execute(started.task_id);
     tasks.submitReview(review(started.task_id, 1, started.contract_sha256, done.manifest_sha256, "PASS"));
     const restarted = new BoundedTasks({ fixture: f.repo }, store, mock);
+    expect(restarted.localCommitSnapshot(started.task_id)).toMatchObject({ review_result: "PASS", reviewer: "chatgpt" });
+    expect(restarted.acceptedSnapshot(started.task_id)).not.toHaveProperty("reviewer");
     expect(restarted.acceptedSnapshot(started.task_id).review_result).toBe("PASS");
     const file = path.join(store, started.task_id, "revision-1-review.json");
     fs.writeFileSync(file, "{}");
     expect(() => restarted.acceptedSnapshot(started.task_id)).toThrow("REVIEW_RECORD_MISMATCH");
+    expect(() => restarted.localCommitSnapshot(started.task_id)).toThrow("REVIEW_RECORD_MISMATCH");
+  });
+  it("keeps semantic PASS local-only and fails closed on altered provenance, artifacts and live diff", async () => {
+    const f = fixture(), store = path.join(f.root, "store"), tasks = new BoundedTasks({ fixture: f.repo }, store, mock);
+    const started = tasks.start(f.contract), done = await tasks.execute(started.task_id);
+    const semantic = { ...review(started.task_id, 1, started.contract_sha256, done.manifest_sha256, "PASS"),
+      reviewer: "opencode-semantic" as const };
+    expect(() => tasks.submitReview({ ...semantic, reviewer: "other" as never })).toThrow("REVIEW_BINDING_INVALID");
+    expect(tasks.submitReview(semantic).state).toBe("REVIEW_ACCEPTED");
+    expect(tasks.submitReview(semantic).duplicate).toBe(true);
+    expect(() => tasks.submitReview({ ...semantic, reviewer: "chatgpt" })).toThrow("REVIEW_BINDING_INVALID");
+    expect(tasks.status(started.task_id).revisions[0].review?.reviewer).toBe("opencode-semantic");
+    expect(() => tasks.acceptedSnapshot(started.task_id)).toThrow("ACCEPTED_REVIEW_REQUIRED");
+    const snapshot = tasks.localCommitSnapshot(started.task_id);
+    expect(snapshot).toMatchObject({ task_id: started.task_id, revision: 1, review_id: semantic.review_id,
+      review_result: "PASS", reviewer: "opencode-semantic", manifest_sha256: done.manifest_sha256 });
+    const ledgerFile = path.join(store, started.task_id, "task.json");
+    const reviewFile = path.join(store, started.task_id, "revision-1-review.json");
+    const savedLedger = fs.readFileSync(ledgerFile), savedReview = fs.readFileSync(reviewFile);
+    fs.writeFileSync(reviewFile, "{}");
+    expect(() => tasks.localCommitSnapshot(started.task_id)).toThrow("REVIEW_RECORD_MISMATCH");
+    fs.writeFileSync(reviewFile, savedReview);
+    const altered = JSON.parse(savedLedger.toString());
+    altered.revisions[0].review.reviewer = "other";
+    fs.writeFileSync(ledgerFile, JSON.stringify(altered));
+    fs.writeFileSync(reviewFile, JSON.stringify(altered.revisions[0].review));
+    expect(() => tasks.localCommitSnapshot(started.task_id)).toThrow("ACCEPTED_REVIEW_REQUIRED");
+    fs.writeFileSync(ledgerFile, savedLedger);
+    fs.writeFileSync(reviewFile, savedReview);
+    const proposalFile = path.join(store, started.task_id, "revision-1-proposal.json");
+    const savedProposal = fs.readFileSync(proposalFile);
+    fs.appendFileSync(proposalFile, " ");
+    expect(() => tasks.localCommitSnapshot(started.task_id)).toThrow("MANIFEST_MISMATCH");
+    fs.writeFileSync(proposalFile, savedProposal);
+    fs.appendFileSync(path.join(f.repo, "README.md"), "unreviewed\n");
+    expect(() => tasks.localCommitSnapshot(started.task_id)).toThrow("REVIEWED_DIFF_CHANGED");
   });
   it("refuses unknown operation profiles, Codex budget, scope and repeated failed proposal", async () => {
     const f = fixture(), tasks = new BoundedTasks({ fixture: f.repo }, path.join(f.root, "store"), async () => ({ ...await mock("", "Contract: {\"revision\":1}", 1), output: "PASS" }));

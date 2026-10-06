@@ -37,7 +37,7 @@ type Revision = { revision: number; execution_id: string; input_sha256: string; 
   manifest_sha256: string; worker: Omit<WorkerResult, "output">; verify: VerificationResult;
   files: { name: string; sha256: string; size: number }[]; review?: Review };
 export type Review = { review_id: string; task_id: string; revision: number; contract_sha256: string;
-  manifest_sha256: string; reviewer: "chatgpt"; verdict: "PASS" | "NEEDS_WORK";
+  manifest_sha256: string; reviewer: "chatgpt" | "opencode-semantic"; verdict: "PASS" | "NEEDS_WORK";
   findings: string[] };
 export type WorkerDiagnostic = { phase: string; error_code: string; session_id: string | null };
 type Ledger = { version: 2; task_id: string; contract: Contract; contract_sha256: string; baseline_head: string;
@@ -581,9 +581,16 @@ export class BoundedTasks {
     return { task_id: id, revision, manifest_sha256: bundle.manifest_sha256, file_sha256: entry.sha256,
       offset, next_offset: offset + page.length < bytes.length ? offset + page.length : null, content_base64: page.toString("base64") }; }
   acceptedSnapshot(id: string) {
+    const { reviewer: _reviewer, ...snapshot } = this.reviewedSnapshot(id, false);
+    return snapshot;
+  }
+  localCommitSnapshot(id: string) { return this.reviewedSnapshot(id, true); }
+  private reviewedSnapshot(id: string, allowSemantic: boolean) {
     const task = this.load(id), rev = task.revisions.at(-1);
     if (!rev || !rev.review) return fail("ACCEPTED_REVIEW_REQUIRED");
-    if (task.state !== "REVIEW_ACCEPTED" || rev.review.verdict !== "PASS") return fail("ACCEPTED_REVIEW_REQUIRED");
+    if (task.state !== "REVIEW_ACCEPTED" || rev.review.verdict !== "PASS" ||
+        (rev.review.reviewer !== "chatgpt" && (!allowSemantic || rev.review.reviewer !== "opencode-semantic")))
+      return fail("ACCEPTED_REVIEW_REQUIRED");
     if (rev.review.task_id !== id || rev.review.revision !== rev.revision ||
         rev.review.contract_sha256 !== task.contract_sha256 || rev.review.manifest_sha256 !== rev.manifest_sha256) return fail("ACCEPTED_REVIEW_REQUIRED");
     if (fs.readFileSync(safePath(this.dir(id), `revision-${rev.revision}-review.json`), "utf8") !== json(rev.review)) fail("REVIEW_RECORD_MISMATCH");
@@ -599,7 +606,7 @@ export class BoundedTasks {
       summary: edits.map(e => isRangeEdit(e)
         ? `${e.path}: lines ${e.start_line}+${e.delete_count} → ${e.new_text.slice(0, 80)}`
         : `${e.path}: ${e.old_text.slice(0, 80)} → ${e.new_text.slice(0, 80)}`).join("; ").slice(0, 500),
-      review_id: rev.review.review_id, review_result: "PASS" as const };
+      review_id: rev.review.review_id, review_result: "PASS" as const, reviewer: rev.review.reviewer };
   }
   submitReview(review: Review) {
     const lock = safePath(this.dir(review.task_id), "review.lock");
@@ -611,7 +618,7 @@ export class BoundedTasks {
     if (!rev) throw new GatewayError("REVIEW_BINDING_INVALID", "Missing revision");
     if (review.revision !== rev.revision ||
         review.contract_sha256 !== task.contract_sha256 || review.manifest_sha256 !== rev.manifest_sha256 ||
-        review.reviewer !== "chatgpt" || !/^review-[a-f0-9-]{36}$/.test(review.review_id) ||
+        (review.reviewer !== "chatgpt" && review.reviewer !== "opencode-semantic") || !/^review-[a-f0-9-]{36}$/.test(review.review_id) ||
         !["PASS", "NEEDS_WORK"].includes(review.verdict) || !Array.isArray(review.findings) ||
         review.findings.some(s => typeof s !== "string" || s.length > 1000) ||
          (review.verdict === "NEEDS_WORK" && !review.findings.length)) fail("REVIEW_BINDING_INVALID");
