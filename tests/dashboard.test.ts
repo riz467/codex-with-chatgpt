@@ -175,7 +175,7 @@ describe("dashboard read-only evidence", () => {
     const dir = path.join(stateDir, "bounded-v2", "tasks", taskId); fs.mkdirSync(dir, { recursive: true });
     const save = (value: unknown) => fs.writeFileSync(path.join(dir, "task.json"), JSON.stringify(value));
     save(evidence);
-    expect(f.collector.boundedTask(taskId)).toEqual({ task_id: taskId, state: "REVIEW_ACCEPTED", stop_reason_present: false,
+    expect(f.collector.boundedTask(taskId)).toEqual({ task_id: taskId, state: "REVIEW_ACCEPTED", progress_mode: "REVIEW_ACCEPTED", stop_reason_present: false,
       contract_sha256, execution_profile: "tracked_typescript_dashboard", goal: "Read only <script>alert(1)</script>", edit_paths: contract.edit_paths, latest_revision: 1,
       manifest_sha256, verification_present: true, file_count: 1, worker: "opencode", review_verdict: "PASS" });
     expect(f.collector.boundedTasks()).toHaveLength(1);
@@ -185,7 +185,7 @@ describe("dashboard read-only evidence", () => {
     const controlHash = createHash("sha256").update(JSON.stringify(controlContract)).digest("hex");
     save({ ...evidence, contract: controlContract, contract_sha256: controlHash,
       revisions: [{ ...revision, review: { ...revision.review, contract_sha256: controlHash } }] });
-    expect(f.collector.boundedTask(taskId)).toEqual({ task_id: taskId, state: "REVIEW_ACCEPTED", stop_reason_present: false,
+    expect(f.collector.boundedTask(taskId)).toEqual({ task_id: taskId, state: "REVIEW_ACCEPTED", progress_mode: "REVIEW_ACCEPTED", stop_reason_present: false,
       contract_sha256: controlHash, execution_profile: "tracked_typescript_control_plane",
       goal: "Read only <script>alert(1)</script>", edit_paths: contract.edit_paths, latest_revision: 1,
       manifest_sha256, verification_present: true, file_count: 1, worker: "opencode", review_verdict: "PASS" });
@@ -197,7 +197,16 @@ describe("dashboard read-only evidence", () => {
     expect(f.collector.boundedTask(taskId)).toBeNull();
     save({ ...evidence, state: "REVIEW_PENDING", revisions: [{ ...revision, review: undefined, files: [{}, {}] }] });
     expect(f.collector.boundedTask(taskId)).toMatchObject({ goal: "Read only <script>alert(1)</script>", latest_revision: 1,
-      verification_present: true, file_count: 2, worker: "opencode", review_verdict: null });
+      verification_present: true, file_count: 2, worker: "opencode", review_verdict: null, progress_mode: "REVIEW_PENDING" });
+    save({ ...evidence, state: "RUNNING", revisions: [] });
+    expect(f.collector.boundedTask(taskId)).toMatchObject({ progress_mode: "EXECUTION", review_verdict: null });
+    save({ ...evidence, state: "RUNNING" });
+    expect(f.collector.boundedTask(taskId)).toMatchObject({ progress_mode: "EXECUTION", review_verdict: "PASS" });
+    save({ ...evidence, state: "RUNNING", revisions: [{ ...revision, review: { ...revision.review, verdict: "NEEDS_WORK" } }] });
+    expect(f.collector.boundedTask(taskId)).toMatchObject({ progress_mode: "AUTO_REVISION", review_verdict: "NEEDS_WORK" });
+    expect(JSON.stringify(f.collector.boundedTask(taskId))).not.toMatch(/secret|private|session_id|execution_id|provider|model|usage|tools|acceptance_criteria/);
+    save({ ...evidence, state: "ESCALATE" });
+    expect(f.collector.boundedTask(taskId)).toMatchObject({ progress_mode: "ESCALATE" });
     save({ ...evidence, contract: { ...contract, goal: "Tampered" } }); expect(f.collector.boundedTasks()).toEqual([]);
     for (const changed of [{ task_id: `bounded-${"c".repeat(32)}` }, { revision: 2 },
       { contract_sha256: "c".repeat(64) }, { manifest_sha256: "c".repeat(64) },
