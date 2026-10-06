@@ -490,6 +490,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
           review.manifest_sha256 !== args.manifest_sha256 || review.verdict !== args.verdict) {
         throw new GatewayError("BOUNDED_REVIEW_MISMATCH", "Persisted review does not match the submission");
       }
+      // Normal NEEDS_WORK progression starts the next revision automatically; manual continue is retained only for restart/recovery compatibility.
       if (args.verdict === "NEEDS_WORK" && result.state === "RUNNING") {
         if (!tasks.executing(args.task_id)) {
           void tasks.execute(args.task_id).catch(() => { /* persisted ESCALATE */ });
