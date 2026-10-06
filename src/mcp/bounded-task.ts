@@ -60,7 +60,7 @@ const pathCheck = (repo: string, name: string) => {
 const profilePathAllowed = (profile: ExecutionProfile, name: string) => {
   if (profile === "tracked_utf8_text") return true;
   if (profile === "tracked_typescript_control_plane") {
-    return name === "src/mcp/server.ts" || name === "src/mcp/typed-actions.ts" || name === "tests/typed-actions.test.ts" || name === "tests/mcp-integration.test.ts";
+    return name === "src/mcp/server.ts" || name === "src/mcp/typed-actions.ts" || name === "src/mcp/bounded-task.ts" || name === "tests/typed-actions.test.ts" || name === "tests/mcp-integration.test.ts" || name === "tests/bounded-task.test.ts" || name === "tests/bounded-control-plane-profile.test.ts";
   }
   if (name === "src/dashboard/passkey-fixture.ts" || name.startsWith("src/dashboard/public/passkey-fixture.")) return false;
   return /^(?:src\/dashboard\/.*\.(?:ts|js)|tests\/dashboard[^/]*\.test\.ts)$/.test(name);
