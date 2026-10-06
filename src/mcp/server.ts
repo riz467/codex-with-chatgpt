@@ -302,6 +302,8 @@ export interface McpContext {
   workspace: Workspace;
   logger: Logger;
   boundedTasks?: BoundedTasks;
+  /** Trusted in-process PASS finalizer for tests; never supplied through MCP input. */
+  boundedFinalizer?: (taskId: string) => void;
   boundedReviewerClientId?: string;
   /** Internal read-only ledger composition; not used by start/retry/completion tools. */
   orchestrationReads?: OrchestrationReadDependencies;
@@ -478,7 +480,35 @@ export function createMcpServer(ctx: McpContext): McpServer {
     if (!extra.authInfo.scopes.includes("orchestration.review")) return fail("INSUFFICIENT_SCOPE", "Review scope required");
     if (workspace.root.toLowerCase() === REVIEW_ROOT.toLowerCase() || !ctx.boundedReviewerClientId ||
         extra.authInfo.clientId !== ctx.boundedReviewerClientId) return fail("REVIEW_CLIENT_NOT_AUTHORIZED", "Reviewer client is not authorized on this workspace");
-    try { return okStructured(tasks.submitReview(args)); } catch (error) { return mapError(error); }
+    try {
+      const result = tasks.submitReview(args);
+      const current = tasks.status(args.task_id);
+      const latest = current.revisions.at(-1);
+      const review = latest?.review;
+      if (current.state !== result.state || latest?.revision !== args.revision ||
+          review?.review_id !== args.review_id || review.contract_sha256 !== args.contract_sha256 ||
+          review.manifest_sha256 !== args.manifest_sha256 || review.verdict !== args.verdict) {
+        throw new GatewayError("BOUNDED_REVIEW_MISMATCH", "Persisted review does not match the submission");
+      }
+      if (args.verdict === "NEEDS_WORK" && result.state === "RUNNING") {
+        if (!tasks.executing(args.task_id)) {
+          void tasks.execute(args.task_id).catch(() => { /* persisted ESCALATE */ });
+        }
+      } else if (args.verdict === "PASS" && result.state === "REVIEW_ACCEPTED") {
+        if (ctx.boundedFinalizer) {
+          ctx.boundedFinalizer(args.task_id);
+        } else {
+          const fixedRoot = boundedRepos["codex-with-chatgpt-control-plane"];
+          if (current.contract.repo !== "codex-with-chatgpt-control-plane" ||
+              path.resolve(workspace.root).toLowerCase() !== path.resolve(fixedRoot).toLowerCase()) {
+            throw new GatewayError("BOUNDED_FINALIZATION_NOT_ALLOWED", "PASS finalization requires the fixed control-plane workspace");
+          }
+          prepareBoundedCommit(tasks, args.task_id, getStateDir());
+          commitBoundedPatch(tasks, args.task_id, getStateDir(), fixedRoot);
+        }
+      }
+      return okStructured(result);
+    } catch (error) { return mapError(error); }
   });
 
   server.registerTool("verify_bundle_integrity", {
