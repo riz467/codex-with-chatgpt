@@ -124,7 +124,7 @@ function boundedProjection(raw: Record<string, unknown> | null, taskId: string) 
       !contract.edit_paths.every(boundedPath) || new Set(contract.edit_paths).size !== contract.edit_paths.length ||
       !Array.isArray(contract.acceptance_criteria) || contract.acceptance_criteria.length === 0 ||
       !contract.acceptance_criteria.every((entry: unknown) => cleanString(entry, 500)) ||
-      contract.task_kind !== "text_change" || contract.execution_profile !== "tracked_typescript_dashboard" ||
+      contract.task_kind !== "text_change" || !["tracked_typescript_dashboard", "tracked_typescript_control_plane"].includes(String(contract.execution_profile)) ||
       contract.worker !== "opencode" || !obj(contract.codex) || !exactKeys(obj(contract.codex)!, ["allowed", "max_calls"]) ||
       obj(contract.codex)!.allowed !== false || obj(contract.codex)!.max_calls !== 0 ||
       !Number.isInteger(contract.max_revisions) || (contract.max_revisions as number) < 1 || (contract.max_revisions as number) > 3 ||
@@ -152,7 +152,7 @@ function boundedProjection(raw: Record<string, unknown> | null, taskId: string) 
   if (raw.state === "REVIEW_ACCEPTED" && review?.verdict !== "PASS") return null;
   if (raw.stop_reason !== undefined && raw.stop_reason !== null && !cleanString(raw.stop_reason, 500)) return null;
   return { task_id: taskId, state: raw.state as string, stop_reason_present: raw.stop_reason !== undefined && raw.stop_reason !== null,
-    contract_sha256: raw.contract_sha256 as string,
+    contract_sha256: raw.contract_sha256 as string, execution_profile: contract.execution_profile as "tracked_typescript_dashboard" | "tracked_typescript_control_plane",
     goal: (contract.goal as string).replace(/[\u0080-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, "").trim().slice(0, 500),
     edit_paths: contract.edit_paths as string[],
     latest_revision: latest?.revision as number | undefined ?? null, manifest_sha256: latest?.manifest_sha256 as string | undefined ?? null,
