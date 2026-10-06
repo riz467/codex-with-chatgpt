@@ -497,10 +497,9 @@ export function createMcpServer(ctx: McpContext): McpServer {
       } else if (args.verdict === "PASS" && result.state === "REVIEW_ACCEPTED") {
         if (ctx.boundedFinalizer) {
           ctx.boundedFinalizer(args.task_id);
-        } else {
+        } else if (current.contract.repo === "codex-with-chatgpt-control-plane") {
           const fixedRoot = boundedRepos["codex-with-chatgpt-control-plane"];
-          if (current.contract.repo !== "codex-with-chatgpt-control-plane" ||
-              path.resolve(workspace.root).toLowerCase() !== path.resolve(fixedRoot).toLowerCase()) {
+          if (path.resolve(workspace.root).toLowerCase() !== path.resolve(fixedRoot).toLowerCase()) {
             throw new GatewayError("BOUNDED_FINALIZATION_NOT_ALLOWED", "PASS finalization requires the fixed control-plane workspace");
           }
           prepareBoundedCommit(tasks, args.task_id, getStateDir());
