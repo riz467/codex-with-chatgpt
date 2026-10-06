@@ -424,6 +424,123 @@ describe("bounded PREPARED over the fixed execution MCP workspace", () => {
 
 });
 
+describe("bounded semantic lifecycle over MCP", () => {
+  const taskId = `bounded-${"b".repeat(32)}`;
+  const hash = "1".repeat(64);
+  const diff = Buffer.from("diff --git a/demo.txt b/demo.txt\n+change\n");
+  const diffHash = createHash("sha256").update(diff).digest("hex");
+  const input = { repo: "autonomous-fixture", goal: "Change demo", edit_paths: ["demo.txt"],
+    acceptance_criteria: ["Changed"], task_kind: "text_change", execution_profile: "tracked_utf8_text",
+    worker: "opencode", codex: { allowed: false, max_calls: 0 }, max_revisions: 3, timeout_ms: 600000 };
+  let server: ReturnType<typeof createMcpServer>;
+  let localClient: Client;
+  let task: any;
+  let execute: ReturnType<typeof vi.fn>;
+  let reviewer: ReturnType<typeof vi.fn>;
+  let finalizer: ReturnType<typeof vi.fn>;
+  let release: (() => void) | undefined;
+  const call = (name: string, arguments_: Record<string, unknown>) =>
+    localClient.callTool({ name, arguments: arguments_ });
+  const settled = async (condition: () => boolean) => {
+    for (let i = 0; i < 100 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(condition()).toBe(true);
+  };
+  beforeEach(async () => {
+    task = { task_id: taskId, state: "RUNNING", contract_sha256: hash, contract: input,
+      revisions: [] as any[] };
+    execute = vi.fn(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      const revision = task.revisions.length + 1;
+      task.revisions.push({ revision, manifest_sha256: hash,
+        worker: { session_id: `session-${revision}`, execution_id: `execution-${revision}` },
+        verify: { passed: true } });
+      task.state = "REVIEW_PENDING";
+    });
+    reviewer = vi.fn(async () => ({ decision: { review_result: "PASS", unresolved_issues: [] } }));
+    finalizer = vi.fn();
+    const tasks = { start: vi.fn(() => ({ task_id: taskId, state: "RUNNING" })),
+      executing: vi.fn(() => false), execute, status: vi.fn(() => task),
+      artifacts: vi.fn((_id: string, revision: number) => ({ files: [{ name: `revision-${revision}-diff.patch`,
+        size: diff.length, sha256: diffHash }] })),
+      readArtifact: vi.fn((_id: string, _revision: number, _name: string, offset: number) => ({
+        offset, manifest_sha256: hash, file_sha256: diffHash, next_offset: null,
+        content_base64: diff.toString("base64") })),
+      submitReview: vi.fn((review: any) => {
+        task.revisions.at(-1).review = review;
+        task.state = review.verdict === "PASS" ? "REVIEW_ACCEPTED" : "RUNNING";
+        return { state: task.state };
+      }) };
+    server = createMcpServer({ workspace: { root: "C:\\work\\bounded-review-live-fixture" } as Workspace,
+      logger: {} as Logger, boundedTasks: tasks as unknown as BoundedTasks,
+      boundedSemanticReviewer: reviewer, boundedFinalizer: finalizer });
+    localClient = new Client({ name: "semantic-lifecycle", version: "1" });
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await localClient.connect(clientTransport);
+  });
+  afterEach(async () => { release?.(); await localClient.close(); await server.close(); });
+
+  it("reviews a started task with numeric evidence refs and locally finalizes PASS", async () => {
+    expect((await call("start_bounded_opencode_task", input)).isError ?? false).toBe(false);
+    await settled(() => !!release);
+    release!();
+    await settled(() => finalizer.mock.calls.length === 1);
+    expect(reviewer).toHaveBeenCalledTimes(1);
+    expect(reviewer.mock.calls[0][0]).toContain("execution-1");
+    expect(reviewer.mock.calls[0][0]).toContain("[2] Verified diff");
+    expect(reviewer.mock.calls[0].slice(1)).toEqual(["session-1", [1, 2, 3]]);
+    expect(task.revisions[0].review).toMatchObject({ reviewer: "opencode-semantic", verdict: "PASS",
+      contract_sha256: hash, manifest_sha256: hash, findings: [] });
+    expect(finalizer).toHaveBeenCalledWith(taskId);
+    expect(task.state).toBe("REVIEW_ACCEPTED");
+    expect(task).not.toHaveProperty("authoritative_done", true);
+  });
+
+  it("maps unresolved issues to NEEDS_WORK and runs the next revision without resume", async () => {
+    reviewer.mockResolvedValueOnce({ decision: { review_result: "NEEDS_WORK", unresolved_issues: ["Fix coverage"] } });
+    await call("start_bounded_opencode_task", input);
+    await settled(() => !!release);
+    release!();
+    await settled(() => execute.mock.calls.length === 2);
+    expect(task.revisions[0].review).toMatchObject({ verdict: "NEEDS_WORK", findings: ["Fix coverage"] });
+    expect(finalizer).not.toHaveBeenCalled();
+    await settled(() => !!release);
+    release!();
+    await settled(() => finalizer.mock.calls.length === 1);
+    expect(task.revisions).toHaveLength(2);
+    expect(reviewer.mock.calls[1].slice(1)).toEqual(["session-2", [1, 2, 3]]);
+  });
+
+  it.each([
+    { decision: "PASS" },
+    { decision: { review_result: "DONE", unresolved_issues: [] } },
+    { decision: { review_result: "PASS", unresolved_issues: ["Unresolved"] } },
+  ])("does not finalize invalid semantic decisions: %j", async (decision) => {
+    reviewer.mockResolvedValue(decision);
+    await call("start_bounded_opencode_task", input);
+    await settled(() => !!release);
+    release!();
+    await settled(() => reviewer.mock.calls.length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(task.state).toBe("REVIEW_PENDING");
+    expect(task.revisions[0].review).toBeUndefined();
+    expect(finalizer).not.toHaveBeenCalled();
+  });
+
+  it("keeps command and approval authority outside the lifecycle tools", async () => {
+    const tools = (await localClient.listTools()).tools;
+    const start = tools.find((tool) => tool.name === "start_bounded_opencode_task")!;
+    expect(Object.keys(start.inputSchema.properties ?? {}).sort()).toEqual(Object.keys(input).sort());
+    for (const extra of [{ command: "git push" }, { deploy: true }, { passkey: true },
+      { done_approved: true }, { production_approval: true }]) {
+      expect((await call("start_bounded_opencode_task", { ...input, ...extra })).isError).toBe(true);
+    }
+    expect((await call("continue_bounded_opencode_task", { task_id: taskId, command: "deploy" })).isError).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+    expect(finalizer).not.toHaveBeenCalled();
+  });
+});
+
 describe("MCP tools over Streamable HTTP", () => {
 beforeAll(async () => {
   researchScratch = createScratch();
