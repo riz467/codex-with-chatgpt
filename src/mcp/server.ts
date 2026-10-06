@@ -36,6 +36,21 @@ const boundedRepos: Record<string, string> = {
 };
 const sha256Evidence = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 
+const CONTROL_PLANE_REGRESSIONS = [
+  "tests/typed-actions.test.ts",
+  "tests/bounded-control-plane-profile.test.ts",
+  "tests/mcp-integration.test.ts",
+];
+const DASHBOARD_REGRESSIONS = [
+  "tests/dashboard.test.ts",
+  "tests/dashboard-labels.test.ts",
+  "tests/dashboard-service.test.ts",
+  "tests/dashboard-approval.test.ts",
+  "tests/dashboard-autonomous.test.ts",
+  "tests/dashboard-verified-health.test.ts",
+  "tests/passkey-dashboard-fixture.test.ts",
+];
+
 function resolveRepoTool(root: string, relativePath: string): string {
   try {
     const realRoot = fs.realpathSync.native(root);
@@ -87,10 +102,8 @@ const productionVerifier: NonNullable<ConstructorParameters<typeof BoundedTasks>
     }
     const checks = [runNodeCheck(root, "tsc", "typescript/bin/tsc", ["--noEmit"], remaining(120000))];
     const tests = profile === "tracked_typescript_control_plane"
-      ? ["tests/typed-actions.test.ts", "tests/bounded-control-plane-profile.test.ts", "tests/mcp-integration.test.ts"]
-      : ["tests/dashboard.test.ts", "tests/dashboard-labels.test.ts", "tests/dashboard-service.test.ts",
-          "tests/dashboard-approval.test.ts", "tests/dashboard-autonomous.test.ts",
-          "tests/dashboard-verified-health.test.ts", "tests/passkey-dashboard-fixture.test.ts"];
+      ? CONTROL_PLANE_REGRESSIONS
+      : DASHBOARD_REGRESSIONS;
     checks.push(runNodeCheck(root, "vitest", "vitest/vitest.mjs",
       ["run", "--maxWorkers=2", ...tests], remaining(180000)));
     return { profile, passed: true, paths: [...paths], tests_run: checks.length, checks };
