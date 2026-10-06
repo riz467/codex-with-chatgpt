@@ -177,7 +177,7 @@ describe("dashboard read-only evidence", () => {
     save(evidence);
     expect(f.collector.boundedTask(taskId)).toEqual({ task_id: taskId, state: "REVIEW_ACCEPTED", progress_mode: "REVIEW_ACCEPTED", stop_reason_present: false,
       contract_sha256, execution_profile: "tracked_typescript_dashboard", goal: "Read only <script>alert(1)</script>", edit_paths: contract.edit_paths, latest_revision: 1,
-      manifest_sha256, verification_present: true, file_count: 1, worker: "opencode", review_verdict: "PASS" });
+      manifest_sha256, verification_present: true, file_count: 1, worker: "opencode", review_reviewer: "chatgpt", review_verdict: "PASS" });
     expect(f.collector.boundedTasks()).toHaveLength(1);
     expect((await f.collector.snapshot()).bounded_tasks).toHaveLength(1);
     expect(JSON.stringify(f.collector.boundedTask(taskId))).not.toMatch(/secret|private|session_id|execution_id|provider|model|usage|tools|acceptance_criteria|verification secret|file secret/);
@@ -188,8 +188,22 @@ describe("dashboard read-only evidence", () => {
     expect(f.collector.boundedTask(taskId)).toEqual({ task_id: taskId, state: "REVIEW_ACCEPTED", progress_mode: "REVIEW_ACCEPTED", stop_reason_present: false,
       contract_sha256: controlHash, execution_profile: "tracked_typescript_control_plane",
       goal: "Read only <script>alert(1)</script>", edit_paths: contract.edit_paths, latest_revision: 1,
-      manifest_sha256, verification_present: true, file_count: 1, worker: "opencode", review_verdict: "PASS" });
+      manifest_sha256, verification_present: true, file_count: 1, worker: "opencode", review_reviewer: "chatgpt", review_verdict: "PASS" });
     expect(JSON.stringify(f.collector.boundedTask(taskId))).not.toMatch(/secret|private|session_id|execution_id|provider|model|usage|tools|acceptance_criteria/);
+    const semanticReview = { ...revision.review, contract_sha256: controlHash, reviewer: "opencode-semantic",
+      findings: ["finding secret"], session_id: "review session secret", execution_id: "review execution secret",
+      provider: "review provider private", model: "review model private", usage: { private: "review usage secret" },
+      tools: ["review tool secret"], evidence: { private: "arbitrary evidence secret" } };
+    save({ ...evidence, contract: controlContract, contract_sha256: controlHash,
+      revisions: [{ ...revision, review: semanticReview }] });
+    expect(f.collector.boundedTask(taskId)).toMatchObject({ state: "REVIEW_ACCEPTED", progress_mode: "REVIEW_ACCEPTED",
+      execution_profile: "tracked_typescript_control_plane", review_reviewer: "opencode-semantic", review_verdict: "PASS" });
+    expect(JSON.stringify(f.collector.boundedTask(taskId))).not.toMatch(/secret|private|findings|session_id|execution_id|provider|model|usage|tools|evidence|acceptance_criteria/);
+    save({ ...evidence, state: "RUNNING", contract: controlContract, contract_sha256: controlHash,
+      revisions: [{ ...revision, review: { ...semanticReview, verdict: "NEEDS_WORK" } }] });
+    expect(f.collector.boundedTask(taskId)).toMatchObject({ state: "RUNNING", progress_mode: "AUTO_REVISION",
+      review_reviewer: "opencode-semantic", review_verdict: "NEEDS_WORK" });
+    expect(JSON.stringify(f.collector.boundedTask(taskId))).not.toMatch(/secret|private|findings|session_id|execution_id|provider|model|usage|tools|evidence|acceptance_criteria/);
     const unsupportedContract = { ...contract, execution_profile: "unsupported_profile" };
     const unsupportedHash = createHash("sha256").update(JSON.stringify(unsupportedContract)).digest("hex");
     save({ ...evidence, contract: unsupportedContract, contract_sha256: unsupportedHash,
@@ -197,7 +211,7 @@ describe("dashboard read-only evidence", () => {
     expect(f.collector.boundedTask(taskId)).toBeNull();
     save({ ...evidence, state: "REVIEW_PENDING", revisions: [{ ...revision, review: undefined, files: [{}, {}] }] });
     expect(f.collector.boundedTask(taskId)).toMatchObject({ goal: "Read only <script>alert(1)</script>", latest_revision: 1,
-      verification_present: true, file_count: 2, worker: "opencode", review_verdict: null, progress_mode: "REVIEW_PENDING" });
+      verification_present: true, file_count: 2, worker: "opencode", review_reviewer: null, review_verdict: null, progress_mode: "REVIEW_PENDING" });
     save({ ...evidence, state: "RUNNING", revisions: [] });
     expect(f.collector.boundedTask(taskId)).toMatchObject({ progress_mode: "EXECUTION", review_verdict: null });
     save({ ...evidence, state: "RUNNING" });
@@ -210,7 +224,7 @@ describe("dashboard read-only evidence", () => {
     save({ ...evidence, contract: { ...contract, goal: "Tampered" } }); expect(f.collector.boundedTasks()).toEqual([]);
     for (const changed of [{ task_id: `bounded-${"c".repeat(32)}` }, { revision: 2 },
       { contract_sha256: "c".repeat(64) }, { manifest_sha256: "c".repeat(64) },
-      { reviewer: "opencode" }, { verdict: "FAIL" }]) {
+      { reviewer: "opencode" }, { reviewer: "OPENCODE-SEMANTIC" }, { reviewer: "chatgpt " }, { reviewer: null }, { verdict: "FAIL" }]) {
       save({ ...evidence, revisions: [{ ...revision, review: { ...revision.review, ...changed } }] });
       expect(f.collector.boundedTask(taskId)).toBeNull();
     }

@@ -144,7 +144,7 @@ function boundedProjection(raw: Record<string, unknown> | null, taskId: string) 
       const review = obj(revision.review);
       if (!review || review.task_id !== taskId || review.revision !== revision.revision ||
           review.contract_sha256 !== raw.contract_sha256 || review.manifest_sha256 !== revision.manifest_sha256 ||
-          review.reviewer !== "chatgpt" || !["PASS", "NEEDS_WORK"].includes(String(review.verdict))) return null;
+          !["chatgpt", "opencode-semantic"].includes(String(review.reviewer)) || !["PASS", "NEEDS_WORK"].includes(String(review.verdict))) return null;
     }
   }
   const latest = obj(revisions.at(-1)), review = obj(latest?.review);
@@ -158,7 +158,8 @@ function boundedProjection(raw: Record<string, unknown> | null, taskId: string) 
     edit_paths: contract.edit_paths as string[],
     latest_revision: latest?.revision as number | undefined ?? null, manifest_sha256: latest?.manifest_sha256 as string | undefined ?? null,
     verification_present: !!latest && Object.hasOwn(latest, "verify"), file_count: Array.isArray(latest?.files) ? latest.files.length : null,
-    worker: "opencode", review_verdict: review?.verdict as string | undefined ?? null };
+    worker: "opencode", review_reviewer: review?.reviewer as "chatgpt" | "opencode-semantic" | undefined ?? null,
+    review_verdict: review?.verdict as string | undefined ?? null };
 }
 export class Collector {
   constructor(public readonly roots: Roots = REPOS, public readonly reviewRoot = REVIEW_ROOT, public readonly queueRoot = QUEUE,
