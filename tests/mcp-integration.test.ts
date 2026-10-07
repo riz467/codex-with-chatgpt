@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { boundedFinalizationRoot, createMcpServer } from "../src/mcp/server.js";
+import { boundedFinalizationRoot, createMcpServer, recoverFailedBoundedWorkspace } from "../src/mcp/server.js";
 import { BoundedTasks } from "../src/mcp/bounded-task.js";
 import type { Workspace } from "../src/workspace/manager.js";
 import type { Logger } from "../src/logger/index.js";
@@ -591,6 +591,68 @@ describe("bounded semantic lifecycle over MCP", () => {
     expect(execute).not.toHaveBeenCalled();
     expect(finalizer).not.toHaveBeenCalled();
   });
+});
+
+describe("failed bounded workspace recovery", () => {
+  const taskId = `bounded-${"c".repeat(32)}`;
+  let fixtureRoot: string;
+  let workspace: Workspace;
+  let task: ReturnType<BoundedTasks["status"]>;
+  let executing: ReturnType<typeof vi.fn>;
+  const recover = () => recoverFailedBoundedWorkspace({ executing } as unknown as BoundedTasks,
+    workspace, task, fixtureRoot);
+  const reject = () => {
+    try {
+      recover();
+      throw new Error("Recovery unexpectedly succeeded");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "RECOVERY_NOT_ALLOWED" });
+    }
+  };
+
+  beforeEach(() => {
+    fixtureRoot = makeTmpDir("bounded-recovery");
+    makeGitRepo(fixtureRoot);
+    git(fixtureRoot, "config", "core.autocrlf", "false");
+    write(fixtureRoot, "recovery.txt", "baseline\n");
+    write(fixtureRoot, "outside.txt", "outside baseline\n");
+    git(fixtureRoot, "add", "recovery.txt", "outside.txt");
+    git(fixtureRoot, "commit", "-m", "recovery baseline");
+    workspace = { root: fixtureRoot } as Workspace;
+    executing = vi.fn(() => false);
+    task = { task_id: taskId, state: "ESCALATE", stop_reason: "VERIFY_FAILED",
+      contract: { edit_paths: ["recovery.txt"] }, baseline_head: git(fixtureRoot, "rev-parse", "HEAD").trim(),
+      baseline: { "recovery.txt": createHash("sha256").update(fs.readFileSync(path.join(fixtureRoot, "recovery.txt"))).digest("hex") },
+      revisions: [] } as unknown as ReturnType<BoundedTasks["status"]>;
+  });
+  afterEach(() => cleanup(fixtureRoot));
+
+  it.each([0, 1])("restores only observed in-scope changes after %i prior NEEDS_WORK revisions", (prior) => {
+    if (prior) (task.revisions as any[]).push({ revision: 1, review: { verdict: "NEEDS_WORK" } });
+    const evidence = JSON.stringify(task);
+    write(fixtureRoot, "recovery.txt", "failed verification\n");
+    expect(recover()).toEqual({ task_id: taskId, result: "recovered" });
+    expect(fs.readFileSync(path.join(fixtureRoot, "recovery.txt"), "utf8")).toBe("baseline\n");
+    expect(recover()).toEqual({ task_id: taskId, result: "already_clean" });
+    expect(JSON.stringify(task)).toBe(evidence);
+  });
+
+  it.each(["active", "head", "staged", "untracked", "outside"])(
+    "rejects %s without restoring the in-scope change or mutating evidence", (hazard) => {
+      write(fixtureRoot, "recovery.txt", "failed verification\n");
+      if (hazard === "active") executing.mockReturnValue(true);
+      if (hazard === "head") git(fixtureRoot, "commit", "--allow-empty", "-m", "changed HEAD");
+      if (hazard === "staged") {
+        write(fixtureRoot, "outside.txt", "staged change\n");
+        git(fixtureRoot, "add", "outside.txt");
+      }
+      if (hazard === "untracked") write(fixtureRoot, "untracked.txt", "untracked\n");
+      if (hazard === "outside") write(fixtureRoot, "outside.txt", "out-of-scope change\n");
+      const evidence = JSON.stringify(task);
+      reject();
+      expect(fs.readFileSync(path.join(fixtureRoot, "recovery.txt"), "utf8")).toBe("failed verification\n");
+      expect(JSON.stringify(task)).toBe(evidence);
+    });
 });
 
 describe("MCP tools over Streamable HTTP", () => {
