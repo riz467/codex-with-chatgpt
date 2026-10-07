@@ -523,6 +523,11 @@ describe("IR-05 outbound HTTPS peer", () => {
       { endpoint: "https://peer.example:7443/path" }, { endpoint: "https://peer.example:7443/?q=1" },
       { clientKey: "" }, { ca: Buffer.alloc(0) }, { extra: true }, { expectedTransportRoleUri: "not-a-uri" }])
       expect(() => createTrustedPresentationPeerHttps({ ...transportConfig(), ...change })).toThrow();
+    for (const role of ["https://peer.example/role", "urn:example:role"])
+      expect(() => createTrustedPresentationPeerHttps({ ...transportConfig(), expectedTransportRoleUri: role })).not.toThrow();
+    for (const role of ["urn:role,other", "urn:role'other", 'urn:role"other', "urn:role\\other",
+      "urn:role other", "urn:role\tother", "urn:role\nother"])
+      expect(() => createTrustedPresentationPeerHttps({ ...transportConfig(), expectedTransportRoleUri: role })).toThrow();
     expect(() => createTrustedPresentationPeerHttps({ ...transportConfig(), endpoint: "https://[::1]:7443/" })).not.toThrow();
     const spy = vi.spyOn(https, "request");
     const peer = createTrustedPresentationPeerHttps(transportConfig());
@@ -536,12 +541,13 @@ describe("IR-05 outbound HTTPS peer", () => {
       const record: { url: string; options: any; body?: Buffer } = { url: String(url), options };
       requests.push(record);
       const req = new EventEmitter() as any;
-      req.setTimeout = () => req; req.destroy = () => {};
+      req.setTimeout = (ms: number) => { expect(ms).toBe(5_000); return req; }; req.destroy = () => {};
       req.end = (body?: Buffer) => {
         record.body = body;
         queueMicrotask(() => {
           const response = new EventEmitter() as any;
-          response.statusCode = 200; response.headers = { "content-type": "application/json; charset=utf-8" };
+          response.statusCode = 200; response.headers = { "content-type": "application/json; charset=utf-8",
+            ...(requests.length === 1 ? { "content-encoding": "identity" } : {}) };
           response.destroy = () => {}; callback(response);
           response.emit("data", Buffer.from('{"ok":true}')); response.emit("end");
         });
@@ -555,18 +561,43 @@ describe("IR-05 outbound HTTPS peer", () => {
     expect(requests.map(request => new URL(request.url).pathname)).toEqual([
       "/api/typed-action-presentations", `/api/typed-action-status/${id}`, `/api/typed-action-evidence/${id}`]);
     expect(requests.map(request => request.options.method)).toEqual(["POST", "GET", "GET"]);
-    expect(requests[0].options.headers["content-length"]).toBe(String(requests[0].body!.length));
+    expect(requests[0].body!.toString("utf8")).toBe(JSON.stringify({ hello: "é" }));
+    expect(requests[0].options.headers["content-length"]).toBe(String(Buffer.byteLength(JSON.stringify({ hello: "é" }), "utf8")));
     expect(requests[0].options.headers["content-type"]).toBe("application/json");
-    expect(requests.every(request => request.options.headers.accept === "application/json")).toBe(true);
+    expect(requests.slice(1).every(request => request.options.headers["content-type"] === undefined &&
+      request.options.headers["content-length"] === undefined)).toBe(true);
+    expect(requests.every(request => request.options.headers.accept === "application/json" &&
+      request.options.headers["accept-encoding"] === "identity")).toBe(true);
     expect(requests.every(request => request.options.agent === false && request.options.rejectUnauthorized === true &&
       request.options.minVersion === "TLSv1.3" && request.options.maxVersion === "TLSv1.3")).toBe(true);
+  });
+
+  it("rejects a gzip-encoded response even when its JSON body is valid", async () => {
+    const destroyed = vi.fn();
+    vi.spyOn(https, "request").mockImplementation((_url: any, _options: any, callback: any) => {
+      const req = new EventEmitter() as any;
+      req.setTimeout = (ms: number) => { expect(ms).toBe(5_000); return req; };
+      req.end = () => queueMicrotask(() => {
+        const response = new EventEmitter() as any;
+        response.statusCode = 200;
+        response.headers = { "content-type": "application/json", "content-encoding": "gzip" };
+        response.destroy = destroyed;
+        callback(response);
+        response.emit("data", Buffer.from('{"ok":true}'));
+        response.emit("end");
+      });
+      return req;
+    });
+    await expect(createTrustedPresentationPeerHttps(transportConfig()).status(randomUUID()))
+      .rejects.toThrow(/Peer response media type rejected/);
+    expect(destroyed).toHaveBeenCalledOnce();
   });
 
   it.each(["redirect", "non-2xx", "text", "gzip", "size", "utf8", "json", "error", "aborted", "close", "timeout"])(
     "rejects %s responses", async failure => {
       vi.spyOn(https, "request").mockImplementation((_url: any, _options: any, callback: any) => {
         const req = new EventEmitter() as any;
-        req.setTimeout = (_ms: number, handler: () => void) => { req.timeout = handler; return req; };
+        req.setTimeout = (ms: number, handler: () => void) => { expect(ms).toBe(5_000); req.timeout = handler; return req; };
         req.destroy = (error?: Error) => { if (error) queueMicrotask(() => req.emit("error", error)); };
         req.end = () => queueMicrotask(() => {
           if (failure === "error") { req.emit("error", new Error("offline")); return; }

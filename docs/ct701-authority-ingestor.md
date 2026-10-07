@@ -77,17 +77,23 @@ has exactly `endpoint`, `clientCertificate`, `clientKey`, optional `ca`,
 `expectedSpkiSha256`, and `expectedTransportRoleUri`. Credentials are nonempty
 strings or Buffers. The endpoint is an HTTPS root origin with explicit port 7443
 (IPv6 literals are supported). Only the presentation POST and status/evidence GET
-routes are sent. Requests use TLS 1.3 only, peer certificate validation, a fresh
-connection (`agent: false`), and JSON headers with byte-accurate POST length.
+routes are sent; lookup IDs are synchronously validated and URL-component encoded.
+Requests use TLS 1.3 only, peer certificate validation, a fresh connection
+(`agent: false`), and a 5000 ms request timeout. Every request sends
+`accept: application/json` and `accept-encoding: identity`; only POST sends
+`content-type: application/json` and the UTF-8 byte-accurate `content-length`.
 Normal hostname verification precedes the SHA-256 pin of the certificate's raw
 X509 SPKI. The legacy certificate SAN must exactly match the parsed X509 SAN;
 ambiguous, duplicated, or malformed SAN entries fail closed, and precisely one
-URI entry must match the configured transport role. Redirects and non-2xx,
-non-JSON or encoded, oversized, malformed UTF-8/JSON, incomplete, aborted,
-closed, and timed-out responses are rejected. The receipt still binds both
-`approvalRequestId` and `presentationHash`; transport success alone is not
-approval or execution authority. Stage 2B CT700 gateway, local-principal and
-Tailscale integration, live deployment, and key generation are not implemented.
+URI entry must match the configured transport role. The role accepts a generic
+URI scheme but rejects commas, quotes, backslashes and whitespace at construction.
+Redirects and non-2xx, non-JSON, non-identity-encoded (such as gzip), oversized,
+malformed UTF-8/JSON, incomplete, aborted, closed, and timed-out responses are
+rejected. An absent response `content-encoding` or `identity` is accepted.
+The receipt still binds both `approvalRequestId` and `presentationHash`;
+transport success alone is not approval or execution authority. Stage 2B CT700
+gateway, local-principal and Tailscale integration, live deployment, and key
+generation are not implemented.
 
 ## Authority ownership and locking contract
 

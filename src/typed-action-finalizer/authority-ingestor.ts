@@ -26,7 +26,7 @@ export function createTrustedPresentationPeerHttps(config: unknown): TrustedPres
       (values.ca !== undefined && !credential(values.ca)) ||
       typeof values.expectedSpkiSha256 !== "string" || !/^[a-f0-9]{64}$/.test(values.expectedSpkiSha256) ||
       typeof values.expectedTransportRoleUri !== "string" ||
-      !/^[A-Za-z][A-Za-z0-9+.-]*:[^\s"\\]+$/.test(values.expectedTransportRoleUri))
+      !/^[A-Za-z][A-Za-z0-9+.-]*:[^,\s"'\\]+$/.test(values.expectedTransportRoleUri))
     throw new Error("Invalid peer configuration");
   let endpoint: URL;
   try { endpoint = new URL(values.endpoint); } catch { throw new Error("Invalid peer endpoint"); }
@@ -63,7 +63,7 @@ export function createTrustedPresentationPeerHttps(config: unknown): TrustedPres
         ...(values.ca === undefined ? {} : { ca: values.ca as string | Buffer }),
         minVersion: "TLSv1.3", maxVersion: "TLSv1.3", rejectUnauthorized: true,
         agent: false, checkServerIdentity,
-        headers: { accept: "application/json", ...(payload === undefined ? {} : {
+        headers: { accept: "application/json", "accept-encoding": "identity", ...(payload === undefined ? {} : {
           "content-type": "application/json", "content-length": String(payload.length),
         }) },
       }, response => {
@@ -73,7 +73,9 @@ export function createTrustedPresentationPeerHttps(config: unknown): TrustedPres
         }
         const contentType = response.headers["content-type"];
         if (typeof contentType !== "string" || !/^application\/json(?:\s*;\s*charset\s*=\s*utf-8)?$/i.test(contentType) ||
-            response.headers["content-encoding"] !== undefined) { fail("Peer response media type rejected"); return; }
+            (response.headers["content-encoding"] !== undefined && response.headers["content-encoding"] !== "identity")) {
+          fail("Peer response media type rejected"); return;
+        }
         const length = response.headers["content-length"];
         if (length !== undefined && (typeof length !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(length) || Number(length) > 1_048_576)) {
           fail("Peer response length rejected"); return;
@@ -97,14 +99,14 @@ export function createTrustedPresentationPeerHttps(config: unknown): TrustedPres
         });
       });
       req.on("error", reject);
-      req.setTimeout(10_000, () => req.destroy(new Error("Peer request timed out")));
+      req.setTimeout(5_000, () => req.destroy(new Error("Peer request timed out")));
       req.end(payload);
     });
   };
   const routeFor = (id: string, kind: "status" | "evidence") => {
     // Validate before constructing a Promise or opening a connection.
     const valid = idSchema.parse(id);
-    return `/api/typed-action-${kind}/${valid}`;
+    return `/api/typed-action-${kind}/${encodeURIComponent(valid)}`;
   };
   return Object.freeze({
     registerPresentation: (input: TrustedTypedActionPresentation) =>
