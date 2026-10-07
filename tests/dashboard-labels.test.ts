@@ -1,5 +1,14 @@
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { stateLabel, taskStateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask } from "../src/dashboard/public/labels.js";
+
+it("parses the dashboard app with the current Node runtime", () => {
+  const appPath = fileURLToPath(new URL("../src/dashboard/public/app.js", import.meta.url));
+  const result = spawnSync(process.execPath, ["--check", appPath], { shell: false, encoding: "utf8" });
+  expect(result.error).toBeUndefined();
+  expect(result.status, result.stderr).toBe(0);
+});
 
 describe("dashboard display labels (API values remain unchanged)", () => {
   it("translates state, mode, actor, pipeline stage and status", () => {
