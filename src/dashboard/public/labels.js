@@ -193,3 +193,35 @@ export const boundedStatusRows = task => {
     { label: 'Authoritative DONE', value: safe.authoritative_done }
   ];
 };
+
+export const boundedBoardBucket = task => {
+  const item = task !== null && typeof task === 'object' && !Array.isArray(task) ? task : {};
+  const safe = normalizeBoundedTask(item);
+  if (safe.task_id === boundedUnknown || safe.state === boundedUnknown || item.authoritative_done !== false) return 3;
+  if (item.commit_state != null && !['NOT_PREPARED', 'PREPARED', 'COMMITTED'].includes(item.commit_state)) return 3;
+  if (item.local_commit != null && safe.local_commit === boundedUnknown) return 3;
+  if (item.commit_state === 'COMMITTED' && safe.local_commit === boundedUnknown) return 3;
+  if (item.commit_state !== 'COMMITTED' && safe.local_commit !== boundedUnknown) return 3;
+  if (item.state === 'ESCALATE') return 3;
+  if (item.state === 'RUNNING') return item.commit_state === 'COMMITTED' ? 3 : 0;
+  if (item.state === 'REVIEW_PENDING') return item.commit_state === 'COMMITTED' ? 3 : 1;
+  if (item.state === 'REVIEW_ACCEPTED') return item.commit_state === 'COMMITTED' ? 2 : 1;
+  return 3;
+};
+
+export const boundedTrackingRows = task => {
+  const safe = normalizeBoundedTask(task);
+  return [
+    { label: 'Task ID', value: safe.task_id },
+    { label: 'State', value: safe.state },
+    { label: 'Progress', value: safe.progress_mode },
+    { label: 'Revision', value: safe.latest_revision },
+    { label: 'Verification', value: safe.verification_present },
+    { label: 'Reviewer', value: safe.review_reviewer },
+    { label: 'Review result', value: safe.review_verdict },
+    { label: 'Semantic diagnostic', value: safe.latest_semantic_review_diagnostic_code },
+    { label: 'Commit state', value: safe.commit_state },
+    { label: 'Local commit', value: safe.local_commit },
+    { label: 'Authoritative DONE', value: safe.authoritative_done }
+  ];
+};

@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { stateLabel, taskStateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask, buildBoundedStartRequest, submitBoundedStart, createBoundedStartController, createBoundedStartSubmitHandler, boundedStatusRows } from "../src/dashboard/public/labels.js";
+import { stateLabel, taskStateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask, buildBoundedStartRequest, submitBoundedStart, createBoundedStartController, createBoundedStartSubmitHandler, boundedStatusRows, boundedBoardBucket, boundedTrackingRows } from "../src/dashboard/public/labels.js";
 
 it("parses the dashboard app with the current Node runtime", () => {
   const appPath = fileURLToPath(new URL("../src/dashboard/public/app.js", import.meta.url));
@@ -444,6 +444,67 @@ describe("bounded status rows", () => {
     expect(rows).toHaveLength(9);
     expect(rows.map(row => row.value)).toEqual(Array(9).fill("\u672a\u78ba\u8a8d"));
     expect(boundedStatusRows(null).map(row => row.value)).toEqual(Array(9).fill("\u672a\u78ba\u8a8d"));
+    expect(JSON.stringify(rows)).not.toContain("private");
+  });
+});
+
+ describe("bounded board classification and tracking rows", () => {
+  const task_id = `bounded-${"b".repeat(32)}`;
+  const local_commit = "a".repeat(40);
+  const base = { task_id, authoritative_done: false };
+
+  it("classifies processing, review waiting, local completion and attention", () => {
+    expect(boundedBoardBucket({ ...base, state: "RUNNING" })).toBe(0);
+    expect(boundedBoardBucket({ ...base, state: "REVIEW_PENDING" })).toBe(1);
+    expect(boundedBoardBucket({ ...base, state: "REVIEW_ACCEPTED", commit_state: "PREPARED" })).toBe(1);
+    expect(boundedBoardBucket({ ...base, state: "REVIEW_ACCEPTED", commit_state: "COMMITTED", local_commit })).toBe(2);
+    expect(boundedBoardBucket({ ...base, state: "ESCALATE" })).toBe(3);
+  });
+
+  it("fails closed on unknown identity, state, DONE or inconsistent commit evidence", () => {
+    const accepted = { ...base, state: "REVIEW_ACCEPTED", commit_state: "COMMITTED", local_commit };
+    for (const change of [
+      { task_id: "private" }, { state: "DONE" }, { authoritative_done: true },
+      { authoritative_done: undefined }, { authoritative_done: "false" },
+      { local_commit: "A".repeat(40) }, { local_commit: null },
+      { commit_state: "UNKNOWN" }
+    ]) expect(boundedBoardBucket({ ...accepted, ...change })).toBe(3);
+    expect(boundedBoardBucket({ ...base, state: "REVIEW_PENDING", commit_state: "COMMITTED", local_commit })).toBe(3);
+    expect(boundedBoardBucket({ ...base, state: "RUNNING", commit_state: "COMMITTED", local_commit })).toBe(3);
+    expect(boundedBoardBucket({ ...base, state: "REVIEW_ACCEPTED", commit_state: "PREPARED", local_commit })).toBe(3);
+    expect(boundedBoardBucket(null)).toBe(3);
+  });
+
+  it("returns fixed normalized lifecycle rows without private fields", () => {
+    const rows = boundedTrackingRows({ ...base, state: "REVIEW_ACCEPTED", progress_mode: "REVIEW_ACCEPTED",
+      latest_revision: 2, verification_present: true, review_reviewer: "chatgpt", review_verdict: "PASS",
+      latest_semantic_review_diagnostic_code: "SEMANTIC_REVIEW_TIMEOUT", commit_state: "COMMITTED", local_commit,
+      goal: "private goal", edit_paths: ["private path"], sessions: "private sessions",
+      execution_id: "private execution", provider: "private provider", model: "private model",
+      usage: "private usage", findings: "private findings", artifacts: "private artifacts",
+      acceptance_criteria: ["private criteria"], raw_diagnostics: "private diagnostics", evidence: "private evidence" });
+    expect(rows).toEqual([
+      { label: "Task ID", value: task_id }, { label: "State", value: "レビュー承認済み" },
+      { label: "Progress", value: "レビュー承認済み" }, { label: "Revision", value: "2" },
+      { label: "Verification", value: "あり" }, { label: "Reviewer", value: "chatgpt" },
+      { label: "Review result", value: "合格" },
+      { label: "Semantic diagnostic", value: "SEMANTIC_REVIEW_TIMEOUT" },
+      { label: "Commit state", value: "コミット済み" }, { label: "Local commit", value: local_commit },
+      { label: "Authoritative DONE", value: "なし" }
+    ]);
+    expect(JSON.stringify(rows)).not.toContain("private");
+  });
+
+  it("fails closed on malformed tracking values and never echoes untrusted data", () => {
+    const rows = boundedTrackingRows({ task_id: "private", state: "private", progress_mode: "private",
+      latest_revision: "private", verification_present: "private", review_reviewer: "private",
+      review_verdict: "private", latest_semantic_review_diagnostic_code: "private",
+      commit_state: "private", local_commit: "private", authoritative_done: "private",
+      raw_diagnostics: "private", evidence: "private" });
+    expect(rows.map(row => row.label)).toEqual(["Task ID", "State", "Progress", "Revision", "Verification",
+      "Reviewer", "Review result", "Semantic diagnostic", "Commit state", "Local commit", "Authoritative DONE"]);
+    expect(rows.map(row => row.value)).toEqual(Array(11).fill("未確認"));
+    expect(boundedTrackingRows(null).map(row => row.value)).toEqual(Array(11).fill("未確認"));
     expect(JSON.stringify(rows)).not.toContain("private");
   });
 });
