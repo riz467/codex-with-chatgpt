@@ -78,6 +78,10 @@ has exactly `endpoint`, `clientCertificate`, `clientKey`, optional `ca`,
 strings or Buffers. The endpoint is an HTTPS root origin with explicit port 7443
 (IPv6 literals are supported). Only the presentation POST and status/evidence GET
 routes are sent; lookup IDs are synchronously validated and URL-component encoded.
+The HTTPS transport adapter itself strictly validates each presentation's schema,
+computed hash and request/context binding before opening a network request. It
+POSTs only the parsed presentation; malformed, extra-field, hash-mismatched or
+binding-mismatched inputs fail closed even when the adapter is used directly.
 Requests use TLS 1.3 only, peer certificate validation, a fresh connection
 (`agent: false`), and a 5000 ms request timeout. Every request sends
 `accept: application/json` and `accept-encoding: identity`; only POST sends

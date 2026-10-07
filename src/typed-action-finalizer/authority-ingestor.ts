@@ -110,7 +110,7 @@ export function createTrustedPresentationPeerHttps(config: unknown): TrustedPres
   };
   return Object.freeze({
     registerPresentation: (input: TrustedTypedActionPresentation) =>
-      request("POST", "/api/typed-action-presentations", input),
+      request("POST", "/api/typed-action-presentations", parsePresentation(input)),
     status: (id: string) => request("GET", routeFor(id, "status")),
     evidence: (id: string) => request("GET", routeFor(id, "evidence")),
   });

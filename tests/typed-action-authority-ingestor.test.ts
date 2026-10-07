@@ -535,7 +535,26 @@ describe("IR-05 outbound HTTPS peer", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it("rejects invalid presentations in the HTTPS peer before opening a request", async () => {
+    const { presentation } = await peerFixture();
+    const { presentationHash: _hash, ...body } = presentation;
+    const wrongBinding = { ...body, request: { ...body.request, actionId: randomUUID() } };
+    const invalid = [
+      { ...presentation, request: null },
+      { ...presentation, extra: true },
+      { ...presentation, presentationHash: hash() },
+      { ...wrongBinding, presentationHash: presentationHash(wrongBinding) },
+    ];
+    const spy = vi.spyOn(https, "request").mockImplementation(() => { throw new Error("unexpected network request"); });
+    const peer = createTrustedPresentationPeerHttps(transportConfig());
+    for (const input of invalid) {
+      expect(() => peer.registerPresentation(input as any)).toThrow();
+      expect(spy).not.toHaveBeenCalled();
+    }
+  });
+
   it("uses only exact routes, JSON headers and byte length; accepts UTF-8 JSON charset", async () => {
+    const { presentation } = await peerFixture();
     const requests: { url: string; options: any; body?: Buffer }[] = [];
     vi.spyOn(https, "request").mockImplementation((url: any, options: any, callback: any) => {
       const record: { url: string; options: any; body?: Buffer } = { url: String(url), options };
@@ -555,14 +574,14 @@ describe("IR-05 outbound HTTPS peer", () => {
       return req;
     });
     const peer = createTrustedPresentationPeerHttps(transportConfig()), id = randomUUID();
-    expect(await peer.registerPresentation({ hello: "é" } as any)).toEqual({ ok: true });
+    expect(await peer.registerPresentation(presentation)).toEqual({ ok: true });
     expect(await peer.status(id)).toEqual({ ok: true });
     expect(await peer.evidence(id)).toEqual({ ok: true });
     expect(requests.map(request => new URL(request.url).pathname)).toEqual([
       "/api/typed-action-presentations", `/api/typed-action-status/${id}`, `/api/typed-action-evidence/${id}`]);
     expect(requests.map(request => request.options.method)).toEqual(["POST", "GET", "GET"]);
-    expect(requests[0].body!.toString("utf8")).toBe(JSON.stringify({ hello: "é" }));
-    expect(requests[0].options.headers["content-length"]).toBe(String(Buffer.byteLength(JSON.stringify({ hello: "é" }), "utf8")));
+    expect(requests[0].body!.toString("utf8")).toBe(JSON.stringify(presentation));
+    expect(requests[0].options.headers["content-length"]).toBe(String(Buffer.byteLength(JSON.stringify(presentation), "utf8")));
     expect(requests[0].options.headers["content-type"]).toBe("application/json");
     expect(requests.slice(1).every(request => request.options.headers["content-type"] === undefined &&
       request.options.headers["content-length"] === undefined)).toBe(true);
