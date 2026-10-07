@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { stateLabel, taskStateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask } from "../src/dashboard/public/labels.js";
+import { stateLabel, taskStateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask, buildBoundedStartRequest, submitBoundedStart, boundedStatusRows } from "../src/dashboard/public/labels.js";
 
 it("parses the dashboard app with the current Node runtime", () => {
   const appPath = fileURLToPath(new URL("../src/dashboard/public/app.js", import.meta.url));
@@ -76,7 +76,8 @@ describe("bounded dashboard task normalization", () => {
       task_id: valid.task_id, state: "\u5b9f\u884c\u4e2d", progress_mode: "実行中",
       execution_profile: "TypeScript ダッシュボード", stop_reason_present: "\u3042\u308a",
       contract_sha256: hash, edit_paths_count: "1", latest_revision: "1", manifest_sha256: hash,
-      verification_present: "\u306a\u3057", file_count: "2", worker: "opencode", review_verdict: "\u8981\u4fee\u6b63"
+      verification_present: "\u306a\u3057", file_count: "2", worker: "opencode", review_verdict: "\u8981\u4fee\u6b63",
+      semantic_diagnostic: unknown, commit_state: unknown, local_commit: unknown, authoritative_done: unknown
     });
     expect(JSON.stringify(safe)).not.toContain("secret");
     expect(normalizeBoundedTask({ ...valid, state: "REVIEW_PENDING", review_verdict: "PASS" })).toMatchObject({ state: "\u30ec\u30d3\u30e5\u30fc\u5f85\u3061", review_verdict: "\u5408\u683c" });
@@ -97,7 +98,7 @@ describe("bounded dashboard task normalization", () => {
       stop_reason_present: "true", contract_sha256: "A".repeat(64), edit_paths: "secret/path.ts",
       latest_revision: 0, manifest_sha256: "g".repeat(64), verification_present: null,
       file_count: -1, worker: "codex", review_verdict: "FAIL" });
-    expect(Object.values(safe)).toEqual(Array(13).fill(unknown));
+    expect(Object.values(safe)).toEqual(Array(17).fill(unknown));
     expect(normalizeBoundedTask({ ...valid, latest_revision: 1.5 }).latest_revision).toBe(unknown);
     expect(normalizeBoundedTask({ ...valid, latest_revision: null }).latest_revision).toBe(unknown);
     expect(normalizeBoundedTask(null).task_id).toBe(unknown);
@@ -105,5 +106,99 @@ describe("bounded dashboard task normalization", () => {
     expect(normalizeBoundedTask({ ...valid, execution_profile: null }).execution_profile).toBe(unknown);
     expect(normalizeBoundedTask({}).progress_mode).toBe(unknown);
     expect(normalizeBoundedTask({}).execution_profile).toBe(unknown);
+  });
+});
+
+describe("bounded start request", () => {
+  const repo = "codex-with-chatgpt";
+  const make = (r: unknown, goal: unknown, paths: unknown, criteria: unknown) =>
+    buildBoundedStartRequest(r, goal, paths, criteria);
+  it("normalizes only the four request fields", () => {
+    expect(make(repo, "  Fix labels  ", " src/a.ts\r\n\n tests/a.test.ts ", " verify \n test ")).toEqual({
+      repo, goal: "Fix labels", edit_paths: ["src/a.ts", "tests/a.test.ts"], acceptance_criteria: ["verify", "test"]
+    });
+    expect(make("codex-with-chatgpt-control-plane", "x", "a.ts", "y").repo).toBe("codex-with-chatgpt-control-plane");
+  });
+  it("rejects invalid repos, goals, paths and criteria", () => {
+    for (const r of ["other", " codex-with-chatgpt", null]) expect(() => make(r, "x", "a.ts", "ok")).toThrow();
+    for (const goal of [" ", "x".repeat(4001), null]) expect(() => make(repo, goal, "a.ts", "ok")).toThrow();
+    for (const paths of ["", "\n", "a\nb\nc\nd", "/a", "../a", "a/../b", "a/./b", "a//b", "a\\b", "C:/a", "a".repeat(241)]) {
+      expect(() => make(repo, "x", paths, "ok")).toThrow();
+    }
+    for (const criteria of ["", " \n ", "a\nb\nc\nd\ne\nf\ng", "x".repeat(501)]) {
+      expect(() => make(repo, "x", "a.ts", criteria)).toThrow();
+    }
+  });
+});
+
+describe("bounded start submission", () => {
+  const token = "a".repeat(64);
+  const task_id = `bounded-${"b".repeat(32)}`;
+  const request = { repo: "codex-with-chatgpt", goal: "x", edit_paths: ["a.ts"], acceptance_criteria: ["ok"] };
+  const session = (header: string | null, ok = true) => ({ ok, headers: { get: (name: string) => name === "X-Bounded-Start-CSRF" ? header : null } });
+  it("GETs the header token and POSTs precisely the request JSON", async () => {
+    const calls: unknown[][] = [];
+    const fetcher = async (...args: unknown[]) => {
+      calls.push(args);
+      return calls.length === 1 ? session(token) : { ok: true, json: async () => ({ task_id, secret: "private" }) };
+    };
+    expect(await submitBoundedStart(fetcher, request)).toEqual({ task_id });
+    expect(calls).toEqual([
+      ["/api/bounded/start-session", { method: "GET", credentials: "same-origin", cache: "no-store" }],
+      ["/api/bounded/start", { method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-Bounded-Start-CSRF": token }, body: JSON.stringify(request) }]
+    ]);
+  });
+  it("never uses a body token or POSTs without a valid header", async () => {
+    for (const header of [null, "A".repeat(64), "a".repeat(63)]) {
+      let calls = 0;
+      const fetcher = async () => { calls++; return { ...session(header), json: async () => ({ csrf_token: token }) }; };
+      await expect(submitBoundedStart(fetcher, request)).rejects.toThrow("Bounded start failed");
+      expect(calls).toBe(1);
+    }
+  });
+  it("turns every network, HTTP, JSON and task failure into the same generic error", async () => {
+    const privateError = new Error("private response detail");
+    const failures = [
+      async () => { throw privateError; },
+      async () => session(token, false),
+      async (...args: unknown[]) => args[0] === "/api/bounded/start-session" ? session(token) : { ok: false },
+      async (...args: unknown[]) => args[0] === "/api/bounded/start-session" ? session(token) : { ok: true, json: async () => { throw privateError; } },
+      async (...args: unknown[]) => args[0] === "/api/bounded/start-session" ? session(token) : { ok: true, json: async () => ({ task_id: "bounded-" + "A".repeat(32), secret: "private" }) }
+    ];
+    for (const fetcher of failures) {
+      try { await submitBoundedStart(fetcher, request); throw new Error("unexpected success"); }
+      catch (error) { expect(error).toEqual(new Error("Bounded start failed")); }
+    }
+  });
+});
+
+describe("bounded status rows", () => {
+  it("uses fixed labels and only normalized, allowlisted values", () => {
+    const id = `bounded-${"b".repeat(32)}`;
+    const rows = boundedStatusRows({ task_id: id, state: "RUNNING", progress_mode: "EXECUTION",
+      review_verdict: "PASS", semantic_diagnostic: "PASS", commit_state: "COMMITTED",
+      local_commit: "a".repeat(40), authoritative_done: false,
+      goal: "private goal", edit_paths: ["private/path"], sessions: "private sessions",
+      execution_id: "private execution", provider: "private provider", model: "private model",
+      usage: "private usage", findings: "private findings", artifacts: "private artifacts",
+      acceptance_criteria: ["private criteria"], evidence: "private evidence" });
+    expect(rows).toEqual([
+      { label: "Task ID", value: id }, { label: "State", value: "実行中" },
+      { label: "Progress", value: "実行中" }, { label: "Reviewer", value: "合格" },
+      { label: "Semantic diagnostic", value: "合格" },
+      { label: "Commit state", value: "コミット済み" },
+      { label: "Local commit", value: "a".repeat(40) },
+      { label: "Authoritative DONE", value: "なし" }
+    ]);
+    expect(JSON.stringify(rows)).not.toContain("private");
+  });
+  it("fails closed on unknown values and untrusted evidence", () => {
+    const rows = boundedStatusRows({ task_id: "private", state: "DONE", progress_mode: "private",
+      review_verdict: "private", semantic_diagnostic: "private", commit_state: "private",
+      local_commit: "private", authoritative_done: "true", raw_evidence: "private" });
+    expect(rows).toHaveLength(8);
+    expect(rows.map(row => row.value)).toEqual(Array(8).fill("\u672a\u78ba\u8a8d"));
+    expect(boundedStatusRows(null).map(row => row.value)).toEqual(Array(8).fill("\u672a\u78ba\u8a8d"));
   });
 });

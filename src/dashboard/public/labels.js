@@ -93,6 +93,64 @@ export const normalizeBoundedTask = task => {
     verification_present: boundedBoolean(item.verification_present),
     file_count: boundedCount(item.file_count),
     worker: item.worker === 'opencode' ? 'opencode' : boundedUnknown,
-    review_verdict: item.review_verdict === 'PASS' ? '\u5408\u683c' : item.review_verdict === 'NEEDS_WORK' ? '\u8981\u4fee\u6b63' : boundedUnknown
+    review_verdict: item.review_verdict === 'PASS' ? '\u5408\u683c' : item.review_verdict === 'NEEDS_WORK' ? '\u8981\u4fee\u6b63' : boundedUnknown,
+    semantic_diagnostic: item.semantic_diagnostic === 'PASS' ? '\u5408\u683c' : item.semantic_diagnostic === 'FAIL' ? '\u4e0d\u5408\u683c' : boundedUnknown,
+    commit_state: boundedLabel({ PENDING: '\u5f85\u6a5f', COMMITTED: '\u30b3\u30df\u30c3\u30c8\u6e08\u307f', FAILED: '\u5931\u6557' }, item.commit_state),
+    local_commit: typeof item.local_commit === 'string' && /^[a-f0-9]{40}$/.test(item.local_commit) ? item.local_commit : boundedUnknown,
+    authoritative_done: item.authoritative_done === true ? '\u3042\u308a' : item.authoritative_done === false ? '\u306a\u3057' : boundedUnknown
   };
+};
+
+const boundedStartError = () => new Error('Bounded start failed');
+const boundedLines = text => typeof text === 'string' ? text.split(/\r?\n/).map(line => line.trim()).filter(Boolean) : [];
+
+export const buildBoundedStartRequest = (repo, goalText, editPathText, criteriaText) => {
+  const goal = typeof goalText === 'string' ? goalText.trim() : '';
+  const edit_paths = boundedLines(editPathText);
+  const acceptance_criteria = boundedLines(criteriaText);
+  const validPath = path => path.length <= 240 && !path.includes('\\') &&
+    path.split('/').every(segment => segment !== '.' && segment !== '..' && /^[A-Za-z0-9_.-]+$/.test(segment));
+  if (!['codex-with-chatgpt', 'codex-with-chatgpt-control-plane'].includes(repo) ||
+      !goal || goal.length > 4000 || edit_paths.length < 1 || edit_paths.length > 3 ||
+      !edit_paths.every(validPath) || acceptance_criteria.length < 1 ||
+      acceptance_criteria.length > 6 || acceptance_criteria.some(value => value.length > 500)) {
+    throw boundedStartError();
+  }
+  return { repo, goal, edit_paths, acceptance_criteria };
+};
+
+export const submitBoundedStart = async (fetcher, request) => {
+  try {
+    const session = await fetcher('/api/bounded/start-session', {
+      method: 'GET', credentials: 'same-origin', cache: 'no-store'
+    });
+    if (!session.ok) throw boundedStartError();
+    const token = session.headers.get('X-Bounded-Start-CSRF');
+    if (typeof token !== 'string' || !/^[a-f0-9]{64}$/.test(token)) throw boundedStartError();
+    const response = await fetcher('/api/bounded/start', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Bounded-Start-CSRF': token },
+      body: JSON.stringify(request)
+    });
+    if (!response.ok) throw boundedStartError();
+    const result = await response.json();
+    if (typeof result?.task_id !== 'string' || !/^bounded-[a-f0-9]{32}$/.test(result.task_id)) throw boundedStartError();
+    return { task_id: result.task_id };
+  } catch {
+    throw boundedStartError();
+  }
+};
+
+export const boundedStatusRows = task => {
+  const safe = normalizeBoundedTask(task);
+  return [
+    { label: 'Task ID', value: safe.task_id },
+    { label: 'State', value: safe.state },
+    { label: 'Progress', value: safe.progress_mode },
+    { label: 'Reviewer', value: safe.review_verdict },
+    { label: 'Semantic diagnostic', value: safe.semantic_diagnostic },
+    { label: 'Commit state', value: safe.commit_state },
+    { label: 'Local commit', value: safe.local_commit },
+    { label: 'Authoritative DONE', value: safe.authoritative_done }
+  ];
 };
