@@ -91,7 +91,7 @@ describe("bounded authority-transport profile", () => {
   const alias = "codex-with-chatgpt-authority-transport";
   const profile = "tracked_typescript_authority_transport" as const;
   const allowed = [
-    "src/mcp/authority-ingestor.ts",
+    "src/typed-action-finalizer/authority-ingestor.ts",
     "tests/typed-action-authority-ingestor.test.ts",
     "docs/ct701-authority-ingestor.md",
   ];
@@ -120,7 +120,7 @@ describe("bounded authority-transport profile", () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "bounded-authority-")); roots.push(root);
       const repo = path.join(root, "repo");
       const adjacent = [
-        "src/mcp/authority-ingestor-helper.ts",
+        "src/typed-action-finalizer/authority-ingestor-helper.ts",
         "tests/typed-action-authority-ingestor-extra.test.ts",
         "docs/ct701-authority-ingestor-extra.md",
       ];

@@ -77,7 +77,7 @@ const pathCheck = (repo: string, name: string) => {
 const profilePathAllowed = (profile: ExecutionProfile, name: string) => {
   if (profile === "tracked_utf8_text") return true;
   if (profile === "tracked_typescript_authority_transport") {
-    return name === "src/mcp/authority-ingestor.ts" ||
+    return name === "src/typed-action-finalizer/authority-ingestor.ts" ||
       name === "tests/typed-action-authority-ingestor.test.ts" ||
       name === "docs/ct701-authority-ingestor.md";
   }
