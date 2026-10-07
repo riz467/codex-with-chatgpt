@@ -50,6 +50,8 @@ type Ledger = { version: 2; task_id: string; contract: Contract; contract_sha256
   codex_calls: 0; codex_usage: null; elapsed_ms: number | null; worker_time_ms: number };
 const git = (repo: string, ...args: string[]) => execFileSync("git", ["-C", repo, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", ...args],
   { encoding: "utf8", env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }, timeout: 10000 }).trim();
+const gitPatch = (repo: string) => execFileSync("git", ["-C", repo, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "diff", "--binary", "HEAD"],
+  { env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }, timeout: 10000 });
 const rawBlobMatchesHead = (repo: string, name: string, file: string) => {
   if (git(repo, "hash-object", "--no-filters", "--", file) === git(repo, "rev-parse", `HEAD:${name}`)) return true;
   const eol = git(repo, "ls-files", "--eol", "-z", "--", name);
@@ -84,7 +86,7 @@ const record = (dir: string, ledger: Ledger) => {
   const file = safePath(dir, "task.json"), temp = `${file}.${randomUUID()}.tmp`;
   fs.writeFileSync(temp, json(ledger), { flag: "wx" }); fs.renameSync(temp, file);
 };
-const store = (dir: string, name: string, content: string) => { const file = safePath(dir, name);
+const store = (dir: string, name: string, content: Buffer | string) => { const file = safePath(dir, name);
   fs.writeFileSync(file, content, { flag: "wx" }); return { name, sha256: sha(fs.readFileSync(file)), size: fs.statSync(file).size }; };
 const parse = (value: string, contract: Contract): Edit[] => {
   let proposal: unknown;
@@ -494,8 +496,8 @@ export class BoundedTasks {
         current: task.contract.edit_paths.map(p => { const bytes = fs.readFileSync(pathCheck(repo, p));
           return { path: p, sha256: sha(bytes), text: text(bytes) }; }) };
       if (revision === 1 && input.current.some(row => task.baseline[row.path] !== row.sha256)) fail("SCOPE_CHANGED");
-      if (revision > 1 && git(repo, "diff", "HEAD", "--binary") + "\n" !==
-          fs.readFileSync(safePath(dir, `revision-${revision - 1}-diff.patch`), "utf8")) fail("SCOPE_CHANGED");
+      if (revision > 1 && !gitPatch(repo).equals(
+          fs.readFileSync(safePath(dir, `revision-${revision - 1}-diff.patch`)))) fail("SCOPE_CHANGED");
       const promptInput = { ...input, current: input.current.map(row => ({
         path: row.path, sha256: row.sha256, ...numberedText(row.text),
       })) };
@@ -549,8 +551,8 @@ export class BoundedTasks {
       }
       if (git(repo, "rev-parse", "HEAD") !== task.baseline_head ||
           input.current.some(row => sha(fs.readFileSync(pathCheck(repo, row.path))) !== row.sha256) ||
-          (revision > 1 && git(repo, "diff", "HEAD", "--binary") + "\n" !==
-            fs.readFileSync(safePath(dir, `revision-${revision - 1}-diff.patch`), "utf8")) ||
+          (revision > 1 && !gitPatch(repo).equals(
+            fs.readFileSync(safePath(dir, `revision-${revision - 1}-diff.patch`)))) ||
           updated.some(u => text(fs.readFileSync(u.file)) !== u.before)) fail("SCOPE_CHANGED");
       const files = [];
       const prefix = `revision-${revision}`;
@@ -560,12 +562,12 @@ export class BoundedTasks {
       const changed = git(repo, "diff", "HEAD", "--name-only").split("\n").filter(Boolean);
       if (!changed.length || changed.some(p => !task.contract.edit_paths.includes(p)) ||
           updated.some(u => text(fs.readFileSync(u.file)) !== u.after) || git(repo, "rev-parse", "HEAD") !== task.baseline_head) fail("VERIFY_FAILED");
-      const reviewedDiff = git(repo, "diff", "HEAD", "--binary") + "\n";
+      const reviewedDiff = gitPatch(repo);
       const verification = this.verifier(repo, task.contract.execution_profile, changed,
         Math.max(1000, task.contract.timeout_ms - task.worker_time_ms));
       if (verification.profile !== task.contract.execution_profile || verification.passed !== true ||
           verification.paths.join("\n") !== changed.join("\n") ||
-          git(repo, "diff", "HEAD", "--binary") + "\n" !== reviewedDiff ||
+          !gitPatch(repo).equals(reviewedDiff) ||
           git(repo, "ls-files", "--others", "--exclude-standard").split("\n").filter(Boolean).length ||
           updated.some(u => text(fs.readFileSync(u.file)) !== u.after)) fail("VERIFY_FAILED");
       files.push(store(dir, `${prefix}-diff.patch`, reviewedDiff));
@@ -615,13 +617,13 @@ export class BoundedTasks {
     if (fs.readFileSync(safePath(this.dir(id), `revision-${rev.revision}-review.json`), "utf8") !== json(rev.review)) fail("REVIEW_RECORD_MISMATCH");
     this.artifacts(id, rev.revision); // rehash every submitted artifact
     const repo = this.repos[task.contract.repo];
-    const diff = fs.readFileSync(safePath(this.dir(id), `revision-${rev.revision}-diff.patch`), "utf8");
+    const diff = fs.readFileSync(safePath(this.dir(id), `revision-${rev.revision}-diff.patch`));
     if (git(repo, "rev-parse", "HEAD") !== task.baseline_head ||
-        git(repo, "diff", "HEAD", "--binary") + "\n" !== diff ||
+        !gitPatch(repo).equals(diff) ||
         git(repo, "ls-files", "--others", "--exclude-standard").split("\n").filter(Boolean).length) fail("REVIEWED_DIFF_CHANGED");
     const edits = parse(fs.readFileSync(safePath(this.dir(id), `revision-${rev.revision}-proposal.json`), "utf8"), task.contract);
     return { task_id: id, revision: rev.revision, contract_sha256: task.contract_sha256,
-      manifest_sha256: rev.manifest_sha256, diff_sha256: sha(Buffer.from(diff, "utf8")),
+      manifest_sha256: rev.manifest_sha256, diff_sha256: sha(diff),
       summary: edits.map(e => isRangeEdit(e)
         ? `${e.path}: lines ${e.start_line}+${e.delete_count} → ${e.new_text.slice(0, 80)}`
         : `${e.path}: ${e.old_text.slice(0, 80)} → ${e.new_text.slice(0, 80)}`).join("; ").slice(0, 500),
@@ -664,7 +666,7 @@ export class BoundedTasks {
     this.artifacts(review.task_id, rev.revision);
     const repo = this.repos[task.contract.repo];
     if (git(repo, "rev-parse", "HEAD") !== task.baseline_head ||
-        git(repo, "diff", "HEAD", "--binary") + "\n" !== fs.readFileSync(safePath(this.dir(review.task_id), `revision-${rev.revision}-diff.patch`), "utf8")) fail("REVIEWED_DIFF_CHANGED");
+        !gitPatch(repo).equals(fs.readFileSync(safePath(this.dir(review.task_id), `revision-${rev.revision}-diff.patch`)))) fail("REVIEWED_DIFF_CHANGED");
     if (rev.review?.review_id === review.review_id && json(rev.review) === json(review)) return { state: task.state, duplicate: true };
     if (task.state !== "REVIEW_PENDING") fail("REVIEW_BINDING_INVALID");
     rev.review = structuredClone(review);

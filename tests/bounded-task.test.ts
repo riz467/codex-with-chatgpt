@@ -142,6 +142,44 @@ describe("bounded OpenCode contract and review", () => {
     expect(tasks.status(started.task_id).revisions.map(r => r.review?.verdict)).toEqual(["NEEDS_WORK", "PASS"]);
     await expect(tasks.execute(started.task_id)).rejects.toThrow();
   });
+  it("preserves trailing blank Git context bytes across review and a local commit", async () => {
+    const f = fixture(), store = path.join(f.root, "store");
+    const file = path.join(f.repo, "README.md");
+    fs.writeFileSync(file, "Old text.\nssh delete publish are words.\n\n\n");
+    execFileSync("git", ["-C", f.repo, "add", "README.md"]);
+    execFileSync("git", ["-C", f.repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "blank context"]);
+    const tasks = new BoundedTasks({ fixture: f.repo }, store, mock);
+    const started = tasks.start(f.contract);
+    const first = await tasks.execute(started.task_id);
+    const rawPatch = () => execFileSync("git", ["-C", f.repo, "diff", "--binary", "HEAD"]);
+    const artifact = (revision: number) => fs.readFileSync(path.join(store, started.task_id, `revision-${revision}-diff.patch`));
+    expect(rawPatch().subarray(-4).toString()).toBe(" \n \n");
+    expect(artifact(1).equals(rawPatch())).toBe(true);
+    expect(artifact(1).equals(Buffer.from(rawPatch().toString().trim() + "\n"))).toBe(false);
+    expect(tasks.submitReview(review(started.task_id, 1, started.contract_sha256, first.manifest_sha256, "NEEDS_WORK")).next_revision).toBe(2);
+    const second = await tasks.execute(started.task_id);
+    expect(artifact(2).equals(rawPatch())).toBe(true);
+    const reviewedBytes = fs.readFileSync(file);
+    fs.writeFileSync(file, "Revised draft.\nssh delete publish are words.\n\n");
+    expect(() => tasks.submitReview(review(started.task_id, 2, started.contract_sha256, second.manifest_sha256, "PASS")))
+      .toThrow("REVIEWED_DIFF_CHANGED");
+    fs.writeFileSync(file, reviewedBytes);
+    expect(rawPatch().equals(artifact(2))).toBe(true);
+    expect(tasks.submitReview(review(started.task_id, 2, started.contract_sha256, second.manifest_sha256, "PASS")).state).toBe("REVIEW_ACCEPTED");
+    const reviewedHash = createHash("sha256").update(artifact(2)).digest("hex");
+    expect(tasks.localCommitSnapshot(started.task_id).diff_sha256).toBe(reviewedHash);
+    expect(tasks.acceptedSnapshot(started.task_id).diff_sha256).toBe(reviewedHash);
+    const actions = await import("../src/mcp/typed-actions.js");
+    const prepareBoundedCommit = (actions as unknown as { prepareBoundedCommit: (tasks: BoundedTasks, taskId: string) => Promise<{ state: string }> }).prepareBoundedCommit;
+    const commitBoundedPatch = (actions as unknown as { commitBoundedPatch: (tasks: BoundedTasks, prepared: { state: string }) => Promise<{ state: string }> }).commitBoundedPatch;
+    const prepared = await prepareBoundedCommit(tasks, started.task_id);
+    expect(prepared.state).toBe("PREPARED");
+    expect(rawPatch().equals(artifact(2))).toBe(true);
+    const committed = await commitBoundedPatch(tasks, prepared);
+    expect(committed.state).toBe("COMMITTED");
+    const committedPatch = execFileSync("git", ["-C", f.repo, "show", "--format=", "--binary", "HEAD"]);
+    expect(committedPatch.equals(artifact(2))).toBe(true);
+  });
   it("recovers waiting state after restart and rejects modified reviewed diff", async () => {
     const f = fixture(), store = path.join(f.root, "store"), tasks = new BoundedTasks({ fixture: f.repo }, store, mock);
     const started = tasks.start(f.contract), done = await tasks.execute(started.task_id);
