@@ -440,7 +440,11 @@ export class BoundedTasks {
     try {
       fs.writeFileSync(safePath(lock, "owner.txt"), id, { flag: "wx" });
       if (git(repo, "status", "--porcelain=v1", "-uall")) fail("DIRTY_REPO");
-      const baseline = Object.fromEntries(contract.edit_paths.map(p => [p, sha(fs.readFileSync(pathCheck(repo, p)))]));
+      const baseline = Object.fromEntries(contract.edit_paths.map(p => {
+        const file = pathCheck(repo, p);
+        if (git(repo, "hash-object", "--no-filters", "--", file) !== git(repo, "rev-parse", `HEAD:${p}`)) fail("DIRTY_REPO");
+        return [p, sha(fs.readFileSync(file))];
+      }));
       fs.mkdirSync(this.root, { recursive: true });
       fs.mkdirSync(this.dir(id));
       const savedContract = canonicalContract(contract);

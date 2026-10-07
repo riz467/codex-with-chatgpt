@@ -170,6 +170,23 @@ describe("bounded OpenCode contract and review", () => {
     fs.writeFileSync(ledger, saved);
     expect(tasks.artifacts(started.task_id, 1).manifest_sha256).toBe(done.manifest_sha256);
   });
+  it("rejects a status-clean scoped worktree change hidden by the index", () => {
+    const f = fixture(), file = path.join(f.repo, "README.md");
+    const git = (...args: string[]) => execFileSync("git", ["-C", f.repo, ...args], { encoding: "utf8" }).trim();
+    const tasks = new BoundedTasks({ fixture: f.repo }, path.join(f.root, "store"), mock);
+    const original = fs.readFileSync(file);
+    git("update-index", "--assume-unchanged", "README.md");
+    try {
+      fs.writeFileSync(file, "Changed bytes.\nssh delete publish are words.\n");
+      expect(git("status", "--porcelain=v1", "-uall")).toBe("");
+      expect(git("hash-object", "--no-filters", "--", file)).not.toBe(git("rev-parse", "HEAD:README.md"));
+      expect(() => tasks.start(f.contract)).toThrow("DIRTY_REPO");
+    } finally {
+      fs.writeFileSync(file, original);
+      git("update-index", "--no-assume-unchanged", "README.md");
+    }
+    expect(tasks.start(f.contract).task_id).toMatch(/^bounded-/);
+  });
   it("escalates when fixed verification cannot observe the tracked change", async () => {
     const f = fixture(), tasks = new BoundedTasks({ fixture: f.repo }, path.join(f.root, "store"), mock);
     const started = tasks.start(f.contract);
