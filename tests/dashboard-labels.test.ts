@@ -635,6 +635,7 @@ describe("bounded board and tracking source-slice rendering", () => {
       expect(JSON.stringify(rows())).not.toContain("private");
     }
     renderTasks([]);
+    expect(dom.$("bounded-opencode-summary")!.textContent).toBe("Tasks (0)");
     expect(dom.$("bounded-tracking-fields")!.children).toHaveLength(1);
     expect(dom.$("bounded-tracking-fields")!.children[0].tag).toBe("p");
     expect(dom.$("bounded-tracking-fields")!.children[0].textContent).toBe("表示できるタスクはありません");
