@@ -93,9 +93,10 @@ export const normalizeBoundedTask = task => {
     verification_present: boundedBoolean(item.verification_present),
     file_count: boundedCount(item.file_count),
     worker: item.worker === 'opencode' ? 'opencode' : boundedUnknown,
+    review_reviewer: boundedLabel({ chatgpt: 'chatgpt', 'opencode-semantic': 'opencode-semantic' }, item.review_reviewer),
     review_verdict: item.review_verdict === 'PASS' ? '\u5408\u683c' : item.review_verdict === 'NEEDS_WORK' ? '\u8981\u4fee\u6b63' : boundedUnknown,
-    semantic_diagnostic: item.semantic_diagnostic === 'PASS' ? '\u5408\u683c' : item.semantic_diagnostic === 'FAIL' ? '\u4e0d\u5408\u683c' : boundedUnknown,
-    commit_state: boundedLabel({ PENDING: '\u5f85\u6a5f', COMMITTED: '\u30b3\u30df\u30c3\u30c8\u6e08\u307f', FAILED: '\u5931\u6557' }, item.commit_state),
+    latest_semantic_review_diagnostic_code: boundedLabel({ SEMANTIC_REVIEW_FAILED: 'SEMANTIC_REVIEW_FAILED', SEMANTIC_REVIEW_TIMEOUT: 'SEMANTIC_REVIEW_TIMEOUT', SEMANTIC_REVIEW_INVALID: 'SEMANTIC_REVIEW_INVALID' }, item.latest_semantic_review_diagnostic_code),
+    commit_state: boundedLabel({ NOT_PREPARED: '\u672a\u6e96\u5099', PREPARED: '\u6e96\u5099\u6e08\u307f', COMMITTED: '\u30b3\u30df\u30c3\u30c8\u6e08\u307f' }, item.commit_state),
     local_commit: typeof item.local_commit === 'string' && /^[a-f0-9]{40}$/.test(item.local_commit) ? item.local_commit : boundedUnknown,
     authoritative_done: item.authoritative_done === true ? '\u3042\u308a' : item.authoritative_done === false ? '\u306a\u3057' : boundedUnknown
   };
@@ -108,10 +109,10 @@ export const buildBoundedStartRequest = (repo, goalText, editPathText, criteriaT
   const goal = typeof goalText === 'string' ? goalText.trim() : '';
   const edit_paths = boundedLines(editPathText);
   const acceptance_criteria = boundedLines(criteriaText);
-  const validPath = path => path.length <= 240 && !path.includes('\\') &&
-    path.split('/').every(segment => segment !== '.' && segment !== '..' && /^[A-Za-z0-9_.-]+$/.test(segment));
+  const validPath = path => path.length >= 1 && path.length <= 240 && !/[\\:\x00-\x1f\x7f]/.test(path) &&
+    !path.startsWith('/') && path.split('/').every(segment => segment.length > 0 && !segment.startsWith('.'));
   if (!['codex-with-chatgpt', 'codex-with-chatgpt-control-plane'].includes(repo) ||
-      !goal || goal.length > 4000 || edit_paths.length < 1 || edit_paths.length > 3 ||
+      !goal || goal.length > 2000 || edit_paths.length < 1 || edit_paths.length > 3 ||
       !edit_paths.every(validPath) || acceptance_criteria.length < 1 ||
       acceptance_criteria.length > 6 || acceptance_criteria.some(value => value.length > 500)) {
     throw boundedStartError();
@@ -147,8 +148,9 @@ export const boundedStatusRows = task => {
     { label: 'Task ID', value: safe.task_id },
     { label: 'State', value: safe.state },
     { label: 'Progress', value: safe.progress_mode },
-    { label: 'Reviewer', value: safe.review_verdict },
-    { label: 'Semantic diagnostic', value: safe.semantic_diagnostic },
+    { label: 'Reviewer', value: safe.review_reviewer },
+    { label: 'Review result', value: safe.review_verdict },
+    { label: 'Semantic diagnostic', value: safe.latest_semantic_review_diagnostic_code },
     { label: 'Commit state', value: safe.commit_state },
     { label: 'Local commit', value: safe.local_commit },
     { label: 'Authoritative DONE', value: safe.authoritative_done }

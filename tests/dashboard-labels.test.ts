@@ -76,13 +76,38 @@ describe("bounded dashboard task normalization", () => {
       task_id: valid.task_id, state: "\u5b9f\u884c\u4e2d", progress_mode: "実行中",
       execution_profile: "TypeScript ダッシュボード", stop_reason_present: "\u3042\u308a",
       contract_sha256: hash, edit_paths_count: "1", latest_revision: "1", manifest_sha256: hash,
-      verification_present: "\u306a\u3057", file_count: "2", worker: "opencode", review_verdict: "\u8981\u4fee\u6b63",
-      semantic_diagnostic: unknown, commit_state: unknown, local_commit: unknown, authoritative_done: unknown
+      verification_present: "\u306a\u3057", file_count: "2", worker: "opencode", review_reviewer: unknown,
+      review_verdict: "\u8981\u4fee\u6b63", latest_semantic_review_diagnostic_code: unknown,
+      commit_state: unknown, local_commit: unknown, authoritative_done: unknown
     });
     expect(JSON.stringify(safe)).not.toContain("secret");
     expect(normalizeBoundedTask({ ...valid, state: "REVIEW_PENDING", review_verdict: "PASS" })).toMatchObject({ state: "\u30ec\u30d3\u30e5\u30fc\u5f85\u3061", review_verdict: "\u5408\u683c" });
     expect(normalizeBoundedTask({ ...valid, state: "REVIEW_ACCEPTED" }).state).toBe("\u30ec\u30d3\u30e5\u30fc\u627f\u8a8d\u6e08\u307f");
     expect(normalizeBoundedTask({ ...valid, state: "ESCALATE" }).state).toBe("\u8981\u78ba\u8a8d");
+  });
+  it("allowlists reviewers, semantic diagnostic codes and commit states", () => {
+    for (const reviewer of ["chatgpt", "opencode-semantic"]) {
+      expect(normalizeBoundedTask({ ...valid, review_reviewer: reviewer }).review_reviewer).toBe(reviewer);
+    }
+    for (const code of ["SEMANTIC_REVIEW_FAILED", "SEMANTIC_REVIEW_TIMEOUT", "SEMANTIC_REVIEW_INVALID"]) {
+      expect(normalizeBoundedTask({ ...valid, latest_semantic_review_diagnostic_code: code }).latest_semantic_review_diagnostic_code).toBe(code);
+    }
+    for (const [state, label] of Object.entries({ NOT_PREPARED: "未準備", PREPARED: "準備済み", COMMITTED: "コミット済み" })) {
+      expect(normalizeBoundedTask({ ...valid, commit_state: state }).commit_state).toBe(label);
+    }
+    for (const reviewer of ["CHATGPT", "codex", null]) {
+      expect(normalizeBoundedTask({ ...valid, review_reviewer: reviewer }).review_reviewer).toBe(unknown);
+    }
+    for (const code of ["PASS", "FAIL", "SEMANTIC_REVIEW_PASSED", null]) {
+      expect(normalizeBoundedTask({ ...valid, latest_semantic_review_diagnostic_code: code }).latest_semantic_review_diagnostic_code).toBe(unknown);
+    }
+    for (const state of ["PENDING", "FAILED", "prepared", null]) {
+      expect(normalizeBoundedTask({ ...valid, commit_state: state }).commit_state).toBe(unknown);
+    }
+    expect(normalizeBoundedTask({ ...valid, local_commit: "a".repeat(40), authoritative_done: true }))
+      .toMatchObject({ local_commit: "a".repeat(40), authoritative_done: "あり" });
+    expect(normalizeBoundedTask({ ...valid, local_commit: "A".repeat(40), authoritative_done: "true" }))
+      .toMatchObject({ local_commit: unknown, authoritative_done: unknown });
   });
   it("maps each safe progress mode and execution profile", () => {
     for (const [mode, label] of Object.entries({ AUTO_REVISION: "自動修正中", REVIEW_PENDING: "レビュー待ち",
@@ -97,8 +122,10 @@ describe("bounded dashboard task normalization", () => {
       progress_mode: "FUTURE_MODE", execution_profile: "untracked_dashboard",
       stop_reason_present: "true", contract_sha256: "A".repeat(64), edit_paths: "secret/path.ts",
       latest_revision: 0, manifest_sha256: "g".repeat(64), verification_present: null,
-      file_count: -1, worker: "codex", review_verdict: "FAIL" });
-    expect(Object.values(safe)).toEqual(Array(17).fill(unknown));
+      file_count: -1, worker: "codex", review_reviewer: "private", review_verdict: "FAIL",
+      latest_semantic_review_diagnostic_code: "private", commit_state: "PENDING",
+      local_commit: "A".repeat(40), authoritative_done: "true" });
+    expect(Object.values(safe)).toEqual(Array(18).fill(unknown));
     expect(normalizeBoundedTask({ ...valid, latest_revision: 1.5 }).latest_revision).toBe(unknown);
     expect(normalizeBoundedTask({ ...valid, latest_revision: null }).latest_revision).toBe(unknown);
     expect(normalizeBoundedTask(null).task_id).toBe(unknown);
@@ -118,11 +145,13 @@ describe("bounded start request", () => {
       repo, goal: "Fix labels", edit_paths: ["src/a.ts", "tests/a.test.ts"], acceptance_criteria: ["verify", "test"]
     });
     expect(make("codex-with-chatgpt-control-plane", "x", "a.ts", "y").repo).toBe("codex-with-chatgpt-control-plane");
+    expect(make(repo, "x".repeat(2000), "a".repeat(240), "ok").goal).toHaveLength(2000);
+    expect(make(repo, "x", "folder/with spaces.ts", "ok").edit_paths).toEqual(["folder/with spaces.ts"]);
   });
   it("rejects invalid repos, goals, paths and criteria", () => {
     for (const r of ["other", " codex-with-chatgpt", null]) expect(() => make(r, "x", "a.ts", "ok")).toThrow();
-    for (const goal of [" ", "x".repeat(4001), null]) expect(() => make(repo, goal, "a.ts", "ok")).toThrow();
-    for (const paths of ["", "\n", "a\nb\nc\nd", "/a", "../a", "a/../b", "a/./b", "a//b", "a\\b", "C:/a", "a".repeat(241)]) {
+    for (const goal of [" ", "x".repeat(2001), null]) expect(() => make(repo, goal, "a.ts", "ok")).toThrow();
+    for (const paths of ["", "\n", "a\nb\nc\nd", "/a", "../a", "a/../b", "a/./b", "a//b", "a/", ".hidden", "a/.hidden", "a\\b", "C:/a", "a:b", "a\tb", "a\u0000b", "a\u007fb", "a".repeat(241)]) {
       expect(() => make(repo, "x", paths, "ok")).toThrow();
     }
     for (const criteria of ["", " \n ", "a\nb\nc\nd\ne\nf\ng", "x".repeat(501)]) {
@@ -177,7 +206,8 @@ describe("bounded status rows", () => {
   it("uses fixed labels and only normalized, allowlisted values", () => {
     const id = `bounded-${"b".repeat(32)}`;
     const rows = boundedStatusRows({ task_id: id, state: "RUNNING", progress_mode: "EXECUTION",
-      review_verdict: "PASS", semantic_diagnostic: "PASS", commit_state: "COMMITTED",
+      review_reviewer: "opencode-semantic", review_verdict: "PASS",
+      latest_semantic_review_diagnostic_code: "SEMANTIC_REVIEW_TIMEOUT", commit_state: "COMMITTED",
       local_commit: "a".repeat(40), authoritative_done: false,
       goal: "private goal", edit_paths: ["private/path"], sessions: "private sessions",
       execution_id: "private execution", provider: "private provider", model: "private model",
@@ -185,20 +215,24 @@ describe("bounded status rows", () => {
       acceptance_criteria: ["private criteria"], evidence: "private evidence" });
     expect(rows).toEqual([
       { label: "Task ID", value: id }, { label: "State", value: "実行中" },
-      { label: "Progress", value: "実行中" }, { label: "Reviewer", value: "合格" },
-      { label: "Semantic diagnostic", value: "合格" },
+      { label: "Progress", value: "実行中" }, { label: "Reviewer", value: "opencode-semantic" },
+      { label: "Review result", value: "合格" },
+      { label: "Semantic diagnostic", value: "SEMANTIC_REVIEW_TIMEOUT" },
       { label: "Commit state", value: "コミット済み" },
       { label: "Local commit", value: "a".repeat(40) },
       { label: "Authoritative DONE", value: "なし" }
     ]);
+    expect(rows).toHaveLength(9);
     expect(JSON.stringify(rows)).not.toContain("private");
   });
   it("fails closed on unknown values and untrusted evidence", () => {
     const rows = boundedStatusRows({ task_id: "private", state: "DONE", progress_mode: "private",
-      review_verdict: "private", semantic_diagnostic: "private", commit_state: "private",
-      local_commit: "private", authoritative_done: "true", raw_evidence: "private" });
-    expect(rows).toHaveLength(8);
-    expect(rows.map(row => row.value)).toEqual(Array(8).fill("\u672a\u78ba\u8a8d"));
-    expect(boundedStatusRows(null).map(row => row.value)).toEqual(Array(8).fill("\u672a\u78ba\u8a8d"));
+      review_reviewer: "private", review_verdict: "private",
+      latest_semantic_review_diagnostic_code: "private", semantic_diagnostic: "PASS",
+      commit_state: "private", local_commit: "private", authoritative_done: "true", raw_evidence: "private" });
+    expect(rows).toHaveLength(9);
+    expect(rows.map(row => row.value)).toEqual(Array(9).fill("\u672a\u78ba\u8a8d"));
+    expect(boundedStatusRows(null).map(row => row.value)).toEqual(Array(9).fill("\u672a\u78ba\u8a8d"));
+    expect(JSON.stringify(rows)).not.toContain("private");
   });
 });
