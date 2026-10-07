@@ -35,10 +35,13 @@ const canonicalContract = (c: Contract): Contract => ({ repo: c.repo, goal: c.go
   max_revisions: c.max_revisions, timeout_ms: c.timeout_ms });
 type Revision = { revision: number; execution_id: string; input_sha256: string; proposal_sha256: string;
   manifest_sha256: string; worker: Omit<WorkerResult, "output">; verify: VerificationResult;
-  files: { name: string; sha256: string; size: number }[]; review?: Review };
+  files: { name: string; sha256: string; size: number }[]; review?: Review;
+  semantic_review_diagnostic?: SemanticReviewDiagnostic };
 export type Review = { review_id: string; task_id: string; revision: number; contract_sha256: string;
   manifest_sha256: string; reviewer: "chatgpt" | "opencode-semantic"; verdict: "PASS" | "NEEDS_WORK";
   findings: string[] };
+export type SemanticReviewDiagnostic = { task_id: string; revision: number; manifest_sha256: string;
+  phase: "SEMANTIC_REVIEW"; error_code: "SEMANTIC_REVIEW_FAILED" | "SEMANTIC_REVIEW_TIMEOUT" | "SEMANTIC_REVIEW_INVALID" };
 export type WorkerDiagnostic = { phase: string; error_code: string; session_id: string | null };
 type Ledger = { version: 2; task_id: string; contract: Contract; contract_sha256: string; baseline_head: string;
   baseline: Record<string, string>; state: "RUNNING" | "REVIEW_PENDING" | "REVIEW_ACCEPTED" | "ESCALATE";
@@ -611,6 +614,25 @@ export class BoundedTasks {
         ? `${e.path}: lines ${e.start_line}+${e.delete_count} → ${e.new_text.slice(0, 80)}`
         : `${e.path}: ${e.old_text.slice(0, 80)} → ${e.new_text.slice(0, 80)}`).join("; ").slice(0, 500),
       review_id: rev.review.review_id, review_result: "PASS" as const, reviewer: rev.review.reviewer };
+  }
+  recordSemanticReviewDiagnostic(diagnostic: SemanticReviewDiagnostic) {
+    const lock = safePath(this.dir(diagnostic.task_id), "review.lock");
+    try { fs.mkdirSync(lock); } catch { fail("REVIEW_ALREADY_PROCESSING"); }
+    try { return this.recordSemanticReviewDiagnosticLocked(diagnostic); } finally { fs.rmdirSync(lock); }
+  }
+  private recordSemanticReviewDiagnosticLocked(diagnostic: SemanticReviewDiagnostic) {
+    const task = this.load(diagnostic.task_id), rev = task.revisions.at(-1);
+    if (rev === undefined) throw new GatewayError("REVIEW_BINDING_INVALID", "Missing revision");
+    if (fs.existsSync(safePath(this.dir(diagnostic.task_id), "execution.lock"))) fail("EXECUTION_ALREADY_RUNNING");
+    if (task.state !== "REVIEW_PENDING" || rev.review || rev.semantic_review_diagnostic ||
+        diagnostic.revision !== rev.revision || diagnostic.manifest_sha256 !== rev.manifest_sha256 ||
+        diagnostic.phase !== "SEMANTIC_REVIEW" ||
+        !["SEMANTIC_REVIEW_FAILED", "SEMANTIC_REVIEW_TIMEOUT", "SEMANTIC_REVIEW_INVALID"].includes(diagnostic.error_code))
+      fail("REVIEW_BINDING_INVALID");
+    rev.semantic_review_diagnostic = { task_id: task.task_id, revision: rev.revision,
+      manifest_sha256: rev.manifest_sha256, phase: "SEMANTIC_REVIEW", error_code: diagnostic.error_code };
+    record(this.dir(diagnostic.task_id), task);
+    return { state: task.state };
   }
   submitReview(review: Review) {
     const lock = safePath(this.dir(review.task_id), "review.lock");
