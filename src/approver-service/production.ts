@@ -43,5 +43,5 @@ export function createProductionApprover(config: ApproverConfig, store: Approver
   }
   peer.use((_req, res) => res.status(404).json({ error: 'NOT_FOUND' }));
   peer.use((_error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => res.status(400).json({ error: 'INVALID_REQUEST' }));
-  return { human, peer };
+  return { human, peer, gateway: peer };
 }

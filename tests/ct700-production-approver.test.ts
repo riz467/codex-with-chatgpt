@@ -56,7 +56,7 @@ describe('CT700 production Human / peer trust boundary', () => {
         }); req.on('error', reject); req.end(body === undefined || method === 'GET' ? undefined : JSON.stringify(body));
       });
     }
-    const human = await listen(apps.human), peer = await listen(apps.peer), device = authenticator();
+    const human = await listen(apps.human), peer = await listen(apps.peer), gateway = await listen(apps.gateway), device = authenticator();
     const identity = (p: TrustedTypedActionPresentation) => ({ approvalRequestId: p.request.approvalRequestId, presentationHash: p.presentationHash });
     const options = async (p: TrustedTypedActionPresentation) => (await human('POST', '/api/webauthn/typed-action/options', identity(p))).body;
     const assertion = (p: TrustedTypedActionPresentation, o: any, counter = 1) => ({ ...identity(p), ceremony: o.ceremony,
@@ -68,7 +68,8 @@ describe('CT700 production Human / peer trust boundary', () => {
         credential: device.registration(o.body.options.challenge, config.origin, config.rp_id) })).status).toBe(201);
     };
     const register = async (p: TrustedTypedActionPresentation) => { authorized = p; return peer('POST', '/api/typed-action-presentations', p); };
-    return { human, peer, store, file, key, device, register, options, assertion, enroll, identity,
+    const gatewayRegister = async (p: TrustedTypedActionPresentation) => { authorized = p; return gateway('POST', '/api/typed-action-presentations', p); };
+    return { human, peer, gateway, store, file, key, device, register, gatewayRegister, options, assertion, enroll, identity,
       clock: (n: number) => { clock = n; }, authorize: (p: TrustedTypedActionPresentation) => { authorized = p; } };
   }
   it('has separate route inventories, no legacy or generic admin/signing/window routes', async () => {
@@ -95,7 +96,7 @@ describe('CT700 production Human / peer trust boundary', () => {
     const x = await setup(); const p = fixture();
     expect((await x.peer('POST', '/api/typed-action-presentations', p)).status).toBe(403);
     x.authorize(p);
-    expect((await x.peer('POST', '/api/typed-action-presentations', p, { Origin: '', Host: 'untrusted' })).status).toBe(201);
+    expect((await x.gateway('POST', '/api/typed-action-presentations', p, { Origin: '', Host: 'untrusted' })).status).toBe(201);
   });
   it.each(actionBindingFields)('rejects presentation/request %s mismatch', async field => {
     const x = await setup(), p = fixture();
@@ -118,14 +119,14 @@ describe('CT700 production Human / peer trust boundary', () => {
   });
   it('exact duplicate is idempotent, conflict cannot replace; survives restart', async () => {
     const x = await setup(), p = fixture();
-    expect((await x.register(p)).status).toBe(201); expect((await x.register(p)).status).toBe(201);
+    expect((await x.gatewayRegister(p)).status).toBe(201); expect((await x.gatewayRegister(p)).status).toBe(201);
     const changed = rehash({ ...p, presentationId: randomUUID() }); expect((await x.register(changed)).status).toBe(409);
     const restarted = new ApproverStore(x.file, 'production');
     try { expect(restarted.presentation(p.request.approvalRequestId)?.presentation).toEqual(p); } finally { restarted.close(); }
     expect(() => new ApproverStore(x.file)).toThrow();
   });
   it.each(['STALE', 'SUPERSEDED'] as const)('terminal %s blocks options and cannot reactivate', async state => {
-    const x = await setup(), p = fixture(); await x.enroll(); await x.register(p);
+    const x = await setup(), p = fixture(); await x.enroll(); await x.gatewayRegister(p);
     expect(x.store.invalidatePresentation(p.request.approvalRequestId, hash(), state, base)).toBe(false);
     expect(x.store.invalidatePresentation(p.request.approvalRequestId, p.presentationHash, state, base)).toBe(true);
     expect((await x.human('POST', '/api/webauthn/typed-action/options', x.identity(p))).status).toBe(403);
@@ -137,7 +138,7 @@ describe('CT700 production Human / peer trust boundary', () => {
   it('display uses the persisted record, immutable request and safe text; options require exact displayed hash', async () => {
     const x = await setup(), p = fixture(); await x.enroll();
     expect((await x.human('POST', '/api/webauthn/typed-action/options', x.identity(p))).status).toBe(403);
-    await x.register(p);
+    await x.gatewayRegister(p);
     const view = await x.human('GET', `/api/typed-action-approval-requests/${p.request.approvalRequestId}`);
     expect(view.body.presentation).toEqual(p); expect(view.body.payload).toEqual(p.request);
     expect((await x.human('POST', '/api/webauthn/typed-action/options', { ...x.identity(p), presentationHash: hash() })).status).toBe(403);
@@ -150,7 +151,7 @@ describe('CT700 production Human / peer trust boundary', () => {
     expect(() => x.store.db.exec("UPDATE typed_action_approval_requests SET canonical_payload='{}'")).toThrow();
   });
   it.each(['STALE', 'SUPERSEDED', 'expiry', 'hash', 'disabled'] as const)('verify/signing rechecks %s during ceremony', async failure => {
-    const x = await setup(), p = fixture(); await x.enroll(); await x.register(p);
+    const x = await setup(), p = fixture(); await x.enroll(); await x.gatewayRegister(p);
     const o = await x.options(p), a = x.assertion(p, o);
     if (failure === 'STALE' || failure === 'SUPERSEDED') x.store.invalidatePresentation(p.request.approvalRequestId, p.presentationHash, failure, base);
     if (failure === 'expiry') x.clock(base + 240_000);
@@ -161,13 +162,13 @@ describe('CT700 production Human / peer trust boundary', () => {
     expect((await x.human('POST', '/api/webauthn/typed-action/verify', a)).status).toBe(403);
   });
   it.each([0, 1])('concurrent WebAuthn counter %s has exactly one winner; signed evidence verifies and is peer-only', async counter => {
-    const x = await setup(), p = fixture(), q = fixture(); await x.enroll(); await x.register(p); await x.register(q);
+    const x = await setup(), p = fixture(), q = fixture(); await x.enroll(); await x.gatewayRegister(p); await x.gatewayRegister(q);
     const a = x.assertion(p, await x.options(p), counter), b = x.assertion(q, await x.options(q), counter);
     const outcomes = await Promise.all([a, b].map(body => x.human('POST', '/api/webauthn/typed-action/verify', body)));
     expect(outcomes.map(r => r.status).sort()).toEqual([201, 403]);
     const winner = outcomes[0].status === 201 ? p : q;
     const id = winner.request.approvalRequestId;
-    const evidence = await x.peer('GET', `/api/typed-action-evidence/${id}`);
+    const evidence = await x.gateway('GET', `/api/typed-action-evidence/${id}`);
     expect(verifyTypedActionApproval(evidence.body, winner.context, new Map([['test', x.key.publicKey]]), base).valid).toBe(true);
     expect(x.store.credential(x.device.id)).toMatchObject({ counter, revision: 1 });
     expect((await x.human('GET', `/api/typed-action-evidence/${id}`)).status).toBe(404);
@@ -176,7 +177,7 @@ describe('CT700 production Human / peer trust boundary', () => {
     expect(() => x.store.db.exec('DELETE FROM typed_action_approval_evidence')).toThrow();
   });
   it('transaction gate blocks stale presentations before signer/counter CAS', async () => {
-    const x = await setup(), p = fixture(); await x.enroll(); await x.register(p);
+    const x = await setup(), p = fixture(); await x.enroll(); await x.gatewayRegister(p);
     const c = x.store.credential(x.device.id)!;
     x.store.invalidatePresentation(p.request.approvalRequestId, p.presentationHash, 'STALE', base);
     expect(x.store.approveTyped(p.request.approvalRequestId, c, 1, () => { throw Error('MUST_NOT_SIGN'); }, base)).toBe(false);
