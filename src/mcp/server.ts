@@ -39,7 +39,7 @@ export function boundedFinalizationRoot(workspaceRoot: string, repo: string): st
   const bridgeRoot = "C:\\work\\codex-with-chatgpt";
   if (workspaceRoot.toLowerCase() !== bridgeRoot.toLowerCase()) return null;
   if (repo === "autonomous-fixture") return "C:\\work\\bounded-review-live-fixture";
-  if (repo === "codex-with-chatgpt-control-plane") return bridgeRoot;
+  if (repo === "codex-with-chatgpt" || repo === "codex-with-chatgpt-control-plane") return bridgeRoot;
   return null;
 }
 
