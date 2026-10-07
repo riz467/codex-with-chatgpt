@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, request, type Server } from 'node:http';
 import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -30,7 +30,23 @@ function fixture(): TrustedTypedActionPresentation {
 function rehash(p: TrustedTypedActionPresentation) { const { presentationHash: _, ...body } = p; p.presentationHash = presentationHash(body); return p; }
 describe('CT700 production Human / peer trust boundary', () => {
   const servers: Server[] = [], stores: ApproverStore[] = [], dirs: string[] = [];
+  let currentPeer: ReturnType<typeof createProductionApprover>['peer'] | undefined;
+  const fixedPeer = createServer((req, res) => {
+    const peer = currentPeer;
+    if (!peer) { res.writeHead(503); res.end(); return; }
+    peer(req, res);
+  });
+  beforeAll(async () => {
+    await new Promise<void>((resolve, reject) => {
+      fixedPeer.once('error', reject);
+      fixedPeer.listen(48769, '127.0.0.1', () => { fixedPeer.off('error', reject); resolve(); });
+    });
+  });
+  afterAll(async () => {
+    if (fixedPeer.listening) await new Promise<void>(resolve => fixedPeer.close(() => resolve()));
+  });
   afterEach(async () => {
+    currentPeer = undefined;
     await Promise.all(servers.splice(0).map(s => new Promise<void>(r => s.close(() => r()))));
     stores.splice(0).forEach(s => s.close()); dirs.splice(0).forEach(d => fs.rmSync(d, { recursive: true, force: true }));
   });
@@ -43,6 +59,7 @@ describe('CT700 production Human / peer trust boundary', () => {
     const verifier: TrustedTypedActionPresentationVerifier = { verifyRegistration: () => authorized, authorizeLookup: () => true };
     const key = generateKeyPairSync('ed25519');
     const apps = createProductionApprover(config, store, key.privateKey, trusted ? verifier : undefined, () => clock);
+    currentPeer = apps.peer;
     async function listen(app: typeof apps.human) {
       const server = createServer(app).listen(0, '127.0.0.1'); servers.push(server);
       await new Promise<void>(r => server.once('listening', r));
@@ -67,7 +84,7 @@ describe('CT700 production Human / peer trust boundary', () => {
       expect((await human('POST', '/enrollment/verify', { token, ceremony: o.body.ceremony,
         credential: device.registration(o.body.options.challenge, config.origin, config.rp_id) })).status).toBe(201);
     };
-    const register = async (p: TrustedTypedActionPresentation) => { authorized = p; return peer('POST', '/api/typed-action-presentations', p); };
+    const register = async (p: TrustedTypedActionPresentation) => { authorized = p; return gateway('POST', '/api/typed-action-presentations', p); };
     const gatewayRegister = async (p: TrustedTypedActionPresentation) => { authorized = p; return gateway('POST', '/api/typed-action-presentations', p); };
     return { human, peer, gateway, store, file, key, device, register, gatewayRegister, options, assertion, enroll, identity,
       clock: (n: number) => { clock = n; }, authorize: (p: TrustedTypedActionPresentation) => { authorized = p; } };
@@ -223,5 +240,24 @@ describe('CT700 production Human / peer trust boundary', () => {
     expect(() => new ApproverStore(foreign, 'production')).toThrow();
     const empty = path.join(path.dirname(x.file), 'empty.db'); fs.writeFileSync(empty, '');
     expect(() => new ApproverStore(empty, 'production')).toThrow('INVALID_PRODUCTION');
+  });
+  it('fixed peer dispatcher fails closed and routes only to the current peer', async () => {
+    const fixed = (method: string, route: string, body?: unknown) => new Promise<number>((resolve, reject) => {
+      const req = request({ hostname: '127.0.0.1', port: 48769, method, path: route,
+        headers: { Host: config.rp_id, Origin: config.origin, 'Content-Type': 'application/json' } }, res => {
+        res.resume(); res.on('end', () => resolve(res.statusCode!));
+      });
+      req.on('error', reject); req.end(body === undefined ? undefined : JSON.stringify(body));
+    });
+    const route = '/api/typed-action-presentations';
+    expect(await fixed('GET', '/health')).toBe(503);
+    const first = await setup(), firstPresentation = fixture(); first.authorize(firstPresentation);
+    expect(await fixed('POST', route, firstPresentation)).toBe(201);
+    currentPeer = undefined;
+    expect(await fixed('POST', route, firstPresentation)).toBe(503);
+    const next = await setup(), nextPresentation = fixture(); next.authorize(nextPresentation);
+    expect(await fixed('POST', route, nextPresentation)).toBe(201);
+    expect(first.store.presentation(nextPresentation.request.approvalRequestId)).toBeNull();
+    expect(next.store.presentation(nextPresentation.request.approvalRequestId)?.presentation).toEqual(nextPresentation);
   });
 });
