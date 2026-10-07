@@ -12,12 +12,14 @@ validation fixtures and cannot establish production consume readiness.
 Revocation uses `admitReviewInvalidation` and exact ACK reconciliation; the live
 consume path requires a durable CT702 barrier. The remaining sections describe
 the underlying verification contract and the earlier v2 implementation history.
-IR-05 transport, IR-09 real adapters and live deployment remain unimplemented.
+IR-05 stage-1 transport-independent CT701→CT700 Approver peer core is implemented.
+Authenticated HTTP/mTLS/Tailscale transport on port 7443, IR-09 live adapters and
+live deployment remain unimplemented.
 
 This in-process core connects CT702 signed review evidence and CT700 signed Human
-Approval to the durable CT701 Trusted Context Store. Production activation is a
-separate task. No HTTP, network, caller paths, deployment configuration, production
-keys, execution bridge or PVE operations are introduced.
+Approval to the durable CT701 Trusted Context Store. The optional peer adds no HTTP
+listener, network transport, deployment configuration, production keys, execution
+bridge or PVE operations.
 
 ## Host installation and caller surface
 
@@ -30,7 +32,7 @@ file-backed SQLite connection. The `AuthorityIngestorHost` installation supplies
 - `trustedReviewKeys` and `trustedHumanKeys`: copied public-key maps.
 - `now()`: trusted current time in epoch milliseconds.
 
-`createTrustedAuthorityIngestor(store)` exposes exactly:
+Without a peer, `createTrustedAuthorityIngestor(store)` exposes exactly:
 
 ```ts
 adoptIndependentReview({ identity, evidence })
@@ -45,6 +47,29 @@ Validation helpers are internal pure functions; the store never accepts a
 prepared authority record from a caller. `bootstrapFixture()` remains exclusively
 a test/bootstrap seam and is not called by either production route. Bootstrap
 reviews and approvals cannot be promoted into production adoption identities.
+
+## Optional IR-05 stage-1 Approver peer
+
+`createTrustedAuthorityIngestor(store, peer)` retains the two methods above and adds
+only `registerTrustedPresentation(presentation)` and
+`collectApprovedHumanApproval(presentation)`. The host installs `peer`; callers
+cannot select a transport, endpoint, credentials or administrative operation. The
+peer supplies only `register`, `status` and `evidence` operations. Both synchronous
+and asynchronous peer adapters are supported; neither is a live HTTP adapter.
+
+Registration strictly parses the existing `TrustedTypedActionPresentation`, sends
+it to the peer and requires the receipt's `approvalRequestId` and
+`presentationHash` to match exactly. Malformed or extra fields and substituted
+receipts fail closed. Collection requires an exact CURRENT/APPROVED/current status
+for the presentation, then strict signed evidence with an exact approval-request
+match. It passes that evidence through the existing `registerHumanApproval`
+verification; a peer response alone cannot register Human authority.
+
+Peer interaction issues no permit or `executionMayStart`. The CT701
+`TrustedContextStore` remains authoritative for the Human signature and the
+current request, review, policy, generation, maintenance window and revocation.
+Retries or duplicate peer responses cannot revive stale, superseded or revoked
+authority.
 
 ## Authority ownership and locking contract
 
@@ -177,8 +202,9 @@ registration, then succeeds through the existing signer after both are valid.
 
 Ingestion issues **no execution permission**. The existing CT701 ledger still
 consumes Human jti, permit jti and attemptHash exactly once. No generic authority
-mutation API is exported. The only caller capability methods are the two
-purpose-specific operations above.
+mutation API is exported. Without a peer, the caller surface remains the two
+purpose-specific operations above; a host-installed peer adds only the two IR-05
+stage-1 methods described above.
 
 ## Verification
 
@@ -187,6 +213,9 @@ forgery, key pinning, all review and Human bindings, host policy/clock failures,
 durable identity conflicts, revocation, restart, concurrent worker adoption,
 competing connections/fences, partial writes, both possible unknown-commit outcomes,
 schema tampering without repair, provider/Finalizer/ledger integration and the
-restricted caller surface. Existing CT702 and CT701 tests remain enabled.
+restricted caller surface. IR-05 stage-1 tests cover a real-presentation peer
+happy path, synchronous and asynchronous peer adapters, malformed, extra and
+substituted receipt/status/evidence responses, peer failures, retries,
+idempotence and revocation. Existing CT702 and CT701 tests remain enabled.
 
 Run `pnpm typecheck` and `pnpm test`.
