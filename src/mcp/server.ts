@@ -24,7 +24,7 @@ import { GatewayError, verifyBundleIntegrity, startTestJob, startOrchestration, 
 import { completeCurrentAutonomous } from "./autonomous-approval.js";
 import { searchRepo, readRepoFile } from "./repo-research.js";
 import type { RepoResearchRoots } from "./repo-research.js";
-import { BoundedTasks } from "./bounded-task.js";
+import { BoundedTasks, type ExecutionProfile } from "./bounded-task.js";
 import { prepareBoundedCommit, commitBoundedPatch, getBoundedCommitStatus } from "./typed-actions.js";
 import type { OrchestrationReadDependencies } from "./local-gateway.js";
 import { semanticSession } from "./semantic-session.js";
@@ -34,12 +34,14 @@ const boundedRepos: Record<string, string> = {
   "autonomous-fixture": "C:\\work\\bounded-review-live-fixture",
   "codex-with-chatgpt": "C:\\work\\codex-with-chatgpt",
   "codex-with-chatgpt-control-plane": "C:\\work\\codex-with-chatgpt",
+  "codex-with-chatgpt-authority-transport": "C:\\work\\codex-with-chatgpt",
 };
 export function boundedFinalizationRoot(workspaceRoot: string, repo: string): string | null {
   const bridgeRoot = "C:\\work\\codex-with-chatgpt";
   if (workspaceRoot.toLowerCase() !== bridgeRoot.toLowerCase()) return null;
   if (repo === "autonomous-fixture") return "C:\\work\\bounded-review-live-fixture";
-  if (repo === "codex-with-chatgpt" || repo === "codex-with-chatgpt-control-plane") return bridgeRoot;
+  if (repo === "codex-with-chatgpt" || repo === "codex-with-chatgpt-control-plane" ||
+      repo === "codex-with-chatgpt-authority-transport") return bridgeRoot;
   return null;
 }
 
@@ -99,6 +101,20 @@ function runNodeCheck(root: string, name: string, toolPath: string, args: string
   };
 }
 
+export function productionVerificationPlan(profile: ExecutionProfile) {
+  if (profile === "tracked_utf8_text") return [];
+  const tests = profile === "tracked_typescript_control_plane" ? CONTROL_PLANE_REGRESSIONS
+    : profile === "tracked_typescript_authority_transport" ? [
+      "tests/typed-action-authority-ingestor.test.ts",
+      "tests/typed-action-approval.test.ts",
+      "tests/ct700-production-approver.test.ts",
+    ] : DASHBOARD_REGRESSIONS;
+  return [
+    { name: "tsc", toolPath: "typescript/bin/tsc", args: ["--noEmit"], timeout_ms: 120000 },
+    { name: "vitest", toolPath: "vitest/vitest.mjs", args: ["run", "--maxWorkers=2", ...tests], timeout_ms: 180000 },
+  ];
+}
+
 const productionVerifier: NonNullable<ConstructorParameters<typeof BoundedTasks>[4]> =
   (root, profile, paths, timeout) => {
     const deadline = Date.now() + Math.max(1000, timeout);
@@ -110,18 +126,15 @@ const productionVerifier: NonNullable<ConstructorParameters<typeof BoundedTasks>
     if (profile === "tracked_utf8_text") {
       return { profile, passed: true, paths: [...paths], tests_run: 1, checks: [] };
     }
-    const checks = [runNodeCheck(root, "tsc", "typescript/bin/tsc", ["--noEmit"], remaining(120000))];
-    const tests = profile === "tracked_typescript_control_plane"
-      ? CONTROL_PLANE_REGRESSIONS
-      : DASHBOARD_REGRESSIONS;
-    checks.push(runNodeCheck(root, "vitest", "vitest/vitest.mjs",
-      ["run", "--maxWorkers=2", ...tests], remaining(180000)));
+    const checks = productionVerificationPlan(profile).map(check =>
+      runNodeCheck(root, check.name, check.toolPath, check.args, remaining(check.timeout_ms)));
     return { profile, passed: true, paths: [...paths], tests_run: checks.length, checks };
   };
 
 const boundedTasks = new BoundedTasks(boundedRepos, undefined, undefined, {
   "codex-with-chatgpt": "tracked_typescript_dashboard",
   "codex-with-chatgpt-control-plane": "tracked_typescript_control_plane",
+  "codex-with-chatgpt-authority-transport": "tracked_typescript_authority_transport",
 }, productionVerifier); // Never pve-doc.
 
 const UNTRUSTED_NOTE =
@@ -596,10 +609,10 @@ export function createMcpServer(ctx: McpContext): McpServer {
   const boundedId = z.string().regex(/^bounded-[a-f0-9]{32}$/);
   server.registerTool("start_bounded_opencode_task", {
     title: "Start bounded OpenCode task",
-    description: "Fixed fixture-text plus codex-with-chatgpt Dashboard/control-plane TypeScript profiles; Codex disabled. TypeScript profiles run fixed typecheck and full Vitest regression. This does not commit, push or complete legacy DONE.",
-    inputSchema: z.object({ repo: z.enum(["autonomous-fixture", "codex-with-chatgpt", "codex-with-chatgpt-control-plane"]), goal: z.string().min(1).max(2000),
+    description: "Fixed fixture-text and codex-with-chatgpt Dashboard/control-plane/authority-transport TypeScript profiles; Codex disabled. TypeScript profiles run fixed typecheck and Vitest regression. This does not commit, push or complete legacy DONE.",
+    inputSchema: z.object({ repo: z.enum(["autonomous-fixture", "codex-with-chatgpt", "codex-with-chatgpt-control-plane", "codex-with-chatgpt-authority-transport"]), goal: z.string().min(1).max(2000),
       edit_paths: z.array(z.string()).min(1).max(3), acceptance_criteria: z.array(z.string()).min(1).max(6),
-      task_kind: z.literal("text_change"), execution_profile: z.enum(["tracked_utf8_text", "tracked_typescript_dashboard", "tracked_typescript_control_plane"]), worker: z.literal("opencode"),
+      task_kind: z.literal("text_change"), execution_profile: z.enum(["tracked_utf8_text", "tracked_typescript_dashboard", "tracked_typescript_control_plane", "tracked_typescript_authority_transport"]), worker: z.literal("opencode"),
       codex: z.object({ allowed: z.literal(false), max_calls: z.literal(0) }).strict(),
       max_revisions: z.number().int().min(1).max(3).default(3), timeout_ms: z.number().int().min(1000).max(600000).default(600000) }).strict(),
     annotations: { readOnlyHint: false, openWorldHint: false },

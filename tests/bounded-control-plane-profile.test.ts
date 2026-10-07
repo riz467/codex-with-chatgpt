@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { BoundedTasks, type Contract, type Verifier, type Worker } from "../src/mcp/bounded-task.js";
+import { boundedFinalizationRoot, productionVerificationPlan } from "../src/mcp/server.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
@@ -85,4 +86,69 @@ describe("bounded control-plane profile", () => {
       paths: ["src/mcp/typed-actions.ts"],
     });
   });
+});
+describe("bounded authority-transport profile", () => {
+  const alias = "codex-with-chatgpt-authority-transport";
+  const profile = "tracked_typescript_authority_transport" as const;
+  const allowed = [
+    "src/mcp/authority-ingestor.ts",
+    "tests/typed-action-authority-ingestor.test.ts",
+    "docs/ct701-authority-ingestor.md",
+  ];
+
+  it("uses only the fixed authority verification plan", () => {
+    expect(productionVerificationPlan(profile)).toEqual([
+      { name: "tsc", toolPath: "typescript/bin/tsc", args: ["--noEmit"], timeout_ms: 120000 },
+      { name: "vitest", toolPath: "vitest/vitest.mjs", args: [
+        "run", "--maxWorkers=2",
+        "tests/typed-action-authority-ingestor.test.ts",
+        "tests/typed-action-approval.test.ts",
+        "tests/ct700-production-approver.test.ts",
+      ], timeout_ms: 180000 },
+    ]);
+  });
+
+  it("pins finalization to the fixed bridge root", () => {
+    const bridge = "C:\\work\\codex-with-chatgpt";
+    expect(boundedFinalizationRoot(bridge, alias)).toBe(bridge);
+    expect(boundedFinalizationRoot("C:\\work\\other", alias)).toBeNull();
+    expect(boundedFinalizationRoot(bridge, `${alias}-other`)).toBeNull();
+  });
+
+  for (const allowedPath of allowed) {
+    it(`starts only the single allowed path ${allowedPath} and rejects adjacent paths`, () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "bounded-authority-")); roots.push(root);
+      const repo = path.join(root, "repo");
+      const adjacent = [
+        "src/mcp/authority-ingestor-helper.ts",
+        "tests/typed-action-authority-ingestor-extra.test.ts",
+        "docs/ct701-authority-ingestor-extra.md",
+      ];
+      for (const name of [...allowed, ...adjacent]) {
+        const file = path.join(repo, name);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, "fixture\n");
+      }
+      const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+      git("init", "-q"); git("add", ".");
+      git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "initial");
+      const actual = fs.realpathSync.native(repo);
+      const tasks = new BoundedTasks({ [alias]: actual, control: actual }, path.join(root, "store"),
+        undefined, { [alias]: profile, control: "tracked_typescript_control_plane" });
+      const contract: Contract = {
+        repo: alias, goal: "Start authority transport scope", edit_paths: [allowedPath],
+        acceptance_criteria: ["Stay within the fixed path"], task_kind: "text_change",
+        execution_profile: profile, worker: "opencode", codex: { allowed: false, max_calls: 0 },
+        max_revisions: 1, timeout_ms: 600000,
+      };
+      for (const name of adjacent) {
+        expect(() => tasks.start({ ...contract, edit_paths: [name] })).toThrow("INVALID_CONTRACT");
+      }
+      expect(() => tasks.start({ ...contract, execution_profile: "tracked_typescript_control_plane" })).toThrow("INVALID_CONTRACT");
+      expect(() => tasks.start({ ...contract, repo: "control" })).toThrow("INVALID_CONTRACT");
+      const started = tasks.start(contract);
+      expect(tasks.status(started.task_id).contract).toEqual(contract);
+      expect(tasks.status(started.task_id).codex_calls).toBe(0);
+    });
+  }
 });

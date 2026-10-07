@@ -11,7 +11,7 @@ const json = (value: unknown) => JSON.stringify(value);
 const fail = (code: string): never => { throw new GatewayError(code, code); };
 const idPattern = /^bounded-[a-f0-9]{32}$/;
 const defaultStateRoot = () => path.join(getStateDir(), "bounded-v2");
-export type ExecutionProfile = "tracked_utf8_text" | "tracked_typescript_dashboard" | "tracked_typescript_control_plane";
+export type ExecutionProfile = "tracked_utf8_text" | "tracked_typescript_dashboard" | "tracked_typescript_control_plane" | "tracked_typescript_authority_transport";
 export type Contract = { repo: string; goal: string; edit_paths: string[]; acceptance_criteria: string[];
   task_kind: "text_change"; execution_profile: ExecutionProfile; worker: "opencode";
   codex: { allowed: false; max_calls: 0 }; max_revisions: number; timeout_ms: number };
@@ -76,6 +76,11 @@ const pathCheck = (repo: string, name: string) => {
 };
 const profilePathAllowed = (profile: ExecutionProfile, name: string) => {
   if (profile === "tracked_utf8_text") return true;
+  if (profile === "tracked_typescript_authority_transport") {
+    return name === "src/mcp/authority-ingestor.ts" ||
+      name === "tests/typed-action-authority-ingestor.test.ts" ||
+      name === "docs/ct701-authority-ingestor.md";
+  }
   if (profile === "tracked_typescript_control_plane") {
     return name === "src/mcp/server.ts" || name === "src/mcp/typed-actions.ts" || name === "src/mcp/bounded-task.ts" || name === "src/mcp/semantic-session.ts" || name === "tests/typed-actions.test.ts" || name === "tests/mcp-integration.test.ts" || name === "tests/bounded-task.test.ts" || name === "tests/bounded-control-plane-profile.test.ts";
   }
@@ -435,7 +440,7 @@ export class BoundedTasks {
         task.contract.edit_paths.some(p => !profilePathAllowed(task.contract.execution_profile, p))) fail("CONTRACT_MISMATCH"); return task; }
   start(contract: Contract) {
     if (!contract || contract.worker !== "opencode" || contract.task_kind !== "text_change" ||
-        !["tracked_utf8_text", "tracked_typescript_dashboard", "tracked_typescript_control_plane"].includes(contract.execution_profile) ||
+        !["tracked_utf8_text", "tracked_typescript_dashboard", "tracked_typescript_control_plane", "tracked_typescript_authority_transport"].includes(contract.execution_profile) ||
         contract.execution_profile !== this.profileFor(contract.repo) ||
         Object.keys(contract).sort().join() !== "acceptance_criteria,codex,edit_paths,execution_profile,goal,max_revisions,repo,task_kind,timeout_ms,worker" ||
         !contract.codex || Object.keys(contract.codex).sort().join() !== "allowed,max_calls" ||
