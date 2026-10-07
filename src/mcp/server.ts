@@ -398,19 +398,17 @@ export interface McpContext {
   repoResearchRoots?: RepoResearchRoots;
 }
 
-export function createMcpServer(ctx: McpContext): McpServer {
-  const { workspace } = ctx;
-  const tasks = ctx.boundedTasks ?? boundedTasks;
-  const server = new McpServer(
-    { name: PRODUCT_NAME, version: VERSION },
-    { capabilities: { tools: {} }, instructions: UNTRUSTED_NOTE }
-  );
-
+function createBoundedLifecycleController(
+  tasks: BoundedTasks,
+  workspaceRoot: string,
+  boundedFinalizer?: (taskId: string) => void,
+  boundedSemanticReviewer?: typeof semanticSession,
+) {
   const lifecycleRunning = new Set<string>();
   const finalizeBoundedPass = (taskId: string, repo: string) => {
-    const fixedRoot = boundedFinalizationRoot(workspace.root, repo);
-    if (ctx.boundedFinalizer) {
-      ctx.boundedFinalizer(taskId);
+    const fixedRoot = boundedFinalizationRoot(workspaceRoot, repo);
+    if (boundedFinalizer) {
+      boundedFinalizer(taskId);
     } else if (fixedRoot !== null) {
       prepareBoundedCommit(tasks, taskId, getStateDir());
       commitBoundedPatch(tasks, taskId, getStateDir(), fixedRoot);
@@ -455,8 +453,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
           const validRefs: readonly number[] = [1, 2, 3];
           let result: Awaited<ReturnType<typeof semanticSession>>;
           try {
-            result = ctx.boundedSemanticReviewer
-              ? await ctx.boundedSemanticReviewer(prompt, latest.worker.session_id, validRefs)
+            result = boundedSemanticReviewer
+              ? await boundedSemanticReviewer(prompt, latest.worker.session_id, validRefs)
               : await semanticSession(prompt, latest.worker.session_id, validRefs);
           } catch (error) {
             const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
@@ -510,6 +508,35 @@ export function createMcpServer(ctx: McpContext): McpServer {
     })();
     return true;
   };
+  return { lifecycleRunning, finalizeBoundedPass, runBoundedLifecycle };
+}
+
+const productionBoundedLifecycle = createBoundedLifecycleController(
+  boundedTasks, boundedRepos["codex-with-chatgpt-control-plane"]
+);
+
+export function startProductionBoundedTask(input: Parameters<BoundedTasks["start"]>[0]) {
+  const started = boundedTasks.start(input);
+  productionBoundedLifecycle.runBoundedLifecycle(started.task_id);
+  return started;
+}
+
+export function getProductionBoundedCommitStatus(taskId: string) {
+  return getBoundedCommitStatus(boundedTasks, taskId, getStateDir());
+}
+
+export function createMcpServer(ctx: McpContext): McpServer {
+  const { workspace } = ctx;
+  const tasks = ctx.boundedTasks ?? boundedTasks;
+  const server = new McpServer(
+    { name: PRODUCT_NAME, version: VERSION },
+    { capabilities: { tools: {} }, instructions: UNTRUSTED_NOTE }
+  );
+  const lifecycle = !ctx.boundedTasks && !ctx.boundedFinalizer && !ctx.boundedSemanticReviewer &&
+    workspace.root.toLowerCase() === boundedRepos["codex-with-chatgpt-control-plane"].toLowerCase()
+    ? productionBoundedLifecycle
+    : createBoundedLifecycleController(tasks, workspace.root, ctx.boundedFinalizer, ctx.boundedSemanticReviewer);
+  const { lifecycleRunning, finalizeBoundedPass, runBoundedLifecycle } = lifecycle;
   const boundedId = z.string().regex(/^bounded-[a-f0-9]{32}$/);
   server.registerTool("start_bounded_opencode_task", {
     title: "Start bounded OpenCode task",
