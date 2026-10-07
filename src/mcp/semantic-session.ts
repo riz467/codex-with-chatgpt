@@ -78,10 +78,7 @@ export async function semanticSession(prompt: string, executionSessionId: string
       if (child.exitCode !== null) break;
       try {
         const info = await api("GET", "/api/info");
-        const agents = await api("GET", "/api/agent");
-        if (info.pid === child.pid && String(info.version).startsWith("2.") &&
-            agents.location?.directory?.toLowerCase() === REVIEW_ROOT.toLowerCase() &&
-            agents.data?.some((a: any) => a.id === agentID && a.mode === "primary")) { ready = true; break; }
+        if (info.pid === child.pid && String(info.version).startsWith("2.")) { ready = true; break; }
       } catch { /* bounded startup */ }
       await new Promise((r) => setTimeout(r, 250));
     }
