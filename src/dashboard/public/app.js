@@ -1,4 +1,5 @@
 import { stateLabel, taskStateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, reviewLabel, completionLabel, stopLabel, stopSummaryLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask } from './labels.js';
+import { createBoundedStartController } from './labels.js';
 
 const $ = id => document.getElementById(id);
 const cell = (tag, content) => { const e = document.createElement(tag); e.textContent = displayValue(content); return e; };
@@ -185,7 +186,46 @@ function showBoundedReviewSummary(task) {
     ['\u5909\u66f4\u30d5\u30a1\u30a4\u30eb\u6570', task.file_count],
     ['\u4f5c\u696d\u8005', task.worker],
     ['\u30ec\u30d3\u30e5\u30fc\u7d50\u679c', task.review_verdict]
+    ,['Reviewer', safe.review_reviewer],
+    ['Semantic diagnostic', safe.latest_semantic_review_diagnostic_code],
+    ['Commit state', safe.commit_state],
+    ['Local commit', safe.local_commit],
+    ['Authoritative DONE', safe.authoritative_done]
   ]) pair(fields, label, value);
+}
+function createBoundedStartForm() {
+  const controller = createBoundedStartController(fetch);
+  const form = document.createElement('form');
+  const repo = document.createElement('select');
+  for (const name of ['codex-with-chatgpt', 'codex-with-chatgpt-control-plane']) {
+    const option = document.createElement('option'); option.value = name; option.textContent = name;
+    repo.append(option);
+  }
+  const fields = [repo, ...['Goal', 'Edit paths (one per line)', 'Acceptance criteria (one per line)'].map(() => document.createElement('textarea'))];
+  for (const [index, input] of fields.entries()) {
+    const label = document.createElement('label');
+    label.append(document.createTextNode(['Repository', 'Goal', 'Edit paths (one per line)', 'Acceptance criteria (one per line)'][index]), input);
+    form.append(label);
+  }
+  const [selectedRepo, goal, paths, criteria] = fields;
+  const button = document.createElement('button'); button.type = 'submit'; button.textContent = 'Start bounded task';
+  const status = document.createElement('p'); status.setAttribute('role', 'status');
+  form.append(button, status);
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (controller.busy) return;
+    button.disabled = true;
+    try {
+      const result = await controller.start(selectedRepo.value, goal.value, paths.value, criteria.value);
+      status.textContent = result.kind === 'started'
+        ? `Task ID: ${result.task_id} · Updates appear automatically.` : 'Bounded start failed.';
+    } catch {
+      status.textContent = 'Bounded start failed.';
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return form;
 }
 const boundedFields = [
   ['task_id', 'Task ID'], ['state', '\u72b6\u614b'], ['progress_mode', '進行状況'], ['execution_profile', '実行プロファイル'],
@@ -194,6 +234,8 @@ const boundedFields = [
   ['latest_revision', '\u6700\u65b0\u30ea\u30d3\u30b8\u30e7\u30f3'], ['manifest_sha256', 'Manifest SHA256'],
   ['verification_present', '\u691c\u8a3c'], ['file_count', '\u30d5\u30a1\u30a4\u30eb\u6570'],
   ['worker', 'Worker'], ['review_verdict', '\u30ec\u30d3\u30e5\u30fc\u7d50\u679c']
+  ,['review_reviewer', 'Reviewer'], ['latest_semantic_review_diagnostic_code', 'Semantic diagnostic'],
+  ['commit_state', 'Commit state'], ['local_commit', 'Local commit'], ['authoritative_done', 'Authoritative DONE']
 ];
 function renderBoundedTasks(tasks) {
   const autonomous = $('autonomous');
@@ -204,7 +246,7 @@ function renderBoundedTasks(tasks) {
     const details = document.createElement('details');
     const summary = document.createElement('summary'); summary.id = 'bounded-opencode-summary';
     const list = document.createElement('div'); list.id = 'bounded-opencode-tasks';
-    details.append(summary, list); section.append(heading, details);
+    details.append(summary, list); section.append(heading, createBoundedStartForm(), details);
     (autonomous.closest('section') || autonomous).insertAdjacentElement('afterend', section);
   }
   const list = $('bounded-opencode-tasks'); clear(list);

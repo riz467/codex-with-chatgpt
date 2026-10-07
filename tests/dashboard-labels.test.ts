@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { stateLabel, taskStateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask, buildBoundedStartRequest, submitBoundedStart, createBoundedStartController, boundedStatusRows } from "../src/dashboard/public/labels.js";
@@ -9,6 +10,97 @@ it("parses the dashboard app with the current Node runtime", () => {
   expect(result.error).toBeUndefined();
   expect(result.status, result.stderr).toBe(0);
 });
+
+it("wires the bounded start form and displays normalized lifecycle fields", () => {
+  const source = readFileSync(fileURLToPath(new URL("../src/dashboard/public/app.js", import.meta.url)), "utf8");
+  expect(source).toContain("import { createBoundedStartController } from './labels.js';");
+  expect(source).toContain("createBoundedStartController(fetch)");
+  expect(source).toContain("controller.start(selectedRepo.value, goal.value, paths.value, criteria.value)");
+  expect(source).toContain("['codex-with-chatgpt', 'codex-with-chatgpt-control-plane']");
+  expect(source).toContain("section.append(heading, createBoundedStartForm(), details)");
+  for (const field of ["review_reviewer", "latest_semantic_review_diagnostic_code", "commit_state", "local_commit", "authoritative_done"]) {
+    expect(source).toContain(`['${field}',`);
+    expect(source).toContain(`safe.${field}`);
+  }
+  expect(source).not.toContain("/api/bounded");
+  expect(source).not.toContain("X-Bounded-Start-CSRF");
+  expect(source).toContain("const approvalFields = ['task_id', 'run_id', 'authoritative_review_id', 'goal', 'review_evidence_hash', 'bundle_manifest_sha256', 'canonical_goal_hash'];");
+});
+it("submits the bounded form, ignores busy submissions, reports outcomes and re-enables the button", async () => {
+  const source = readFileSync(fileURLToPath(new URL("../src/dashboard/public/app.js", import.meta.url)), "utf8");
+  const start = source.indexOf("function createBoundedStartForm() {");
+  const end = source.indexOf("const boundedFields =", start);
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  const elements: Array<ReturnType<typeof element>> = [];
+  function element(tag: string) {
+    return {
+      tag, value: "", textContent: "", disabled: false, children: [] as unknown[],
+      attributes: {} as Record<string, string>,
+      listeners: {} as Record<string, (event: { preventDefault: () => void }) => Promise<void>>,
+      append(...children: unknown[]) { this.children.push(...children); },
+      setAttribute(name: string, value: string) { this.attributes[name] = value; },
+      addEventListener(name: string, listener: (event: { preventDefault: () => void }) => Promise<void>) { this.listeners[name] = listener; }
+    };
+  }
+  const document = {
+    createElement(tag: string) { const created = element(tag); elements.push(created); return created; },
+    createTextNode(text: string) { return { textContent: text }; }
+  };
+  const calls: unknown[][] = [];
+  let finish!: (result: { kind: string; task_id?: string }) => void;
+  const controller = {
+    busy: false,
+    start(...values: unknown[]) {
+      calls.push(values);
+      controller.busy = true;
+      return new Promise<{ kind: string; task_id?: string }>(resolve => { finish = resolve; });
+    }
+  };
+  const fakeFetch = () => { throw new Error("unexpected direct fetch"); };
+  const createForm = new Function("document", "createBoundedStartController", "fetch",
+    `${source.slice(start, end)}\nreturn createBoundedStartForm();`);
+  const form = createForm(document, (fetcher: unknown) => {
+    expect(fetcher).toBe(fakeFetch);
+    return controller;
+  }, fakeFetch);
+  expect(form.tag).toBe("form");
+  const select = elements.find(item => item.tag === "select")!;
+  const options = elements.filter(item => item.tag === "option");
+  expect(options.map(option => option.value)).toEqual(["codex-with-chatgpt", "codex-with-chatgpt-control-plane"]);
+  const textareas = elements.filter(item => item.tag === "textarea");
+  expect(textareas).toHaveLength(3);
+  const button = elements.find(item => item.tag === "button")!;
+  const status = elements.find(item => item.attributes.role === "status")!;
+  select.value = options[1].value;
+  [textareas[0].value, textareas[1].value, textareas[2].value] = ["Goal", "src/app.js", "Check behavior"];
+  let prevented = 0;
+  const submit = () => form.listeners.submit({ preventDefault: () => { prevented++; } });
+  const first = submit();
+  expect(button.disabled).toBe(true);
+  expect(calls).toEqual([[select.value, "Goal", "src/app.js", "Check behavior"]]);
+  await submit();
+  expect(prevented).toBe(2);
+  expect(calls).toHaveLength(1);
+  controller.busy = false;
+  finish({ kind: "started", task_id: "bounded-" + "b".repeat(32) });
+  await first;
+  expect(status.textContent).toContain("bounded-" + "b".repeat(32));
+  expect(status.textContent).toContain("Updates appear automatically.");
+  expect(button.disabled).toBe(false);
+  const second = submit();
+  expect(button.disabled).toBe(true);
+  controller.busy = false;
+  finish({ kind: "failed" });
+  await second;
+  expect(status.textContent).toBe("Bounded start failed.");
+  expect(button.disabled).toBe(false);
+  controller.start = async () => { throw new Error("private response detail"); };
+  await submit();
+  expect(status.textContent).toBe("Bounded start failed.");
+  expect(button.disabled).toBe(false);
+});
+
 
 describe("dashboard display labels (API values remain unchanged)", () => {
   it("translates state, mode, actor, pipeline stage and status", () => {
