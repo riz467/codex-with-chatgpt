@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { boundedFinalizationRoot, createMcpServer, recoverFailedBoundedWorkspace } from "../src/mcp/server.js";
-import { BoundedTasks } from "../src/mcp/bounded-task.js";
+import { BoundedTasks, headWorktreeBaselineSha } from "../src/mcp/bounded-task.js";
 import { prepareBoundedCommit, commitBoundedPatch } from "../src/mcp/typed-actions.js";
 import type { Workspace } from "../src/workspace/manager.js";
 import type { Logger } from "../src/logger/index.js";
@@ -641,6 +641,67 @@ describe("bounded semantic lifecycle over MCP", () => {
   });
 });
 
+describe("bounded EOL baseline regression", () => {
+  const name = "eol.txt";
+  const input = { repo: "fixture", goal: "Update EOL fixture", edit_paths: [name],
+    acceptance_criteria: ["Preserve the committed baseline"], task_kind: "text_change" as const,
+    execution_profile: "tracked_utf8_text" as const, worker: "opencode" as const,
+    codex: { allowed: false, max_calls: 0 }, max_revisions: 1, timeout_ms: 600000 };
+
+  it("rejects a manually CRLF-mutated tracked file even when Git status hides it", () => {
+    const repo = makeTmpDir("bounded-hidden-crlf");
+    const state = makeTmpDir("bounded-hidden-crlf-state");
+    try {
+      makeGitRepo(repo);
+      git(repo, "config", "core.autocrlf", "false");
+      write(repo, name, "first\nsecond\n");
+      git(repo, "add", name);
+      git(repo, "commit", "-m", "LF baseline");
+      git(repo, "update-index", "--assume-unchanged", "--", name);
+      const file = path.join(repo, name);
+      fs.writeFileSync(file, "first\r\nsecond\r\n");
+      expect(git(repo, "status", "--porcelain").trim()).toBe("");
+      expect(headWorktreeBaselineSha(repo, name, file)).toBeNull();
+      const tasks = new BoundedTasks({ fixture: repo }, path.join(state, "tasks"),
+        async () => { throw new Error("Worker must not run"); });
+      let failure: unknown;
+      try { tasks.start(input); } catch (error) { failure = error; }
+      expect(failure).toMatchObject({ code: "DIRTY_REPO" });
+    } finally {
+      cleanup(repo);
+      cleanup(state);
+    }
+  });
+
+  it("uses raw HEAD bytes as the baseline for a clean Git CRLF checkout", () => {
+    const repo = makeTmpDir("bounded-git-crlf");
+    const state = makeTmpDir("bounded-git-crlf-state");
+    try {
+      makeGitRepo(repo);
+      git(repo, "config", "core.autocrlf", "false");
+      write(repo, name, "first\nsecond\n");
+      git(repo, "add", name);
+      git(repo, "commit", "-m", "LF baseline");
+      const headBytes = execFileSync("git", ["-C", repo, "show", `HEAD:${name}`]);
+      const headSha = createHash("sha256").update(headBytes).digest("hex");
+      git(repo, "config", "core.autocrlf", "true");
+      const file = path.join(repo, name);
+      fs.unlinkSync(file);
+      git(repo, "checkout", "HEAD", "--", name);
+      expect(fs.readFileSync(file).toString()).toBe("first\r\nsecond\r\n");
+      expect(git(repo, "status", "--porcelain").trim()).toBe("");
+      expect(headWorktreeBaselineSha(repo, name, file)).toBe(headSha);
+      const tasks = new BoundedTasks({ fixture: repo }, path.join(state, "tasks"),
+        async () => { throw new Error("Worker must not run"); });
+      const started = tasks.start(input);
+      expect(tasks.status(started.task_id)).toMatchObject({ state: "RUNNING", baseline: { [name]: headSha } });
+    } finally {
+      cleanup(repo);
+      cleanup(state);
+    }
+  });
+});
+
 describe("failed bounded workspace recovery", () => {
   const taskId = `bounded-${"c".repeat(32)}`;
   let fixtureRoot: string;
@@ -683,6 +744,29 @@ describe("failed bounded workspace recovery", () => {
     write(fixtureRoot, "recovery.txt", "failed verification\n");
     expect(recover()).toEqual({ task_id: taskId, result: "recovered" });
     expect(fs.readFileSync(path.join(fixtureRoot, "recovery.txt"), "utf8")).toBe("baseline\n");
+    expect(recover()).toEqual({ task_id: taskId, result: "already_clean" });
+    expect(JSON.stringify(task)).toBe(evidence);
+  });
+
+  it("recovers Git CRLF checkout bytes using a raw HEAD blob baseline", () => {
+    const name = "recovery.txt";
+    const file = path.join(fixtureRoot, name);
+    const headBytes = execFileSync("git", ["-C", fixtureRoot, "show", `HEAD:${name}`]);
+    const headSha = createHash("sha256").update(headBytes).digest("hex");
+    git(fixtureRoot, "config", "core.autocrlf", "true");
+    fs.unlinkSync(file);
+    git(fixtureRoot, "checkout", "HEAD", "--", name);
+    const checkoutBytes = fs.readFileSync(file);
+    expect(checkoutBytes.toString()).toBe("baseline\r\n");
+    expect(checkoutBytes.equals(headBytes)).toBe(false);
+    expect(git(fixtureRoot, "status", "--porcelain").trim()).toBe("");
+    task.baseline = { [name]: headSha };
+    const evidence = JSON.stringify(task);
+    write(fixtureRoot, name, "failed verification\n");
+    expect(recover()).toEqual({ task_id: taskId, result: "recovered" });
+    expect(fs.readFileSync(file)).toEqual(checkoutBytes);
+    expect(git(fixtureRoot, "status", "--porcelain").trim()).toBe("");
+    expect(JSON.stringify(task)).toBe(evidence);
     expect(recover()).toEqual({ task_id: taskId, result: "already_clean" });
     expect(JSON.stringify(task)).toBe(evidence);
   });
