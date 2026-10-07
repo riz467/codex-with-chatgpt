@@ -1,6 +1,6 @@
-# CT700 production-oriented Typed Action Approver — IR-02
+# CT700 production-oriented Typed Action Approver — IR-02 and IR-05 Stage 2B-1 offline core
 
-Offline implementation, not a live deployment or Passkey cutover. Production composition is `production-cli.js` → `createProductionApprover`. Its peer verifier is **deny-all**, with no config/environment/plugin override. Historical `cli.js`, `createApproverService` default profile, `approver:pack` and `deploy/ai-approver` retain compatibility only; they are not production CT700 entrypoints. The new package excludes the historical CLI and browser script. Shared server/storage code includes compatibility modules, but production route registration and store gates disable that protocol.
+Offline implementation, not a live deployment or Passkey cutover. Production composition is `production-cli.js` → `createProductionApprover`. Its peer verifier is **deny-all**, with no config/environment/plugin override. Historical `cli.js`, `createApproverService` default profile, `approver:pack` and `deploy/ai-approver` retain compatibility only; they are not production CT700 entrypoints. The new package excludes the historical CLI and browser script. Shared server/storage code includes compatibility modules, but production route registration and store gates disable that protocol. The IR-05 Stage 2B-1 local-principal and gateway core described below is offline only; it does not change the CLI's deny-all verifier.
 
 ## Surface matrix
 
@@ -15,7 +15,15 @@ Offline implementation, not a live deployment or Passkey cutover. Production com
 | `GET /api/typed-action-{status,evidence}/:id` | absent | host-authorized exact UUID only |
 | legacy DONE submit/sign/evidence, generic admin/signer/window/key/credential mutation | absent | absent |
 
-Separate apps and route tables, not a shared ingress middleware toggle. Production CLI fixes both ports and loopback addresses. Future Tailnet HTTPS 443 maps only to Human, future CT701 mTLS 7443 only to Peer. No external listener, mTLS, gateway identity-header trust, Tailscale change or Funnel is supplied here. Loopback alone does not authenticate a local principal; the default peer dependency denies registration **and retrieval**. Browser Origin/Host are never peer credentials.
+Human and Peer are separate apps and route tables, not a shared ingress middleware toggle. Production CLI fixes their loopback addresses and ports. Future Tailnet HTTPS 443 maps only to Human; future CT701 mTLS 7443 maps only to Peer. Browser Origin/Host are never peer credentials. Loopback alone does not authenticate a local principal.
+
+## IR-05 Stage 2B-1 offline local-principal and gateway core
+
+The three surfaces are Human on loopback `127.0.0.1:48768`; Peer on loopback `127.0.0.1:48769`, requiring a process-local credential on exactly its presentation POST and status/evidence GET APIs; and a separately returned offline Gateway app. The Gateway app forwards only those POST presentations and GET status/evidence requests to `127.0.0.1:48769`. It is not a generic proxy, and no gateway listener is active.
+
+Each composition generates an unpredictable 32-byte credential. Peer performs route-specific local-principal checks before invoking `TrustedTypedActionPresentationVerifier` or the store. Gateway forwarding isolates caller-supplied headers from its injected credential; callers cannot supply Peer authority through forwarded headers. Request handling bounds JSON and timeouts and fails closed with generic responses. The credential authenticates neither a CT701 remote transport identity nor a human approval: the verifier remains independently authoritative, and the production CLI still uses its deny-all verifier.
+
+This is offline code only. It supplies no live `:7443` inbound mTLS listener, client-chain/SPKI/URI role verification, production certificates or key generation, ingress/Tailscale/firewall/network policy, deployment, external negative end-to-end test, push, authoritative DONE or Passkey cutover.
 
 ## Trusted presentation contract and lifecycle
 
@@ -47,10 +55,10 @@ Package includes production runtime + required Typed Action/MCP enum/legacy cont
 
 `node ct700-package-integrity.mjs <package> <independently-approved-manifest-sha256>` verifies exact inventory, file types, hashes and runtime. An approved digest must come from outside the artifact; a self-computed digest is only a build consistency check. Missing, extra, modified or linked files fail. Retain the reviewed manifest hash separately.
 
-`pnpm ct700:verify-package` copies the package outside checkout, runs a fresh child process with only local package imports, ephemeral SQLite/Ed25519 and software WebAuthn fixture, loopback-only HTTP, Human health, peer deny-all, trusted registration/display, actual signature verification, restart and tamper/missing-file negative checks. The fixture guards socket connections to loopback and rejects DNS/UDP/fetch before package import (Node 24 has no network permission flag); this is test instrumentation, not an OS sandbox. Fixture keys/DB are outside the artifact and removed afterwards. This validates software behavior, not real browser enrollment, Linux/systemd/DAC, live transport or external ACLs.
+`pnpm ct700:verify-package` copies the package outside checkout, runs a fresh child process with only local package imports, ephemeral SQLite/Ed25519 and software WebAuthn fixture, loopback-only HTTP, Human health, peer deny-all, trusted registration/display, actual signature verification, restart and tamper/missing-file negative checks. The fixture guards socket connections to loopback and rejects DNS/UDP/fetch before package import (Node 24 has no network permission flag); this is test instrumentation, not an OS sandbox. Fixture keys/DB are outside the artifact and removed afterwards. This validates software behavior, not real browser enrollment, Linux/systemd/DAC, live transport or external ACLs. Fixed TypeScript/CT700 regressions pass for the offline core; this documentation change makes no code or test edits and has no production side effects.
 
 ## Remaining campaign dependencies
 
 - IR-04: CT701 coordinator, authenticated publication/invalidation, currentness barriers/fencing and partition/restart protocol.
-- IR-05: service-only authenticated gateway/mTLS 7443, local principal enforcement, Tailscale/physical ingress policies and external negative tests.
+- IR-05: beyond the offline Stage 2B-1 core, service-only authenticated gateway/mTLS 7443, remote transport identity and role verification, Tailscale/physical ingress policies and external negative tests remain dependencies.
 - Other campaign steps: approved Linux runtime/release, key helpers and domain identity, local enrollment administration, independent anchors, real Human enrollment/UV and full isolated campaign acceptance. None is implied by IR-02 fixture PASS.
