@@ -24,7 +24,7 @@ import { GatewayError, verifyBundleIntegrity, startTestJob, startOrchestration, 
 import { completeCurrentAutonomous } from "./autonomous-approval.js";
 import { searchRepo, readRepoFile } from "./repo-research.js";
 import type { RepoResearchRoots } from "./repo-research.js";
-import { BoundedTasks, type ExecutionProfile } from "./bounded-task.js";
+import { BoundedTasks, headWorktreeBaselineSha, type ExecutionProfile } from "./bounded-task.js";
 import { prepareBoundedCommit, commitBoundedPatch, getBoundedCommitStatus } from "./typed-actions.js";
 import type { OrchestrationReadDependencies } from "./local-gateway.js";
 import { semanticSession } from "./semantic-session.js";
@@ -574,6 +574,8 @@ export function recoverFailedBoundedWorkspace(
       }
       const restore = runGit(root, ["restore", "--source", task.baseline_head, "--worktree", "--", ...observed]);
       if (!restore.ok) throw new Error("Git restore failed");
+      runGit(root, ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+        "update-index", "--really-refresh", "--", ...observed]);
     }
     const after = gitStatus(workspace);
     if (head() !== task.baseline_head || !after.isRepo || after.staged.length ||
@@ -584,7 +586,7 @@ export function recoverFailedBoundedWorkspace(
     for (const rel of task.contract.edit_paths) {
       const file = path.join(root, rel);
       if (!fs.lstatSync(file).isFile() ||
-          createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== task.baseline[rel]) {
+          headWorktreeBaselineSha(root, rel, file) !== task.baseline[rel]) {
         throw new Error("Recovered file does not match its baseline digest");
       }
     }
