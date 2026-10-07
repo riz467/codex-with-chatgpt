@@ -180,11 +180,11 @@ export class Collector {
       if (!projection) return null;
       let commit: Record<string, unknown> | null = null;
       try { commit = obj(this.boundedCommitStatus(taskId)); } catch { /* Fail closed on missing status. */ }
-      if (commit?.task_id !== taskId || !["NOT_PREPARED", "PREPARED", "COMMITTED"].includes(String(commit.commit_state))) commit = null;
-      const commit_state = commit?.commit_state as "NOT_PREPARED" | "PREPARED" | "COMMITTED" | undefined ?? null;
-      const local_commit = commit_state === "COMMITTED" && typeof commit?.local_commit === "string" && /^[a-f0-9]{40}$/.test(commit.local_commit) ? commit.local_commit : null;
-      return { ...projection, commit_state, local_commit,
-        authoritative_done: commit?.authoritative_done === false && (commit_state !== "COMMITTED" || local_commit !== null) };
+      const state = commit?.task_id === taskId && commit.authoritative_done === false ?
+        enumValue(commit.state, ["NOT_PREPARED", "PREPARED", "COMMITTED"]) : null;
+      const local_commit = state === "COMMITTED" && typeof commit?.commit === "string" && /^[a-f0-9]{40}$/.test(commit.commit) ? commit.commit : null;
+      const commit_state = state === "COMMITTED" && local_commit === null ? null : state;
+      return { ...projection, commit_state, local_commit, authoritative_done: commit_state !== null };
     } catch { return null; }
   }
   boundedTasks(limit = 20) {

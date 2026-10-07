@@ -250,32 +250,37 @@ describe("dashboard read-only evidence", () => {
     const save = (value: unknown) => fs.writeFileSync(path.join(dir, "task.json"), JSON.stringify(value));
     const evidence = { version: 2, task_id: taskId, state: "REVIEW_PENDING", contract, contract_sha256, revisions: [revision] };
     save(evidence);
-    let status: unknown = { task_id: taskId, commit_state: "NOT_PREPARED", local_commit: "a".repeat(40), authoritative_done: true, secret: "receipt secret" };
+    let status: unknown = { task_id: taskId, state: "NOT_PREPARED", commit: "a".repeat(40), authoritative_done: false, secret: "receipt secret" };
     const probe = vi.fn(() => status);
     const collector = new Collector(f.roots, f.review, f.queue, undefined, undefined, probe);
     const projected = () => collector.boundedTask(taskId);
-    expect(projected()).toMatchObject({ commit_state: "NOT_PREPARED", local_commit: null, authoritative_done: false,
+    expect(projected()).toMatchObject({ commit_state: "NOT_PREPARED", local_commit: null, authoritative_done: true,
       review_reviewer: "opencode-semantic", review_verdict: "NEEDS_WORK", latest_semantic_review_diagnostic_code: null });
-    status = { task_id: taskId, commit_state: "PREPARED", local_commit: "a".repeat(40), authoritative_done: true };
-    expect(projected()).toMatchObject({ commit_state: "PREPARED", local_commit: null, authoritative_done: false });
-    status = { task_id: taskId, commit_state: "COMMITTED", local_commit: "a".repeat(40), authoritative_done: false,
-      receipt: { secret: "receipt secret" } };
+    status = { task_id: taskId, state: "PREPARED", commit: "a".repeat(40), authoritative_done: false };
+    expect(projected()).toMatchObject({ commit_state: "PREPARED", local_commit: null, authoritative_done: true });
+    status = { task_id: taskId, state: "COMMITTED", commit: "a".repeat(40), authoritative_done: false,
+      receipt: { secret: "receipt secret" }, commit_state: "private legacy state", local_commit: "private legacy hash" };
     expect(projected()).toMatchObject({ commit_state: "COMMITTED", local_commit: "a".repeat(40), authoritative_done: true });
-    expect(JSON.stringify(projected())).not.toMatch(/secret|session_id|execution_id|receipt|acceptance_criteria|provider|model|usage|findings/);
-    for (const hash of ["A".repeat(40), "g".repeat(40), "a".repeat(39)]) {
-      for (const authoritative_done of [true, false]) {
-        status = { task_id: taskId, commit_state: "COMMITTED", local_commit: hash, authoritative_done };
-        expect(projected()).toMatchObject({ commit_state: "COMMITTED", local_commit: null, authoritative_done: false });
+    expect(JSON.stringify(projected())).not.toMatch(/secret|session_id|execution_id|receipt|acceptance_criteria|provider|model|usage|findings|private legacy/);
+    for (const commit of [undefined, "A".repeat(40), "g".repeat(40), "a".repeat(39), 42]) {
+      status = { task_id: taskId, state: "COMMITTED", commit, authoritative_done: false };
+      expect(projected()).toMatchObject({ commit_state: null, local_commit: null, authoritative_done: false });
+    }
+    for (const authoritative_done of [true, undefined, null, "false"]) {
+      for (const state of ["NOT_PREPARED", "PREPARED", "COMMITTED"]) {
+        status = { task_id: taskId, state, commit: "a".repeat(40), authoritative_done };
+        expect(projected()).toMatchObject({ commit_state: null, local_commit: null, authoritative_done: false });
       }
     }
-    for (const invalid of [null, { task_id: `bounded-${"c".repeat(32)}`, commit_state: "COMMITTED", local_commit: "a".repeat(40), authoritative_done: false },
-      { task_id: taskId, commit_state: "DONE", local_commit: "a".repeat(40), authoritative_done: false }]) {
+    for (const invalid of [null, { task_id: `bounded-${"c".repeat(32)}`, state: "COMMITTED", commit: "a".repeat(40), authoritative_done: false },
+      { task_id: taskId, state: "DONE", commit: "a".repeat(40), authoritative_done: false },
+      { task_id: taskId, commit_state: "COMMITTED", local_commit: "a".repeat(40), authoritative_done: false }]) {
       status = invalid;
       expect(projected()).toMatchObject({ commit_state: null, local_commit: null, authoritative_done: false });
     }
     probe.mockImplementationOnce(() => { throw new Error("private failure"); });
     expect(projected()).toMatchObject({ commit_state: null, local_commit: null, authoritative_done: false });
-    status = { task_id: taskId, commit_state: "NOT_PREPARED", authoritative_done: true };
+    status = { task_id: taskId, state: "NOT_PREPARED", authoritative_done: false };
     for (const code of ["SEMANTIC_REVIEW_FAILED", "SEMANTIC_REVIEW_TIMEOUT", "SEMANTIC_REVIEW_INVALID"]) {
       save({ ...evidence, revisions: [{ ...revision, semantic_review_diagnostic: { phase: "SEMANTIC_REVIEW", error_code: code, secret: "diagnostic secret" } }] });
       expect(projected()?.latest_semantic_review_diagnostic_code).toBe(code);
