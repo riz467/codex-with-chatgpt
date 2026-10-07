@@ -232,4 +232,100 @@ describe("dashboard read-only evidence", () => {
     save({ ...evidence, revisions: [{ ...revision, verify: undefined, verification: true, file_count: 1 }] });
     expect(f.collector.boundedTask(taskId)).toBeNull();
   });
+
+describe("local bounded start boundary", () => {
+  const task_id = `bounded-${"a".repeat(32)}`, contract_sha256 = "b".repeat(64);
+  const body = { repo: "codex-with-chatgpt", goal: "Change the dashboard", edit_paths: ["src/dashboard/server.ts"], acceptance_criteria: ["Tests pass"] };
+  async function setup() {
+    let time = 1000;
+    const start = vi.fn((_contract: unknown) => ({ task_id, contract_sha256, secret: "private" }));
+    const server = createServer(createDashboard(fixture().collector, false, undefined, start, () => time)); servers.push(server);
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address(); if (!address || typeof address === "string") throw new Error("No port");
+    const base = `http://127.0.0.1:${address.port}`;
+    const session = async () => {
+      const response = await fetch(base + "/api/bounded/start-session", { headers: { "Sec-Fetch-Site": "same-origin" } });
+      const { csrf } = await response.json() as { csrf: string };
+      return { response, csrf, cookie: response.headers.get("set-cookie")!.split(";")[0] };
+    };
+    const post = (token: { csrf: string; cookie: string }, value: unknown = body, headers: Record<string, string> = {}) =>
+      fetch(base + "/api/bounded/start", { method: "POST", headers: {
+        "Content-Type": "application/json", Origin: base, "Sec-Fetch-Site": "same-origin",
+        Cookie: token.cookie, "X-Bounded-Start-Csrf": token.csrf, ...headers
+      }, body: JSON.stringify(value) });
+    return { base, start, session, post, advance: (ms: number) => { time += ms; } };
+  }
+  it.each([
+    ["codex-with-chatgpt", "tracked_typescript_dashboard"],
+    ["codex-with-chatgpt-control-plane", "tracked_typescript_control_plane"]
+  ])("maps %s to its fixed profile and sanitizes success", async (repo, execution_profile) => {
+    const { start, session, post } = await setup();
+    const token = await session();
+    expect(token.response.status).toBe(200);
+    expect(token.response.headers.get("set-cookie")).toContain("HttpOnly");
+    expect(token.response.headers.get("set-cookie")).toContain("SameSite=Strict");
+    expect(token.response.headers.get("set-cookie")).toContain("Path=/api/bounded");
+    expect(token.response.headers.get("set-cookie")).toContain("Max-Age=120");
+    const response = await post(token, { ...body, repo });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({ task_id, contract_sha256 });
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith({ ...body, repo, execution_profile, task_kind: "text_change",
+      worker: "opencode", codex: { allowed: false, max_calls: 0 }, max_revisions: 3, timeout_ms: 600000 });
+    expect(start.mock.calls[0]).toHaveLength(1);
+    expect((await post(token, { ...body, repo })).status).toBe(403);
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+  it("rejects missing, invalid, expired and reused CSRF", async () => {
+    const { base, start, session, post, advance } = await setup();
+    const token = await session();
+    expect((await post(token, body, { "X-Bounded-Start-Csrf": "0".repeat(64) })).status).toBe(403);
+    expect((await post(token, body, { Cookie: "" })).status).toBe(403);
+    expect((await post(token)).status).toBe(201);
+    expect((await post(token)).status).toBe(403);
+    const expired = await session(); advance(120_000);
+    expect((await post(expired)).status).toBe(403);
+    expect((await fetch(base + "/api/bounded/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).status).toBe(403);
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+  it("rejects malformed bodies, paths and limits without starting", async () => {
+    const { start, session, post } = await setup();
+    const invalid = [
+      { ...body, repo: "pve-doc" }, { ...body, extra: true }, { goal: body.goal, repo: body.repo, edit_paths: body.edit_paths },
+      { ...body, goal: "" }, { ...body, goal: "x".repeat(2001) },
+      { ...body, edit_paths: [] }, { ...body, edit_paths: ["a", "b", "c", "d"] },
+      { ...body, edit_paths: ["a".repeat(241)] },
+      ...["../secret", "src/../secret", "/absolute", "C:/absolute", "src\\secret", "a//b", ".env"].map(p => ({ ...body, edit_paths: [p] })),
+      { ...body, acceptance_criteria: [] }, { ...body, acceptance_criteria: Array(7).fill("x") },
+      { ...body, acceptance_criteria: [" "] }, { ...body, acceptance_criteria: ["x".repeat(501)] }
+    ];
+    for (const value of invalid) expect((await post(await session(), value)).status).toBe(400);
+    expect(start).not.toHaveBeenCalled();
+  });
+  it("rejects cross-origin and non-browser requests", async () => {
+    const { base, start, session, post } = await setup();
+    const token = await session();
+    for (const headers of [{ Origin: "http://evil.example" }, { "Sec-Fetch-Site": "cross-site" },
+      { "Sec-Fetch-Site": "" }, { "Content-Type": "application/json; charset=utf-8" }]) {
+      expect((await post(token, body, headers)).status).toBe(403);
+    }
+    expect((await fetch(base + "/api/bounded/start-session")).status).toBe(403);
+    expect((await fetch(base + "/api/bounded/start-session", { headers: { "Sec-Fetch-Site": "cross-site" } })).status).toBe(403);
+    expect(start).not.toHaveBeenCalled();
+  });
+  it("does not expose helper failures or invalid results", async () => {
+    const { start, session, post } = await setup();
+    start.mockImplementationOnce(() => { throw new Error("private failure"); });
+    let response = await post(await session());
+    expect(response.status).toBe(502);
+    expect(JSON.stringify(await response.json())).not.toContain("private");
+    start.mockImplementationOnce(() => ({ task_id: "invalid", contract_sha256, secret: "private" }));
+    response = await post(await session());
+    expect(response.status).toBe(502);
+    start.mockImplementationOnce(() => ({ task_id, contract_sha256: "invalid", secret: "private" }));
+    response = await post(await session());
+    expect(response.status).toBe(502);
+    expect(start).toHaveBeenCalledTimes(3);
+  });
+});
 });
