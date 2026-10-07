@@ -307,7 +307,11 @@ describe("local bounded start boundary", () => {
     const base = `http://127.0.0.1:${address.port}`;
     const session = async () => {
       const response = await fetch(base + "/api/bounded/start-session", { headers: { "Sec-Fetch-Site": "same-origin" } });
-      const { csrf } = await response.json() as { csrf: string };
+      const csrf = response.headers.get("X-Bounded-Start-CSRF");
+      expect(csrf).toMatch(/^[a-f0-9]{64}$/);
+      expect(response.headers.get("content-type")).toBeNull();
+      expect(await response.text()).toBe("");
+      if (csrf === null) throw new Error("Missing CSRF header");
       return { response, csrf, cookie: response.headers.get("set-cookie")!.split(";")[0] };
     };
     const post = (token: { csrf: string; cookie: string }, value: unknown = body, headers: Record<string, string> = {}) =>
@@ -323,7 +327,7 @@ describe("local bounded start boundary", () => {
   ])("maps %s to its fixed profile and sanitizes success", async (repo, execution_profile) => {
     const { start, session, post } = await setup();
     const token = await session();
-    expect(token.response.status).toBe(200);
+    expect(token.response.status).toBe(204);
     expect(token.response.headers.get("set-cookie")).toContain("HttpOnly");
     expect(token.response.headers.get("set-cookie")).toContain("SameSite=Strict");
     expect(token.response.headers.get("set-cookie")).toContain("Path=/api/bounded");
@@ -341,6 +345,8 @@ describe("local bounded start boundary", () => {
   it("rejects missing, invalid, expired and reused CSRF", async () => {
     const { base, start, session, post, advance } = await setup();
     const token = await session();
+    expect((await post(token, body, { "X-Bounded-Start-Csrf": "" })).status).toBe(403);
+    expect((await post(token, { ...body, csrf: token.csrf }, { "X-Bounded-Start-Csrf": "" })).status).toBe(403);
     expect((await post(token, body, { "X-Bounded-Start-Csrf": "0".repeat(64) })).status).toBe(403);
     expect((await post(token, body, { Cookie: "" })).status).toBe(403);
     expect((await post(token)).status).toBe(201);

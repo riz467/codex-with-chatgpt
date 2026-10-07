@@ -108,7 +108,7 @@ export function createDashboard(collector = new Collector(), fixtureApprovalEnab
     for (const [key, value] of boundedSessions) if (value.expires <= current) boundedSessions.delete(key);
     boundedSessions.set(session, { csrf, expires: current + 120_000 });
     res.cookie("bounded_start_session", session, { httpOnly: true, sameSite: "strict", path: "/api/bounded", maxAge: 120_000 });
-    res.json({ csrf });
+    res.set("X-Bounded-Start-CSRF", csrf).status(204).end();
   });
   app.post("/api/bounded/start", express.json({ limit: "16kb", type: "application/json", strict: true }), (req, res) => {
     if (!boundedBrowser(req, true)) { res.status(403).json({ error: "LOCAL_BROWSER_REQUIRED" }); return; }
