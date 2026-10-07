@@ -1,6 +1,6 @@
 import express from 'express';
 import { request as httpRequest } from 'node:http';
-import type { KeyObject } from 'node:crypto';
+import { randomBytes, timingSafeEqual, type KeyObject } from 'node:crypto';
 import { createApproverService, type ApproverConfig } from './server.js';
 import { ApproverStore } from './storage.js';
 import { denyAllPresentationVerifier, parsePresentation, sameRequest, type TrustedTypedActionPresentationVerifier } from './presentation.js';
@@ -13,9 +13,19 @@ export function createProductionApprover(config: ApproverConfig, store: Approver
   verifier: TrustedTypedActionPresentationVerifier = denyAllPresentationVerifier, now = Date.now) {
   if (config.port !== humanPort || store.profile !== 'production') throw Error('INVALID_PRODUCTION_CONFIGURATION');
   const human = createApproverService(config, store, key, now, undefined, 'human-production');
+  const credential = randomBytes(32);
+  const requireLocalPrincipal: express.RequestHandler = (req, res, next) => {
+    const supplied = req.get('X-CT700-Local-Principal');
+    const wellFormed = typeof supplied === 'string' && /^[0-9a-f]{64}$/.test(supplied);
+    const candidate = Buffer.from(wellFormed ? supplied : '00'.repeat(32), 'hex');
+    if (!timingSafeEqual(candidate, credential) || !wellFormed) {
+      res.status(403).json({ error: 'UNTRUSTED_PEER' }); return;
+    }
+    next();
+  };
   const peer = express(); peer.disable('x-powered-by'); peer.disable('trust proxy');
   peer.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
-  peer.post('/api/typed-action-presentations', express.json({ limit: '32kb', strict: true }), (req, res) => {
+  peer.post('/api/typed-action-presentations', requireLocalPrincipal, express.json({ limit: '32kb', strict: true }), (req, res) => {
     try {
       const verified = verifier.verifyRegistration(req.body);
       if (!verified) { res.status(403).json({ error: 'UNTRUSTED_PEER' }); return; }
@@ -26,7 +36,7 @@ export function createProductionApprover(config: ApproverConfig, store: Approver
     } catch { res.status(403).json({ error: 'REJECTED' }); }
   });
   for (const operation of ['status', 'evidence'] as const) {
-    peer.get(`/api/typed-action-${operation}/:id`, (req, res) => {
+    peer.get(`/api/typed-action-${operation}/:id`, requireLocalPrincipal, (req, res) => {
       const id = String(req.params.id);
       try {
         if (!idSchema.safeParse(id).success || !verifier.authorizeLookup({ operation, approvalRequestId: id })) {
@@ -75,7 +85,8 @@ export function createProductionApprover(config: ApproverConfig, store: Approver
     const fail = () => { finish(502, { error: 'BAD_GATEWAY' }); outgoing?.destroy(); };
     outgoing = httpRequest({ hostname: '127.0.0.1', port: peerPort, method: req.method,
       path: req.originalUrl, agent: false,
-      headers: body === undefined ? {} : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, upstream => {
+      headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }),
+        'X-CT700-Local-Principal': credential.toString('hex') } }, upstream => {
       const allowed = req.method === 'POST' ? [201, 400, 403, 409] : [200, 403, 404];
       if (!allowed.includes(upstream.statusCode ?? 0) || !/^application\/json(?:\s*;|$)/i.test(String(upstream.headers['content-type'] ?? ''))) {
         fail(); return;

@@ -109,11 +109,35 @@ describe('CT700 production Human / peer trust boundary', () => {
     expect((await x.peer('POST', '/api/typed-action-presentations', body)).status).toBe(403);
     expect((await x.peer('GET', `/api/typed-action-status/${randomUUID()}`)).status).toBe(403);
   });
+  it('default deny-all verifier rejects gateway registration and lookups without changing the store', async () => {
+    const x = await setup(false), p = fixture(), id = p.request.approvalRequestId;
+    expect((await x.gateway('POST', '/api/typed-action-presentations', p)).status).toBe(403);
+    expect((await x.gateway('GET', `/api/typed-action-status/${id}`)).status).toBe(403);
+    expect((await x.gateway('GET', `/api/typed-action-evidence/${id}`)).status).toBe(403);
+    expect(x.store.presentation(id)).toBeNull();
+    expect(x.store.typedEvidence(id)).toBeNull();
+  });
   it('rejects an unverified body even with a valid host record; no header authority', async () => {
     const x = await setup(); const p = fixture();
     expect((await x.peer('POST', '/api/typed-action-presentations', p)).status).toBe(403);
     x.authorize(p);
     expect((await x.gateway('POST', '/api/typed-action-presentations', p, { Origin: '', Host: 'untrusted' })).status).toBe(201);
+  });
+  it('requires the composition-local principal on peer routes, not caller headers', async () => {
+    const x = await setup(), p = fixture(), id = p.request.approvalRequestId;
+    x.authorize(p);
+    const spoof = { 'X-CT700-Local-Principal': hash(), Authorization: 'Bearer attacker' };
+    expect((await x.peer('POST', '/api/typed-action-presentations', p)).status).toBe(403);
+    expect((await x.peer('POST', '/api/typed-action-presentations', p, spoof)).status).toBe(403);
+    for (const route of [`/api/typed-action-status/${id}`, `/api/typed-action-evidence/${id}`]) {
+      expect((await x.peer('GET', route)).status).toBe(403);
+      expect((await x.peer('GET', route, undefined, spoof)).status).toBe(403);
+    }
+    expect(x.store.presentation(id)).toBeNull();
+    expect((await x.gateway('POST', '/api/typed-action-presentations', p, spoof)).status).toBe(201);
+    expect((await x.gateway('GET', `/api/typed-action-status/${id}`, undefined, spoof)).body).toMatchObject({ approvalRequestId: id });
+    expect((await x.gateway('GET', `/api/typed-action-evidence/${id}`, undefined, spoof)).status).toBe(404);
+    expect((await x.peer('GET', `/api/typed-action-status/${id}`, undefined, spoof)).status).toBe(403);
   });
   it.each(actionBindingFields)('rejects presentation/request %s mismatch', async field => {
     const x = await setup(), p = fixture();
@@ -186,6 +210,8 @@ describe('CT700 production Human / peer trust boundary', () => {
     const winner = outcomes[0].status === 201 ? p : q;
     const id = winner.request.approvalRequestId;
     const evidence = await x.gateway('GET', `/api/typed-action-evidence/${id}`);
+    expect((await x.peer('GET', `/api/typed-action-evidence/${id}`)).status).toBe(403);
+    expect((await x.gateway('GET', `/api/typed-action-status/${id}`)).status).toBe(200);
     expect(verifyTypedActionApproval(evidence.body, winner.context, new Map([['test', x.key.publicKey]]), base).valid).toBe(true);
     expect(x.store.credential(x.device.id)).toMatchObject({ counter, revision: 1 });
     expect((await x.human('GET', `/api/typed-action-evidence/${id}`)).status).toBe(404);
@@ -213,7 +239,7 @@ describe('CT700 production Human / peer trust boundary', () => {
   it('host attestation binds approval request identity, not just action fields', async () => {
     const x = await setup(), p = fixture(); x.authorize(p);
     const altered = rehash({ ...p, request: { ...p.request, approvalRequestId: randomUUID() } });
-    expect((await x.peer('POST', '/api/typed-action-presentations', altered)).status).toBe(403);
+    expect((await x.gateway('POST', '/api/typed-action-presentations', altered)).status).toBe(403);
   });
   it.each(['trigger', 'column', 'foreign', 'version', 'journal'] as const)('production startup rejects %s without repair', async failure => {
     const x = await setup();
@@ -281,6 +307,7 @@ describe('CT700 production Human / peer trust boundary', () => {
       const req = request({ hostname: '127.0.0.1', port: address.port, method, path: route,
         headers: { Host: 'attacker.example', Origin: 'https://attacker.example', Authorization: 'Bearer attacker',
           Cookie: 'session=attacker', 'X-Forwarded-Host': 'attacker.example', 'X-Forwarded-For': '192.0.2.1',
+          'X-CT700-Local-Principal': '00'.repeat(32), 'X-Custom-Identity': 'attacker',
           'Content-Type': 'application/json' } }, res => {
         const chunks: Buffer[] = [];
         res.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -317,7 +344,9 @@ describe('CT700 production Human / peer trust boundary', () => {
       ]);
       for (const call of seen) {
         expect(call.host).toBe('127.0.0.1:48769');
-        for (const header of ['origin', 'authorization', 'cookie', 'x-forwarded-host', 'x-forwarded-for'])
+        expect(call.headers['x-ct700-local-principal']).toMatch(/^[0-9a-f]{64}$/);
+        expect(call.headers['x-ct700-local-principal']).not.toBe('00'.repeat(32));
+        for (const header of ['origin', 'authorization', 'cookie', 'x-forwarded-host', 'x-forwarded-for', 'x-custom-identity'])
           expect(call.headers[header]).toBeUndefined();
       }
       for (const [method, route] of [
