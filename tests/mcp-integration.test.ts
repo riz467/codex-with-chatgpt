@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { boundedFinalizationRoot, createMcpServer, recoverFailedBoundedWorkspace } from "../src/mcp/server.js";
 import { BoundedTasks } from "../src/mcp/bounded-task.js";
+import { prepareBoundedCommit, commitBoundedPatch } from "../src/mcp/typed-actions.js";
 import type { Workspace } from "../src/workspace/manager.js";
 import type { Logger } from "../src/logger/index.js";
 import { canonicalJson } from "../src/task-contract/contract.js";
@@ -225,6 +227,50 @@ describe("bounded PASS finalization routing", () => {
       "C:\\work\\codex-with-chatgpt-extra"]) {
       expect(boundedFinalizationRoot(root, "autonomous-fixture")).toBeNull();
       expect(boundedFinalizationRoot(root, "codex-with-chatgpt-control-plane")).toBeNull();
+    }
+  });
+});
+
+describe("bounded raw diff finalization regression", () => {
+  it("commits exactly the reviewed patch ending in blank Git context bytes", async () => {
+    const repo = makeTmpDir("bounded-raw-diff");
+    const state = makeTmpDir("bounded-raw-state");
+    try {
+      makeGitRepo(repo);
+      git(repo, "config", "core.autocrlf", "false");
+      write(repo, "context.txt", "Old text.\nKeep context.\n\n\n");
+      git(repo, "add", "context.txt");
+      git(repo, "commit", "-m", "blank context baseline");
+      const worker: ConstructorParameters<typeof BoundedTasks>[2] = async () => ({
+        worker: "opencode", session_id: "ses_raw_context", execution_id: "msg_raw_context",
+        provider: "fixture", model: "fixture", usage: null, tools: 0, state: "completed",
+        output: JSON.stringify({ edits: [{ path: "context.txt", old_text: "Old text.", new_text: "Reviewed text." }] }),
+      });
+      const store = path.join(state, "tasks");
+      const repoRoot = fs.realpathSync.native(repo);
+      const tasks = new BoundedTasks({ fixture: repoRoot }, store, worker);
+      const started = tasks.start({ repo: "fixture", goal: "Update tracked context text",
+        edit_paths: ["context.txt"], acceptance_criteria: ["Preserve exact diff bytes"],
+        task_kind: "text_change", execution_profile: "tracked_utf8_text", worker: "opencode",
+        codex: { allowed: false, max_calls: 0 }, max_revisions: 1, timeout_ms: 600000 });
+      const revision = await tasks.execute(started.task_id);
+      expect(revision.state).toBe("REVIEW_PENDING");
+      const raw = execFileSync("git", ["-C", repoRoot, "diff", "--binary", "HEAD"]);
+      const artifact = fs.readFileSync(path.join(store, started.task_id, "revision-1-diff.patch"));
+      expect(raw.subarray(-4).toString()).toBe(" \n \n");
+      expect(artifact.equals(raw)).toBe(true);
+      expect(tasks.submitReview({ review_id: `review-${"a".repeat(8)}-${"b".repeat(4)}-${"c".repeat(4)}-${"d".repeat(4)}-${"e".repeat(12)}`,
+        task_id: started.task_id, revision: 1, contract_sha256: started.contract_sha256,
+        manifest_sha256: revision.manifest_sha256, reviewer: "chatgpt", verdict: "PASS", findings: [] }).state)
+        .toBe("REVIEW_ACCEPTED");
+      expect(prepareBoundedCommit(tasks, started.task_id, state).state).toBe("PREPARED");
+      expect(commitBoundedPatch(tasks, started.task_id, state, repoRoot))
+        .toMatchObject({ state: "COMMITTED", authoritative_done: false });
+      const committedPatch = execFileSync("git", ["-C", repoRoot, "show", "--format=", "--binary", "HEAD"]);
+      expect(committedPatch.equals(artifact)).toBe(true);
+    } finally {
+      cleanup(repo);
+      cleanup(state);
     }
   });
 });

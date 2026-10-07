@@ -46,6 +46,7 @@ export function boundedFinalizationRoot(workspaceRoot: string, repo: string): st
 const sha256Evidence = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 
 const CONTROL_PLANE_REGRESSIONS = [
+  "tests/bounded-task.test.ts",
   "tests/typed-actions.test.ts",
   "tests/bounded-control-plane-profile.test.ts",
   "tests/mcp-integration.test.ts",

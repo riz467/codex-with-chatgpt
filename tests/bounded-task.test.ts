@@ -5,6 +5,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { BoundedTasks, type Contract, type Verifier, type Worker } from "../src/mcp/bounded-task.js";
+import { prepareBoundedCommit, commitBoundedPatch } from "../src/mcp/typed-actions.js";
 import { getStateDir } from "../src/config/paths.js";
 import { GatewayError } from "../src/mcp/local-gateway.js";
 
@@ -169,14 +170,12 @@ describe("bounded OpenCode contract and review", () => {
     const reviewedHash = createHash("sha256").update(artifact(2)).digest("hex");
     expect(tasks.localCommitSnapshot(started.task_id).diff_sha256).toBe(reviewedHash);
     expect(tasks.acceptedSnapshot(started.task_id).diff_sha256).toBe(reviewedHash);
-    const actions = await import("../src/mcp/typed-actions.js");
-    const prepareBoundedCommit = (actions as unknown as { prepareBoundedCommit: (tasks: BoundedTasks, taskId: string) => Promise<{ state: string }> }).prepareBoundedCommit;
-    const commitBoundedPatch = (actions as unknown as { commitBoundedPatch: (tasks: BoundedTasks, prepared: { state: string }) => Promise<{ state: string }> }).commitBoundedPatch;
-    const prepared = await prepareBoundedCommit(tasks, started.task_id);
+    const stateDir = path.join(f.root, "state");
+    const prepared = prepareBoundedCommit(tasks, started.task_id, stateDir);
     expect(prepared.state).toBe("PREPARED");
     expect(rawPatch().equals(artifact(2))).toBe(true);
-    const committed = await commitBoundedPatch(tasks, prepared);
-    expect(committed.state).toBe("COMMITTED");
+    const committed = commitBoundedPatch(tasks, started.task_id, stateDir, f.repo);
+    expect(committed).toMatchObject({ state: "COMMITTED", authoritative_done: false });
     const committedPatch = execFileSync("git", ["-C", f.repo, "show", "--format=", "--binary", "HEAD"]);
     expect(committedPatch.equals(artifact(2))).toBe(true);
   });
