@@ -83,10 +83,12 @@ export async function semanticSession(prompt: string, executionSessionId: string
       await new Promise((r) => setTimeout(r, 250));
     }
     if (!ready) throw new Error("SEMANTIC_SERVER_UNAVAILABLE");
-    const created = await api("POST", "/api/session", { agent: agentID, location: { directory: REVIEW_ROOT }, title: "Independent sealed-bundle semantic review" });
+    const created = await api("POST", "/api/session", { agent: agentID, model: { providerID: "openai", id: "gpt-6-sol", variant: "default" }, location: { directory: REVIEW_ROOT }, title: "Independent sealed-bundle semantic review" });
     sessionID = created.data?.id;
     if (!/^ses_[a-zA-Z0-9]+$/.test(sessionID) || sessionID === executionSessionId ||
-        created.data?.agent !== agentID || created.data?.location?.directory?.toLowerCase() !== REVIEW_ROOT.toLowerCase()) throw new Error("SEMANTIC_SESSION_INVALID");
+        created.data?.agent !== agentID || created.data?.location?.directory?.toLowerCase() !== REVIEW_ROOT.toLowerCase() ||
+        created.data?.model?.providerID !== "openai" || created.data?.model?.id !== "gpt-6-sol" ||
+        created.data?.model?.variant !== "default") throw new Error("SEMANTIC_SESSION_INVALID");
     const sent = await api("POST", `/api/session/${sessionID}/prompt`, { text: prompt });
     const userID = sent.data?.id;
     if (!/^msg_[a-zA-Z0-9]+$/.test(userID) || sent.data?.sessionID !== sessionID) throw new Error("SEMANTIC_PROMPT_FAILED");
