@@ -52,17 +52,21 @@ const git = (repo: string, ...args: string[]) => execFileSync("git", ["-C", repo
   { encoding: "utf8", env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }, timeout: 10000 }).trim();
 const gitPatch = (repo: string) => execFileSync("git", ["-C", repo, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "diff", "--binary", "HEAD"],
   { env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }, timeout: 10000 });
-const rawBlobMatchesHead = (repo: string, name: string, file: string) => {
-  if (git(repo, "hash-object", "--no-filters", "--", file) === git(repo, "rev-parse", `HEAD:${name}`)) return true;
-  const eol = git(repo, "ls-files", "--eol", "-z", "--", name);
-  const reported = /^i\/lf[ \t]+w\/crlf[ \t]+attr\/[^\t]*\t([^\0]*)\0$/.exec(eol);
-  if (!reported || reported[1] !== name) return false;
-  const raw = fs.readFileSync(file).toString("latin1");
-  if (/(?<!\r)\n|\r(?!\n)/.test(raw)) return false;
-  const head = execFileSync("git", ["-C", repo, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
-    "cat-file", "blob", `HEAD:${name}`],
-    { env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }, timeout: 10000, maxBuffer: 1024 * 1024 });
-  return Buffer.from(raw.replaceAll("\r\n", "\n"), "latin1").equals(head);
+export const headWorktreeBaselineSha = (repo: string, name: string, file: string): string | null => {
+  try {
+    const headBlob: Buffer = execFileSync("git", ["-C", repo, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+      "cat-file", "blob", `HEAD:${name}`],
+      { env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }, timeout: 10000, maxBuffer: 1024 * 1024 });
+    const worktree = fs.readFileSync(file);
+    if (worktree.equals(headBlob)) return sha(headBlob);
+    const headText = text(headBlob), worktreeText = text(worktree);
+    if (worktreeText.replaceAll("\r\n", "\n") !== headText.replaceAll("\r\n", "\n")) return null;
+    const filteredHead: Buffer = execFileSync("git", ["-C", repo, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+      "cat-file", "--filters", `HEAD:${name}`],
+      { env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }, timeout: 10000, maxBuffer: 1024 * 1024 });
+    // Accept checkout-filtered CRLF, but not manually introduced CRLF when the filter produces LF.
+    return worktree.equals(filteredHead) ? sha(headBlob) : null;
+  } catch { return null; }
 };
 const text = (buffer: Buffer) => { if (buffer.length > 65536 || buffer.includes(0)) fail("NOT_BOUNDED_TEXT");
   const decoded = new TextDecoder("utf-8", { fatal: true }).decode(buffer); if (decoded.includes("\r") && /\r(?!\n)/.test(decoded)) fail("NOT_BOUNDED_TEXT"); return decoded; };
@@ -462,10 +466,11 @@ export class BoundedTasks {
     try {
       fs.writeFileSync(safePath(lock, "owner.txt"), id, { flag: "wx" });
       if (git(repo, "status", "--porcelain=v1", "-uall")) fail("DIRTY_REPO");
-      const baseline = Object.fromEntries(contract.edit_paths.map(p => {
+      const baseline: Record<string, string> = Object.fromEntries(contract.edit_paths.map((p): [string, string] => {
         const file = pathCheck(repo, p);
-        if (!rawBlobMatchesHead(repo, p, file)) fail("DIRTY_REPO");
-        return [p, sha(fs.readFileSync(file))];
+        const digest = headWorktreeBaselineSha(repo, p, file);
+        const baselineSha: string = digest ?? fail("DIRTY_REPO");
+        return [p, baselineSha];
       }));
       fs.mkdirSync(this.root, { recursive: true });
       fs.mkdirSync(this.dir(id));
@@ -500,7 +505,7 @@ export class BoundedTasks {
       const input = { contract: task.contract, contract_sha256: task.contract_sha256, revision, feedback: task.feedback,
         current: task.contract.edit_paths.map(p => { const bytes = fs.readFileSync(pathCheck(repo, p));
           return { path: p, sha256: sha(bytes), text: text(bytes) }; }) };
-      if (revision === 1 && input.current.some(row => task.baseline[row.path] !== row.sha256)) fail("SCOPE_CHANGED");
+      if (revision === 1 && input.current.some(row => task.baseline[row.path] !== headWorktreeBaselineSha(repo, row.path, pathCheck(repo, row.path)))) fail("SCOPE_CHANGED");
       if (revision > 1 && !gitPatch(repo).equals(
           fs.readFileSync(safePath(dir, `revision-${revision - 1}-diff.patch`)))) fail("SCOPE_CHANGED");
       const promptInput = { ...input, current: input.current.map(row => ({
