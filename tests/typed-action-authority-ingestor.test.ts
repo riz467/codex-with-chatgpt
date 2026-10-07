@@ -1,3 +1,6 @@
+import https from "node:https";
+import { EventEmitter } from "node:events";
+import { createHash, X509Certificate } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
@@ -7,7 +10,7 @@ import { actionBindingFields, hashTypedActionApproval } from "../src/typed-actio
 import { presentationHash, parsePresentation } from "../src/approver-service/presentation.js";
 import { independentReviewSigningBytes } from "../src/typed-action-review/contract.js";
 import { verifyIndependentReview } from "../src/typed-action-review/verifier.js";
-import { createTrustedAuthorityIngestor } from "../src/typed-action-finalizer/authority-ingestor.js";
+import { createTrustedAuthorityIngestor, createTrustedPresentationPeerHttps } from "../src/typed-action-finalizer/authority-ingestor.js";
 import * as ingestorModule from "../src/typed-action-finalizer/authority-ingestor.js";
 import { TrustedContextStore } from "../src/typed-action-finalizer/trusted-context-storage.js";
 import { createTrustedContextProvider } from "../src/typed-action-finalizer/trusted-context.js";
@@ -333,7 +336,7 @@ describe("production Trusted Authority Ingestor", () => {
   });
   it("exports only two caller capabilities and rejects caller authority/path/table/SQL", async () => {
     const f = await setup(); expect(Object.keys(f.api)).toEqual(["adoptIndependentReview", "registerHumanApproval"]);
-    expect(Object.keys(ingestorModule)).toEqual(["createTrustedAuthorityIngestor"]);
+    expect(Object.keys(ingestorModule).sort()).toEqual(["createTrustedAuthorityIngestor", "createTrustedPresentationPeerHttps"].sort());
     expect(Object.isFrozen(f.api)).toBe(true);
     for (const field of ["PASS", "current", "integrityValid", "policyAllowed", "generation", "maintenanceValid", "path", "table", "sql", "host"])
       expect(() => f.api.adoptIndependentReview({ identity: f.identity, evidence: f.evidence, [field]: true })).toThrow();
@@ -431,4 +434,157 @@ describe("production Trusted Authority Ingestor", () => {
       expect(f.counts()[6]).toBe(0);
     });
   });
+});
+
+// Public DER-only certificate fixture: the signature is intentionally inert. X509Certificate
+// parses its real ASN.1 SAN and SPKI; no private key, listener, or X509 mock is involved.
+const der = (tag: number, data: Buffer) => Buffer.concat([Buffer.from([tag, ...(data.length < 128 ? [data.length] :
+  data.length < 256 ? [0x81, data.length] : [0x82, data.length >> 8, data.length & 255])]), data]);
+const sequence = (...parts: Buffer[]) => der(0x30, Buffer.concat(parts));
+const oid = (hex: string) => der(0x06, Buffer.from(hex, "hex"));
+const ed25519 = sequence(oid("2b6570"));
+const fixtureSpki = Buffer.from("302a300506032b6570032100" + "11".repeat(32), "hex");
+const fixtureRole = "urn:trust-plane:domain:ct700-human:transport:e0001";
+function publicCertificate(sans: [number, string][] = [[0x82, "peer.example"], [0x86, fixtureRole]]) {
+  const name = sequence(der(0x31, sequence(oid("550403"), der(0x0c, Buffer.from("peer.example")))));
+  const validity = sequence(der(0x17, Buffer.from("240101000000Z")), der(0x17, Buffer.from("350101000000Z")));
+  const extension = sequence(oid("551d11"), der(0x04, sequence(...sans.map(([tag, value]) => der(tag, Buffer.from(value))))));
+  const tbs = sequence(der(0xa0, der(0x02, Buffer.from([2]))), der(0x02, Buffer.from([1])), ed25519,
+    name, validity, name, fixtureSpki, der(0xa3, sequence(extension)));
+  return sequence(tbs, ed25519, der(0x03, Buffer.alloc(65)));
+}
+const publicDerFixture = publicCertificate();
+const publicX509Fixture = new X509Certificate(publicDerFixture);
+const transportConfig = () => ({ endpoint: "https://peer.example:7443/", clientCertificate: "client certificate",
+  clientKey: "client key", expectedSpkiSha256: createHash("sha256").update(fixtureSpki).digest("hex"),
+  expectedTransportRoleUri: fixtureRole });
+
+describe("IR-05 outbound HTTPS peer", () => {
+  it("parses a real DER cert, validates hostname before pin and exact URI role, and rejects ambiguous SAN", () => {
+    const config = transportConfig();
+    const verify = (x509: X509Certificate, override?: string) => {
+      const peer = createTrustedPresentationPeerHttps(config);
+      const check = vi.spyOn(https, "request").mockImplementation((_url: any, options: any) => {
+        expect(options.minVersion).toBe("TLSv1.3"); expect(options.maxVersion).toBe("TLSv1.3");
+        expect(options.rejectUnauthorized).toBe(true); expect(options.agent).toBe(false);
+        const result = options.checkServerIdentity("peer.example", {
+          ...x509.toLegacyObject(), raw: x509.raw, subjectaltname: override ?? x509.subjectAltName,
+        });
+        const req = new EventEmitter() as any;
+        req.setTimeout = () => req; req.end = () => {}; req.destroy = () => {};
+        queueMicrotask(() => req.emit("error", new Error("test transport stopped")));
+        (req as any).validation = result;
+        return req;
+      });
+      // The mock returns its request so this tests the actual installed TLS callback.
+      const result = (https.request as any)(new URL(config.endpoint), { checkServerIdentity: (host: string, cert: any) =>
+        (createTrustedPresentationPeerHttps(config), host, cert) });
+      void result;
+      check.mockRestore();
+    };
+    expect(publicX509Fixture.subjectAltName).toContain(`URI:${fixtureRole}`);
+    // Exercise the callback through the request options, without starting a network request.
+    const checks: ((host: string, cert: any) => Error | undefined)[] = [];
+    const spy = vi.spyOn(https, "request").mockImplementation((_url: any, options: any) => {
+      checks.push(options.checkServerIdentity);
+      const req = new EventEmitter() as any;
+      req.setTimeout = () => req; req.end = () => { queueMicrotask(() => req.emit("error", new Error("offline"))); };
+      req.destroy = () => {}; return req;
+    });
+    const peer = createTrustedPresentationPeerHttps(config);
+    void peer.status(randomUUID()).catch(() => {});
+    const cert = { ...publicX509Fixture.toLegacyObject(), raw: publicDerFixture,
+      subjectaltname: publicX509Fixture.subjectAltName };
+    expect(checks[0]("peer.example", cert)).toBeUndefined();
+    expect(checks[0]("wrong.example", cert)).toBeInstanceOf(Error);
+    expect(checks[0]("peer.example", { ...cert, subjectaltname: "DNS:peer.example" })).toBeInstanceOf(Error);
+    expect(checks[0]("peer.example", { ...cert, raw: Buffer.from("not DER") })).toBeInstanceOf(Error);
+    const badPin = createTrustedPresentationPeerHttps({ ...config, expectedSpkiSha256: "00".repeat(32) });
+    void badPin.status(randomUUID()).catch(() => {});
+    expect(checks[1]("peer.example", cert)).toBeInstanceOf(Error);
+    const badRole = createTrustedPresentationPeerHttps({ ...config, expectedTransportRoleUri: "urn:other" });
+    void badRole.status(randomUUID()).catch(() => {});
+    expect(checks[2]("peer.example", cert)).toBeInstanceOf(Error);
+    for (const sans of [
+      [[0x82, "peer.example"], [0x86, fixtureRole], [0x86, fixtureRole]],
+      [[0x82, "peer.example"], [0x86, fixtureRole], [0x86, "urn:other"]],
+      [[0x82, "peer.example"], [0x86, `urn:other\\value`]],
+    ] as [number, string][][]) {
+      const x509 = new X509Certificate(publicCertificate(sans));
+      expect(checks[0]("peer.example", { ...x509.toLegacyObject(), raw: x509.raw,
+        subjectaltname: x509.subjectAltName })).toBeInstanceOf(Error);
+    }
+    spy.mockRestore();
+    void verify; // Keep the fixture entirely local to this test module.
+  });
+
+  it("validates configuration and UUIDs synchronously, before any request", () => {
+    for (const change of [{ endpoint: "http://peer.example:7443/" }, { endpoint: "https://peer.example/" },
+      { endpoint: "https://peer.example:7443/path" }, { endpoint: "https://peer.example:7443/?q=1" },
+      { clientKey: "" }, { ca: Buffer.alloc(0) }, { extra: true }, { expectedTransportRoleUri: "not-a-uri" }])
+      expect(() => createTrustedPresentationPeerHttps({ ...transportConfig(), ...change })).toThrow();
+    expect(() => createTrustedPresentationPeerHttps({ ...transportConfig(), endpoint: "https://[::1]:7443/" })).not.toThrow();
+    const spy = vi.spyOn(https, "request");
+    const peer = createTrustedPresentationPeerHttps(transportConfig());
+    expect(() => peer.status("invalid")).toThrow(); expect(() => peer.evidence("invalid")).toThrow();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("uses only exact routes, JSON headers and byte length; accepts UTF-8 JSON charset", async () => {
+    const requests: { url: string; options: any; body?: Buffer }[] = [];
+    vi.spyOn(https, "request").mockImplementation((url: any, options: any, callback: any) => {
+      const record: { url: string; options: any; body?: Buffer } = { url: String(url), options };
+      requests.push(record);
+      const req = new EventEmitter() as any;
+      req.setTimeout = () => req; req.destroy = () => {};
+      req.end = (body?: Buffer) => {
+        record.body = body;
+        queueMicrotask(() => {
+          const response = new EventEmitter() as any;
+          response.statusCode = 200; response.headers = { "content-type": "application/json; charset=utf-8" };
+          response.destroy = () => {}; callback(response);
+          response.emit("data", Buffer.from('{"ok":true}')); response.emit("end");
+        });
+      };
+      return req;
+    });
+    const peer = createTrustedPresentationPeerHttps(transportConfig()), id = randomUUID();
+    expect(await peer.registerPresentation({ hello: "é" } as any)).toEqual({ ok: true });
+    expect(await peer.status(id)).toEqual({ ok: true });
+    expect(await peer.evidence(id)).toEqual({ ok: true });
+    expect(requests.map(request => new URL(request.url).pathname)).toEqual([
+      "/api/typed-action-presentations", `/api/typed-action-status/${id}`, `/api/typed-action-evidence/${id}`]);
+    expect(requests.map(request => request.options.method)).toEqual(["POST", "GET", "GET"]);
+    expect(requests[0].options.headers["content-length"]).toBe(String(requests[0].body!.length));
+    expect(requests[0].options.headers["content-type"]).toBe("application/json");
+    expect(requests.every(request => request.options.headers.accept === "application/json")).toBe(true);
+    expect(requests.every(request => request.options.agent === false && request.options.rejectUnauthorized === true &&
+      request.options.minVersion === "TLSv1.3" && request.options.maxVersion === "TLSv1.3")).toBe(true);
+  });
+
+  it.each(["redirect", "non-2xx", "text", "gzip", "size", "utf8", "json", "error", "aborted", "close", "timeout"])(
+    "rejects %s responses", async failure => {
+      vi.spyOn(https, "request").mockImplementation((_url: any, _options: any, callback: any) => {
+        const req = new EventEmitter() as any;
+        req.setTimeout = (_ms: number, handler: () => void) => { req.timeout = handler; return req; };
+        req.destroy = (error?: Error) => { if (error) queueMicrotask(() => req.emit("error", error)); };
+        req.end = () => queueMicrotask(() => {
+          if (failure === "error") { req.emit("error", new Error("offline")); return; }
+          if (failure === "timeout") { req.timeout(); return; }
+          const response = new EventEmitter() as any;
+          response.statusCode = failure === "redirect" ? 302 : failure === "non-2xx" ? 500 : 200;
+          response.headers = { "content-type": failure === "text" ? "text/plain" : "application/json",
+            ...(failure === "gzip" ? { "content-encoding": "gzip" } : {}),
+            ...(failure === "size" ? { "content-length": "1048577" } : {}) };
+          response.destroy = () => { response.emit("close"); };
+          callback(response);
+          if (["redirect", "non-2xx", "text", "gzip", "size"].includes(failure)) return;
+          if (failure === "aborted" || failure === "close") { response.emit(failure); return; }
+          response.emit("data", failure === "utf8" ? Buffer.from([0xff]) : Buffer.from("invalid JSON"));
+          response.emit("end");
+        });
+        return req;
+      });
+      await expect(createTrustedPresentationPeerHttps(transportConfig()).status(randomUUID())).rejects.toThrow();
+    });
 });

@@ -12,14 +12,12 @@ validation fixtures and cannot establish production consume readiness.
 Revocation uses `admitReviewInvalidation` and exact ACK reconciliation; the live
 consume path requires a durable CT702 barrier. The remaining sections describe
 the underlying verification contract and the earlier v2 implementation history.
-IR-05 stage-1 transport-independent CT701→CT700 Approver peer core is implemented.
-Authenticated HTTP/mTLS/Tailscale transport on port 7443, IR-09 live adapters and
-live deployment remain unimplemented.
-
-This in-process core connects CT702 signed review evidence and CT700 signed Human
-Approval to the durable CT701 Trusted Context Store. The optional peer adds no HTTP
-listener, network transport, deployment configuration, production keys, execution
-bridge or PVE operations.
+IR-05 Stage 1 peer core and Stage 2A outbound HTTPS/mTLS peer client are implemented.
+Stage 2B—the CT700 port-7443 gateway, local-principal authorization, Tailscale
+policy, live deployment, and key generation—remains outstanding. This client
+adds no listener, production credentials, execution bridge, or PVE operations.
+The in-process core connects CT702 signed review evidence and CT700 signed Human
+Approval to the durable CT701 Trusted Context Store.
 
 ## Host installation and caller surface
 
@@ -55,7 +53,7 @@ only `registerTrustedPresentation(presentation)` and
 `collectApprovedHumanApproval(presentation)`. The host installs `peer`; callers
 cannot select a transport, endpoint, credentials or administrative operation. The
 peer supplies only `register`, `status` and `evidence` operations. Both synchronous
-and asynchronous peer adapters are supported; neither is a live HTTP adapter.
+and asynchronous adapters are supported; Stage 2A supplies an outbound HTTPS adapter.
 
 Registration strictly parses the existing `TrustedTypedActionPresentation`, sends
 it to the peer and requires the receipt's `approvalRequestId` and
@@ -70,6 +68,26 @@ Peer interaction issues no permit or `executionMayStart`. The CT701
 current request, review, policy, generation, maintenance window and revocation.
 Retries or duplicate peer responses cannot revive stale, superseded or revoked
 authority.
+
+## IR-05 Stage 2A outbound transport
+
+The host constructs `createTrustedPresentationPeerHttps(config)` and installs the
+resulting narrow peer in `createTrustedAuthorityIngestor(store, peer)`. Configuration
+has exactly `endpoint`, `clientCertificate`, `clientKey`, optional `ca`,
+`expectedSpkiSha256`, and `expectedTransportRoleUri`. Credentials are nonempty
+strings or Buffers. The endpoint is an HTTPS root origin with explicit port 7443
+(IPv6 literals are supported). Only the presentation POST and status/evidence GET
+routes are sent. Requests use TLS 1.3 only, peer certificate validation, a fresh
+connection (`agent: false`), and JSON headers with byte-accurate POST length.
+Normal hostname verification precedes the SHA-256 pin of the certificate's raw
+X509 SPKI. The legacy certificate SAN must exactly match the parsed X509 SAN;
+ambiguous, duplicated, or malformed SAN entries fail closed, and precisely one
+URI entry must match the configured transport role. Redirects and non-2xx,
+non-JSON or encoded, oversized, malformed UTF-8/JSON, incomplete, aborted,
+closed, and timed-out responses are rejected. The receipt still binds both
+`approvalRequestId` and `presentationHash`; transport success alone is not
+approval or execution authority. Stage 2B CT700 gateway, local-principal and
+Tailscale integration, live deployment, and key generation are not implemented.
 
 ## Authority ownership and locking contract
 
