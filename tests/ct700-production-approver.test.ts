@@ -271,4 +271,127 @@ describe('CT700 production Human / peer trust boundary', () => {
     expect(firstCalls).toBe(1);
     expect(secondCalls).toBe(1);
   });
+  it('gateway forwards only three exact routes to fixed loopback without caller authority or upstream headers', async () => {
+    const x = await setup();
+    const app = createProductionApprover(config, x.store, x.key.privateKey).gateway;
+    const server = createServer(app).listen(0, '127.0.0.1'); servers.push(server);
+    await new Promise<void>(resolve => server.once('listening', resolve));
+    const address = server.address(); if (!address || typeof address === 'string') throw Error('listener');
+    const send = (method: string, route: string, body?: unknown) => new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }>((resolve, reject) => {
+      const req = request({ hostname: '127.0.0.1', port: address.port, method, path: route,
+        headers: { Host: 'attacker.example', Origin: 'https://attacker.example', Authorization: 'Bearer attacker',
+          Cookie: 'session=attacker', 'X-Forwarded-Host': 'attacker.example', 'X-Forwarded-For': '192.0.2.1',
+          'Content-Type': 'application/json' } }, res => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => resolve({ status: res.statusCode!, headers: res.headers, body: Buffer.concat(chunks).toString() }));
+      });
+      req.on('error', reject); req.end(body === undefined ? undefined : JSON.stringify(body));
+    });
+    const seen: { method: string | undefined; path: string | undefined; host: string | undefined; headers: Record<string, unknown>; body: string }[] = [];
+    const previous = currentPeer;
+    currentPeer = (req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        seen.push({ method: req.method, path: req.url, host: req.headers.host, headers: req.headers,
+          body: Buffer.concat(chunks).toString() });
+        res.writeHead(req.method === 'POST' ? 201 : 200, { 'Content-Type': 'application/json', 'X-Peer-Secret': 'hidden' });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    };
+    try {
+      const id = randomUUID(), payload = { hello: 'peer' };
+      const routes = ['/api/typed-action-presentations', `/api/typed-action-status/${id}`, `/api/typed-action-evidence/${id}`];
+      for (const [index, route] of routes.entries()) {
+        const reply = await send(index === 0 ? 'POST' : 'GET', route, index === 0 ? payload : undefined);
+        expect(reply.status).toBe(index === 0 ? 201 : 200);
+        expect(JSON.parse(reply.body)).toEqual({ ok: true });
+        expect(reply.headers['cache-control']).toBe('no-store');
+        expect(reply.headers['x-peer-secret']).toBeUndefined();
+      }
+      expect(seen.map(({ method, path, body }) => ({ method, path, body }))).toEqual([
+        { method: 'POST', path: routes[0], body: JSON.stringify(payload) },
+        { method: 'GET', path: routes[1], body: '' },
+        { method: 'GET', path: routes[2], body: '' },
+      ]);
+      for (const call of seen) {
+        expect(call.host).toBe('127.0.0.1:48769');
+        for (const header of ['origin', 'authorization', 'cookie', 'x-forwarded-host', 'x-forwarded-for'])
+          expect(call.headers[header]).toBeUndefined();
+      }
+      for (const [method, route] of [
+        ['HEAD', routes[1]], ['HEAD', routes[2]], ['POST', routes[1]], ['GET', routes[0]],
+        ['GET', `${routes[1]}?x=1`], ['GET', '/api/typed-action-status/not-a-uuid'],
+        ['GET', '/health'], ['POST', `${routes[0]}?x=1`],
+      ]) expect((await send(method, route)).status).toBe(404);
+      expect(seen).toHaveLength(3);
+    } finally { currentPeer = previous; }
+  });
+  it.each([
+    ['POST', 201], ['POST', 400], ['POST', 403], ['POST', 409],
+    ['GET', 200], ['GET', 403], ['GET', 404],
+  ] as const)('gateway preserves allowed peer %s %i JSON status without leaking headers', async (method, status) => {
+    const x = await setup();
+    const app = createProductionApprover(config, x.store, x.key.privateKey).gateway;
+    const server = createServer(app).listen(0, '127.0.0.1'); servers.push(server);
+    await new Promise<void>(resolve => server.once('listening', resolve));
+    const address = server.address(); if (!address || typeof address === 'string') throw Error('listener');
+    const previous = currentPeer;
+    currentPeer = (_req, res) => {
+      res.writeHead(status, { 'Content-Type': 'application/json', 'X-Peer-Secret': 'hidden' });
+      res.end(JSON.stringify({ outcome: status }));
+    };
+    try {
+      const route = method === 'POST' ? '/api/typed-action-presentations' : `/api/typed-action-status/${randomUUID()}`;
+      const reply = await new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }>((resolve, reject) => {
+        const req = request({ hostname: '127.0.0.1', port: address.port, method, path: route,
+          headers: { 'Content-Type': 'application/json' } }, res => {
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          res.on('end', () => resolve({ status: res.statusCode!, headers: res.headers, body: Buffer.concat(chunks).toString() }));
+        });
+        req.on('error', reject); req.end(method === 'POST' ? '{}' : undefined);
+      });
+      expect(reply.status).toBe(status);
+      expect(JSON.parse(reply.body)).toEqual({ outcome: status });
+      expect(reply.headers['cache-control']).toBe('no-store');
+      expect(reply.headers['x-peer-secret']).toBeUndefined();
+    } finally { currentPeer = previous; }
+  });
+  it.each(['malformed', 'oversized', 'non-JSON', '5xx', 'aborted', 'unavailable', 'stalled'] as const)(
+    'gateway fails closed on %s upstream response', async failure => {
+      const x = await setup();
+      const app = createProductionApprover(config, x.store, x.key.privateKey).gateway;
+      const server = createServer(app).listen(0, '127.0.0.1'); servers.push(server);
+      await new Promise<void>(resolve => server.once('listening', resolve));
+      const address = server.address(); if (!address || typeof address === 'string') throw Error('listener');
+      const previous = currentPeer;
+      currentPeer = (_req, res) => {
+        if (failure === 'stalled') return;
+        if (failure === 'aborted') {
+          res.writeHead(200, { 'Content-Type': 'application/json' }); res.write('{'); res.destroy(); return;
+        }
+        res.writeHead(failure === '5xx' || failure === 'unavailable' ? 503 : 200,
+          { 'Content-Type': failure === 'non-JSON' ? 'text/plain' : 'application/json', 'X-Peer-Secret': 'hidden' });
+        res.end(failure === 'oversized' ? JSON.stringify({ data: 'x'.repeat(256 * 1024) })
+          : failure === 'malformed' ? '{' : '{}');
+      };
+      try {
+        if (failure === 'unavailable') currentPeer = undefined;
+        const reply = await new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }>((resolve, reject) => {
+          const req = request({ hostname: '127.0.0.1', port: address.port, method: 'GET',
+            path: `/api/typed-action-evidence/${randomUUID()}` }, res => {
+            const chunks: Buffer[] = [];
+            res.on('data', (chunk: Buffer) => chunks.push(chunk));
+            res.on('end', () => resolve({ status: res.statusCode!, headers: res.headers, body: Buffer.concat(chunks).toString() }));
+          });
+          req.on('error', reject); req.end();
+        });
+        expect(reply.status).toBe(502);
+        expect(JSON.parse(reply.body)).toEqual({ error: 'BAD_GATEWAY' });
+        expect(reply.headers['cache-control']).toBe('no-store');
+        expect(reply.headers['x-peer-secret']).toBeUndefined();
+      } finally { currentPeer = previous; }
+    });
 });
