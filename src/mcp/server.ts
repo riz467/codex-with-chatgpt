@@ -35,6 +35,14 @@ const boundedRepos: Record<string, string> = {
   "codex-with-chatgpt": "C:\\work\\codex-with-chatgpt",
   "codex-with-chatgpt-control-plane": "C:\\work\\codex-with-chatgpt",
 };
+export function boundedFinalizationRoot(workspaceRoot: string, repo: string): string | null {
+  const bridgeRoot = "C:\\work\\codex-with-chatgpt";
+  if (workspaceRoot.toLowerCase() !== bridgeRoot.toLowerCase()) return null;
+  if (repo === "autonomous-fixture") return "C:\\work\\bounded-review-live-fixture";
+  if (repo === "codex-with-chatgpt-control-plane") return bridgeRoot;
+  return null;
+}
+
 const sha256Evidence = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 
 const CONTROL_PLANE_REGRESSIONS = [
@@ -400,13 +408,10 @@ export function createMcpServer(ctx: McpContext): McpServer {
 
   const lifecycleRunning = new Set<string>();
   const finalizeBoundedPass = (taskId: string, repo: string) => {
+    const fixedRoot = boundedFinalizationRoot(workspace.root, repo);
     if (ctx.boundedFinalizer) {
       ctx.boundedFinalizer(taskId);
-    } else if (repo === "codex-with-chatgpt-control-plane") {
-      const fixedRoot = boundedRepos["codex-with-chatgpt-control-plane"];
-      if (path.resolve(workspace.root).toLowerCase() !== path.resolve(fixedRoot).toLowerCase()) {
-        throw new GatewayError("BOUNDED_FINALIZATION_NOT_ALLOWED", "PASS finalization requires the fixed control-plane workspace");
-      }
+    } else if (fixedRoot !== null) {
       prepareBoundedCommit(tasks, taskId, getStateDir());
       commitBoundedPatch(tasks, taskId, getStateDir(), fixedRoot);
     }

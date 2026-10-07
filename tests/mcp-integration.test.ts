@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer } from "../src/mcp/server.js";
+import { boundedFinalizationRoot, createMcpServer } from "../src/mcp/server.js";
 import { BoundedTasks } from "../src/mcp/bounded-task.js";
 import type { Workspace } from "../src/workspace/manager.js";
 import type { Logger } from "../src/logger/index.js";
@@ -205,6 +205,26 @@ describe("RC-02 request-only startup over MCP", () => {
           else process.env.C2C_STATE_DIR = previousStateDir;
         }
       }
+    }
+  });
+});
+
+describe("bounded PASS finalization routing", () => {
+  const bridgeRoot = "C:\\work\\codex-with-chatgpt";
+  it("maps only the two eligible durable repos from the fixed Execution Bridge root", () => {
+    expect(boundedFinalizationRoot(bridgeRoot, "autonomous-fixture"))
+      .toBe("C:\\work\\bounded-review-live-fixture");
+    expect(boundedFinalizationRoot(bridgeRoot, "codex-with-chatgpt-control-plane"))
+      .toBe(bridgeRoot);
+  });
+
+  it("rejects the dashboard, unknown repos and non-Bridge workspace roots", () => {
+    expect(boundedFinalizationRoot(bridgeRoot, "codex-with-chatgpt")).toBeNull();
+    expect(boundedFinalizationRoot(bridgeRoot, "unknown")).toBeNull();
+    for (const root of ["C:\\work\\bounded-review-live-fixture", "C:\\work\\other",
+      "C:\\work\\codex-with-chatgpt-extra"]) {
+      expect(boundedFinalizationRoot(root, "autonomous-fixture")).toBeNull();
+      expect(boundedFinalizationRoot(root, "codex-with-chatgpt-control-plane")).toBeNull();
     }
   });
 });
