@@ -177,7 +177,8 @@ describe("dashboard read-only evidence", () => {
     save(evidence);
     expect(f.collector.boundedTask(taskId)).toEqual({ task_id: taskId, state: "REVIEW_ACCEPTED", progress_mode: "REVIEW_ACCEPTED", stop_reason_present: false,
       contract_sha256, execution_profile: "tracked_typescript_dashboard", goal: "Read only <script>alert(1)</script>", edit_paths: contract.edit_paths, latest_revision: 1,
-      manifest_sha256, verification_present: true, file_count: 1, worker: "opencode", review_reviewer: "chatgpt", review_verdict: "PASS" });
+      manifest_sha256, verification_present: true, file_count: 1, worker: "opencode", review_reviewer: "chatgpt", review_verdict: "PASS",
+      latest_semantic_review_diagnostic_code: null, commit_state: null, local_commit: null, authoritative_done: false });
     expect(f.collector.boundedTasks()).toHaveLength(1);
     expect((await f.collector.snapshot()).bounded_tasks).toHaveLength(1);
     expect(JSON.stringify(f.collector.boundedTask(taskId))).not.toMatch(/secret|private|session_id|execution_id|provider|model|usage|tools|acceptance_criteria|verification secret|file secret/);
@@ -188,7 +189,8 @@ describe("dashboard read-only evidence", () => {
     expect(f.collector.boundedTask(taskId)).toEqual({ task_id: taskId, state: "REVIEW_ACCEPTED", progress_mode: "REVIEW_ACCEPTED", stop_reason_present: false,
       contract_sha256: controlHash, execution_profile: "tracked_typescript_control_plane",
       goal: "Read only <script>alert(1)</script>", edit_paths: contract.edit_paths, latest_revision: 1,
-      manifest_sha256, verification_present: true, file_count: 1, worker: "opencode", review_reviewer: "chatgpt", review_verdict: "PASS" });
+      manifest_sha256, verification_present: true, file_count: 1, worker: "opencode", review_reviewer: "chatgpt", review_verdict: "PASS",
+      latest_semantic_review_diagnostic_code: null, commit_state: null, local_commit: null, authoritative_done: false });
     expect(JSON.stringify(f.collector.boundedTask(taskId))).not.toMatch(/secret|private|session_id|execution_id|provider|model|usage|tools|acceptance_criteria/);
     const semanticReview = { ...revision.review, contract_sha256: controlHash, reviewer: "opencode-semantic",
       findings: ["finding secret"], session_id: "review session secret", execution_id: "review execution secret",
@@ -232,6 +234,61 @@ describe("dashboard read-only evidence", () => {
     save({ ...evidence, revisions: [{ ...revision, verify: undefined, verification: true, file_count: 1 }] });
     expect(f.collector.boundedTask(taskId)).toBeNull();
   });
+  it("projects only correlated commit status and whitelisted latest semantic diagnostics", () => {
+    const f = fixture(), stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bounded-commit-dashboard-"));
+    dirs.push(stateDir); process.env.C2C_STATE_DIR = stateDir;
+    const taskId = `bounded-${"a".repeat(32)}`;
+    const contract = { repo: "codex-with-chatgpt", goal: "Safe goal", edit_paths: ["src/dashboard/collector.ts"],
+      acceptance_criteria: ["private criterion"], task_kind: "text_change", execution_profile: "tracked_typescript_dashboard",
+      worker: "opencode", codex: { allowed: false, max_calls: 0 }, max_revisions: 3, timeout_ms: 600000 };
+    const contract_sha256 = createHash("sha256").update(JSON.stringify(contract)).digest("hex"), manifest_sha256 = "b".repeat(64);
+    const revision = { revision: 1, manifest_sha256, verify: {}, files: [],
+      worker: { worker: "opencode", session_id: "session secret", execution_id: "execution secret", provider: null, model: null,
+        usage: null, state: "completed", tools: null },
+      review: { task_id: taskId, revision: 1, contract_sha256, manifest_sha256, reviewer: "opencode-semantic", verdict: "NEEDS_WORK" } };
+    const dir = path.join(stateDir, "bounded-v2", "tasks", taskId); fs.mkdirSync(dir, { recursive: true });
+    const save = (value: unknown) => fs.writeFileSync(path.join(dir, "task.json"), JSON.stringify(value));
+    const evidence = { version: 2, task_id: taskId, state: "REVIEW_PENDING", contract, contract_sha256, revisions: [revision] };
+    save(evidence);
+    let status: unknown = { task_id: taskId, commit_state: "NOT_PREPARED", local_commit: "a".repeat(40), authoritative_done: true, secret: "receipt secret" };
+    const probe = vi.fn(() => status);
+    const collector = new Collector(f.roots, f.review, f.queue, undefined, undefined, probe);
+    const projected = () => collector.boundedTask(taskId);
+    expect(projected()).toMatchObject({ commit_state: "NOT_PREPARED", local_commit: null, authoritative_done: false,
+      review_reviewer: "opencode-semantic", review_verdict: "NEEDS_WORK", latest_semantic_review_diagnostic_code: null });
+    status = { task_id: taskId, commit_state: "PREPARED", local_commit: "a".repeat(40), authoritative_done: true };
+    expect(projected()).toMatchObject({ commit_state: "PREPARED", local_commit: null, authoritative_done: false });
+    status = { task_id: taskId, commit_state: "COMMITTED", local_commit: "a".repeat(40), authoritative_done: false,
+      receipt: { secret: "receipt secret" } };
+    expect(projected()).toMatchObject({ commit_state: "COMMITTED", local_commit: "a".repeat(40), authoritative_done: true });
+    expect(JSON.stringify(projected())).not.toMatch(/secret|session_id|execution_id|receipt|acceptance_criteria|provider|model|usage|findings/);
+    for (const hash of ["A".repeat(40), "g".repeat(40), "a".repeat(39)]) {
+      for (const authoritative_done of [true, false]) {
+        status = { task_id: taskId, commit_state: "COMMITTED", local_commit: hash, authoritative_done };
+        expect(projected()).toMatchObject({ commit_state: "COMMITTED", local_commit: null, authoritative_done: false });
+      }
+    }
+    for (const invalid of [null, { task_id: `bounded-${"c".repeat(32)}`, commit_state: "COMMITTED", local_commit: "a".repeat(40), authoritative_done: false },
+      { task_id: taskId, commit_state: "DONE", local_commit: "a".repeat(40), authoritative_done: false }]) {
+      status = invalid;
+      expect(projected()).toMatchObject({ commit_state: null, local_commit: null, authoritative_done: false });
+    }
+    probe.mockImplementationOnce(() => { throw new Error("private failure"); });
+    expect(projected()).toMatchObject({ commit_state: null, local_commit: null, authoritative_done: false });
+    status = { task_id: taskId, commit_state: "NOT_PREPARED", authoritative_done: true };
+    for (const code of ["SEMANTIC_REVIEW_FAILED", "SEMANTIC_REVIEW_TIMEOUT", "SEMANTIC_REVIEW_INVALID"]) {
+      save({ ...evidence, revisions: [{ ...revision, semantic_review_diagnostic: { phase: "SEMANTIC_REVIEW", error_code: code, secret: "diagnostic secret" } }] });
+      expect(projected()?.latest_semantic_review_diagnostic_code).toBe(code);
+      expect(JSON.stringify(projected())).not.toMatch(/diagnostic secret|receipt|session secret/);
+    }
+    for (const diagnostic of [null, "SEMANTIC_REVIEW_FAILED", { phase: "STRUCTURAL_REVIEW", error_code: "SEMANTIC_REVIEW_FAILED" },
+      { phase: "SEMANTIC_REVIEW", error_code: "PASS" }, { phase: "SEMANTIC_REVIEW", error_code: "semantic_review_failed" }]) {
+      save({ ...evidence, revisions: [{ ...revision, semantic_review_diagnostic: diagnostic }] });
+      expect(projected()?.latest_semantic_review_diagnostic_code).toBeNull();
+    }
+    expect(probe).toHaveBeenCalledWith(taskId);
+  });
+
 
 describe("local bounded start boundary", () => {
   const task_id = `bounded-${"a".repeat(32)}`, contract_sha256 = "b".repeat(64);

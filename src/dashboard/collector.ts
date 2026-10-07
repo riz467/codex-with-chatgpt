@@ -8,6 +8,7 @@ import { SENSITIVE_PATTERNS } from "../workspace/ignore.js";
 import { verifiedHealth, observeOsHealth, normalizeOsHealth, type OsHealth } from "./verified-health.js";
 import { reviewProfiles, type ReviewProfile } from "../mcp/review-profiles.js";
 import { autonomousState } from "../mcp/autonomous-read-model.js";
+import { getProductionBoundedCommitStatus } from "../mcp/server.js";
 import { activeQueueTask, queueDepth } from "../worker/status-projection.js";
 
 export type Roots = Readonly<Record<keyof typeof REPOS, string>>;
@@ -148,6 +149,9 @@ function boundedProjection(raw: Record<string, unknown> | null, taskId: string) 
     }
   }
   const latest = obj(revisions.at(-1)), review = obj(latest?.review);
+  const diagnostic = obj(latest?.semantic_review_diagnostic);
+  const latest_semantic_review_diagnostic_code = diagnostic?.phase === "SEMANTIC_REVIEW" ?
+    enumValue(diagnostic.error_code, ["SEMANTIC_REVIEW_FAILED", "SEMANTIC_REVIEW_TIMEOUT", "SEMANTIC_REVIEW_INVALID"]) : null;
   if ((raw.state === "REVIEW_PENDING" || raw.state === "REVIEW_ACCEPTED") && !latest) return null;
   if (raw.state === "REVIEW_ACCEPTED" && review?.verdict !== "PASS") return null;
   if (raw.stop_reason !== undefined && raw.stop_reason !== null && !cleanString(raw.stop_reason, 500)) return null;
@@ -159,19 +163,28 @@ function boundedProjection(raw: Record<string, unknown> | null, taskId: string) 
     latest_revision: latest?.revision as number | undefined ?? null, manifest_sha256: latest?.manifest_sha256 as string | undefined ?? null,
     verification_present: !!latest && Object.hasOwn(latest, "verify"), file_count: Array.isArray(latest?.files) ? latest.files.length : null,
     worker: "opencode", review_reviewer: review?.reviewer as "chatgpt" | "opencode-semantic" | undefined ?? null,
-    review_verdict: review?.verdict as string | undefined ?? null };
+    review_verdict: review?.verdict as string | undefined ?? null, latest_semantic_review_diagnostic_code };
 }
 export class Collector {
   constructor(public readonly roots: Roots = REPOS, public readonly reviewRoot = REVIEW_ROOT, public readonly queueRoot = QUEUE,
     private readonly osProbe: () => Promise<OsHealth> = roots === REPOS ? observeOsHealth : async () => normalizeOsHealth(null),
-    private readonly autonomousReviewProfiles: Readonly<Record<string, Pick<ReviewProfile, "workspace">>> = reviewProfiles) {}
+    private readonly autonomousReviewProfiles: Readonly<Record<string, Pick<ReviewProfile, "workspace">>> = reviewProfiles,
+    private readonly boundedCommitStatus: (taskId: string) => unknown = getProductionBoundedCommitStatus) {}
   boundedTask(taskId: string) {
     if (!boundedId.test(taskId)) return null;
     try {
       const root = getStateDir();
       const dir = safePath(root, `bounded-v2/tasks/${taskId}`);
       if (!fs.lstatSync(dir).isDirectory()) return null;
-      return boundedProjection(readJson(root, `bounded-v2/tasks/${taskId}/task.json`), taskId);
+      const projection = boundedProjection(readJson(root, `bounded-v2/tasks/${taskId}/task.json`), taskId);
+      if (!projection) return null;
+      let commit: Record<string, unknown> | null = null;
+      try { commit = obj(this.boundedCommitStatus(taskId)); } catch { /* Fail closed on missing status. */ }
+      if (commit?.task_id !== taskId || !["NOT_PREPARED", "PREPARED", "COMMITTED"].includes(String(commit.commit_state))) commit = null;
+      const commit_state = commit?.commit_state as "NOT_PREPARED" | "PREPARED" | "COMMITTED" | undefined ?? null;
+      const local_commit = commit_state === "COMMITTED" && typeof commit?.local_commit === "string" && /^[a-f0-9]{40}$/.test(commit.local_commit) ? commit.local_commit : null;
+      return { ...projection, commit_state, local_commit,
+        authoritative_done: commit?.authoritative_done === false && (commit_state !== "COMMITTED" || local_commit !== null) };
     } catch { return null; }
   }
   boundedTasks(limit = 20) {
