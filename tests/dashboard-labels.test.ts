@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { stateLabel, taskStateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask, buildBoundedStartRequest, submitBoundedStart, createBoundedStartController, boundedStatusRows } from "../src/dashboard/public/labels.js";
+import { stateLabel, taskStateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask, buildBoundedStartRequest, submitBoundedStart, createBoundedStartController, createBoundedStartSubmitHandler, boundedStatusRows } from "../src/dashboard/public/labels.js";
 
 it("parses the dashboard app with the current Node runtime", () => {
   const appPath = fileURLToPath(new URL("../src/dashboard/public/app.js", import.meta.url));
@@ -337,6 +337,79 @@ describe("bounded start controller", () => {
       expect(await controller.start(...args)).toEqual({ kind: "failed" });
       expect(controller.busy).toBe(false);
     }
+  });
+});
+
+describe("bounded start submit handler", () => {
+  const args = ["codex-with-chatgpt", "Goal", "src/app.js", "Check behavior"] as const;
+  const task_id = `bounded-${"b".repeat(32)}`;
+
+  it("prevents default, starts with exactly four read values and restores disabled state on success", async () => {
+    const effects: unknown[][] = [];
+    const controller = createBoundedStartController(null, async (_fetcher: unknown, request: unknown) => {
+      effects.push(["submit", request]);
+      return { task_id, secret: "private response detail" };
+    });
+    const handler = createBoundedStartSubmitHandler(controller,
+      () => { effects.push(["read"]); return args; },
+      value => { effects.push(["disabled", value]); },
+      value => { effects.push(["status", value]); });
+    await handler({ preventDefault: () => { effects.push(["preventDefault"]); } });
+    expect(effects).toEqual([
+      ["preventDefault"], ["disabled", true], ["status", ""], ["read"],
+      ["submit", { repo: args[0], goal: args[1], edit_paths: [args[2]], acceptance_criteria: [args[3]] }],
+      ["status", `${task_id} Updates appear automatically.`], ["disabled", false]
+    ]);
+    expect(JSON.stringify(effects)).not.toContain("private response detail");
+  });
+
+  it("reports one generic failure and restores disabled state for failed results and thrown errors", async () => {
+    for (const start of [
+      async () => ({ kind: "failed", detail: "private response detail" }),
+      async () => { throw new Error("private response detail"); }
+    ]) {
+      const effects: unknown[][] = [];
+      const handler = createBoundedStartSubmitHandler({ busy: false, start },
+        () => { effects.push(["read"]); return args; },
+        value => { effects.push(["disabled", value]); },
+        value => { effects.push(["status", value]); });
+      await handler();
+      expect(effects).toEqual([
+        ["disabled", true], ["status", ""], ["read"],
+        ["status", "Bounded start failed."], ["disabled", false]
+      ]);
+      expect(JSON.stringify(effects)).not.toContain("private response detail");
+    }
+  });
+
+  it("prevents default but does not read or update anything when already busy", async () => {
+    const effects: unknown[][] = [];
+    const handler = createBoundedStartSubmitHandler({ busy: true, start: () => { throw new Error("unexpected start"); } },
+      () => { effects.push(["read"]); return args; },
+      value => { effects.push(["disabled", value]); },
+      value => { effects.push(["status", value]); });
+    await handler({ preventDefault: () => { effects.push(["preventDefault"]); } });
+    expect(effects).toEqual([["preventDefault"]]);
+  });
+
+  it("ignores submissions throughout a pending start, then restores state on completion", async () => {
+    const effects: unknown[][] = [];
+    let resolve!: (value: { task_id: string }) => void;
+    const pending = new Promise<{ task_id: string }>(done => { resolve = done; });
+    const controller = createBoundedStartController(null, () => pending);
+    const handler = createBoundedStartSubmitHandler(controller,
+      () => { effects.push(["read"]); return args; },
+      value => { effects.push(["disabled", value]); },
+      value => { effects.push(["status", value]); });
+    const first = handler({ preventDefault: () => { effects.push(["preventDefault"]); } });
+    expect(controller.busy).toBe(true);
+    expect(effects).toEqual([["preventDefault"], ["disabled", true], ["status", ""], ["read"]]);
+    await handler({ preventDefault: () => { effects.push(["preventDefault"]); } });
+    expect(effects).toEqual([["preventDefault"], ["disabled", true], ["status", ""], ["read"], ["preventDefault"]]);
+    resolve({ task_id });
+    await first;
+    expect(controller.busy).toBe(false);
+    expect(effects.slice(-2)).toEqual([["status", `${task_id} Updates appear automatically.`], ["disabled", false]]);
   });
 });
 

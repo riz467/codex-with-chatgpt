@@ -163,6 +163,22 @@ export const createBoundedStartController = (fetcher, submitter = submitBoundedS
   };
 };
 
+export const createBoundedStartSubmitHandler = (controller, readValues, setDisabled, setStatus) => async event => {
+  event?.preventDefault?.();
+  if (controller.busy) return;
+  try {
+    setDisabled(true);
+    setStatus('');
+    const [repo, goal, paths, criteria] = readValues();
+    const result = await controller.start(repo, goal, paths, criteria);
+    setStatus(result.kind === 'started' ? `${result.task_id} Updates appear automatically.` : 'Bounded start failed.');
+  } catch {
+    setStatus('Bounded start failed.');
+  } finally {
+    setDisabled(false);
+  }
+};
+
 export const boundedStatusRows = task => {
   const safe = normalizeBoundedTask(task);
   return [
