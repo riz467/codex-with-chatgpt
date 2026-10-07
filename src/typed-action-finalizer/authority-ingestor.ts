@@ -5,9 +5,9 @@ import type { TrustedContextStore } from "./trusted-context-storage.js";
 export type { AuthorityIngestorHost, AuthorityLookup } from "./authority-ingestor-validation.js";
 
 export interface TrustedPresentationPeer {
-  registerPresentation(input: TrustedTypedActionPresentation): unknown;
-  status(id: string): unknown;
-  evidence(id: string): unknown;
+  registerPresentation(input: TrustedTypedActionPresentation): unknown | Promise<unknown>;
+  status(id: string): unknown | Promise<unknown>;
+  evidence(id: string): unknown | Promise<unknown>;
 }
 
 const receiptSchema = z.object({ approvalRequestId: idSchema, presentationHash: sha256Schema }).strict();
@@ -20,8 +20,8 @@ type BaseIngestor = Readonly<{
   registerHumanApproval: (input: unknown) => ReturnType<TrustedContextStore["registerHumanApproval"]>;
 }>;
 type PeerIngestor = BaseIngestor & Readonly<{
-  registerTrustedPresentation: (input: unknown) => unknown;
-  collectApprovedHumanApproval: (input: unknown) => ReturnType<TrustedContextStore["registerHumanApproval"]>;
+  registerTrustedPresentation: (input: unknown) => Promise<z.infer<typeof receiptSchema>>;
+  collectApprovedHumanApproval: (input: unknown) => Promise<ReturnType<TrustedContextStore["registerHumanApproval"]>>;
 }>;
 
 /** Pass this narrow capability to an in-process caller, never the host/store.
@@ -39,21 +39,21 @@ export function createTrustedAuthorityIngestor(store: TrustedContextStore, peer?
   const evidenceFor = peer.evidence.bind(peer);
   return Object.freeze({
     ...base,
-    registerTrustedPresentation: (input: unknown) => {
+    registerTrustedPresentation: async (input: unknown) => {
       const presentation = parsePresentation(input);
-      const receipt = parseStrict(receiptSchema, registerPresentation(presentation));
+      const receipt = parseStrict(receiptSchema, await registerPresentation(presentation));
       if (receipt.approvalRequestId !== presentation.request.approvalRequestId ||
           receipt.presentationHash !== presentation.presentationHash) throw new Error("Presentation receipt mismatch");
       return receipt;
     },
-    collectApprovedHumanApproval: (input: unknown) => {
+    collectApprovedHumanApproval: async (input: unknown) => {
       const presentation = parsePresentation(input);
-      const approvalStatus = parseStrict(statusSchema, status(presentation.request.approvalRequestId));
+      const approvalStatus = parseStrict(statusSchema, await status(presentation.request.approvalRequestId));
       if (approvalStatus.approvalRequestId !== presentation.request.approvalRequestId ||
           approvalStatus.presentationHash !== presentation.presentationHash ||
           approvalStatus.state !== "CURRENT" || approvalStatus.approvalState !== "APPROVED" ||
           approvalStatus.current !== true) throw new Error("Presentation is not currently approved");
-      const evidence = parseStrict(signedTypedActionApprovalSchema, evidenceFor(presentation.request.approvalRequestId));
+      const evidence = parseStrict(signedTypedActionApprovalSchema, await evidenceFor(presentation.request.approvalRequestId));
       if (!sameRequest(evidence.payload, presentation.request)) throw new Error("Approval request mismatch");
       const { actionId, targetId, requestHash, attemptId, attemptHash } = presentation.request;
       return store.registerHumanApproval({ identity: { actionId, targetId, requestHash, attemptId, attemptHash }, evidence });

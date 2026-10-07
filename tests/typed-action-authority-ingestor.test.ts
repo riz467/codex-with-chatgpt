@@ -341,6 +341,31 @@ describe("production Trusted Authority Ingestor", () => {
   });
 
   describe("presentation peer transport", () => {
+    it("awaits asynchronous receipt, status, and evidence with idempotent registration", async () => {
+      const { f, presentation, peer, api } = await peerFixture(); f.adopt();
+      peer.registerPresentation.mockResolvedValue({ approvalRequestId: presentation.request.approvalRequestId,
+        presentationHash: presentation.presentationHash });
+      peer.status.mockResolvedValue({ approvalRequestId: presentation.request.approvalRequestId,
+        presentationHash: presentation.presentationHash, state: "CURRENT", approvalState: "APPROVED", current: true });
+      peer.evidence.mockResolvedValue(f.approval);
+      await expect(api.registerTrustedPresentation(presentation)).resolves.toEqual({
+        approvalRequestId: presentation.request.approvalRequestId, presentationHash: presentation.presentationHash });
+      expect((await api.collectApprovedHumanApproval(presentation)).status).toBe("registered");
+      expect((await api.collectApprovedHumanApproval(presentation)).status).toBe("already-registered");
+      expect(peer.status).toHaveBeenCalledWith(presentation.request.approvalRequestId);
+      expect(peer.evidence).toHaveBeenCalledWith(presentation.request.approvalRequestId);
+      expect(f.counts()).toEqual([1, 1, 1, 1, 1, 1, 1]);
+    });
+    it.each(["registerTrustedPresentation", "collectApprovedHumanApproval"] as const)(
+      "%s rejects malformed and extra presentations before calling the peer", async method => {
+        const { presentation, peer, api } = await peerFixture();
+        for (const input of [{ ...presentation, request: null }, { ...presentation, extra: true }]) {
+          await expect(api[method](input)).rejects.toThrow();
+          expect(peer.registerPresentation).not.toHaveBeenCalled();
+          expect(peer.status).not.toHaveBeenCalled();
+          expect(peer.evidence).not.toHaveBeenCalled();
+        }
+      });
     it("registers and collects after adoption, with idempotent retry and no execution permit", async () => {
       const { f, presentation, peer, api } = await peerFixture();
       expect(Object.keys(api)).toEqual(["adoptIndependentReview", "registerHumanApproval",
@@ -348,20 +373,21 @@ describe("production Trusted Authority Ingestor", () => {
       expect(Object.isFrozen(api)).toBe(true);
       expect(api).not.toHaveProperty("status"); expect(api).not.toHaveProperty("evidence");
       expect(api).not.toHaveProperty("registerPresentation");
-      expect(() => api.collectApprovedHumanApproval(presentation)).toThrow(/adoption/);
+      await expect(api.collectApprovedHumanApproval(presentation)).rejects.toThrow(/adoption/);
       f.adopt();
-      expect(api.registerTrustedPresentation(presentation)).toEqual({ approvalRequestId: presentation.request.approvalRequestId,
+      await expect(api.registerTrustedPresentation(presentation)).resolves.toEqual({ approvalRequestId: presentation.request.approvalRequestId,
         presentationHash: presentation.presentationHash });
       expect(peer.registerPresentation).toHaveBeenCalledWith(presentation);
-      const result = api.collectApprovedHumanApproval(presentation);
+      const result = await api.collectApprovedHumanApproval(presentation);
       expect(result.status).toBe("registered");
       expect(result).not.toHaveProperty("permit"); expect(result).not.toHaveProperty("executionMayStart");
-      expect(api.registerTrustedPresentation(presentation)).toEqual({ approvalRequestId: presentation.request.approvalRequestId,
+      await expect(api.registerTrustedPresentation(presentation)).resolves.toEqual({ approvalRequestId: presentation.request.approvalRequestId,
         presentationHash: presentation.presentationHash });
-      expect(api.collectApprovedHumanApproval(presentation).status).toBe("already-registered");
+      expect((await api.collectApprovedHumanApproval(presentation)).status).toBe("already-registered");
       expect(peer.status).toHaveBeenCalledWith(presentation.request.approvalRequestId);
       expect(peer.evidence).toHaveBeenCalledWith(presentation.request.approvalRequestId);
       expect(f.counts()).toEqual([1, 1, 1, 1, 1, 1, 1]);
+      expect(f.count("finalized_permits")).toBe(0);
       expect(f.count("finalized_permits")).toBe(0);
     });
     it.each([{ extra: true }, { approvalRequestId: randomUUID() }, { presentationHash: hash() }])(
@@ -369,7 +395,7 @@ describe("production Trusted Authority Ingestor", () => {
         const { f, presentation, peer, api } = await peerFixture(); f.adopt();
         peer.registerPresentation.mockReturnValue({ approvalRequestId: presentation.request.approvalRequestId,
           presentationHash: presentation.presentationHash, ...change });
-        expect(() => api.registerTrustedPresentation(presentation)).toThrow();
+        await expect(api.registerTrustedPresentation(presentation)).rejects.toThrow();
         expect(f.counts()).toEqual([1, 1, 1, 1, 1, 0, 0]);
       });
     it.each([{ approvalState: "PENDING" }, { state: "STALE" }, { state: "SUPERSEDED" },
@@ -378,7 +404,7 @@ describe("production Trusted Authority Ingestor", () => {
         const { f, presentation, peer, api } = await peerFixture(); f.adopt();
         peer.status.mockReturnValue({ approvalRequestId: presentation.request.approvalRequestId,
           presentationHash: presentation.presentationHash, state: "CURRENT", approvalState: "APPROVED", current: true, ...change });
-        expect(() => api.collectApprovedHumanApproval(presentation)).toThrow();
+        await expect(api.collectApprovedHumanApproval(presentation)).rejects.toThrow();
         expect(peer.evidence).not.toHaveBeenCalled();
         expect(f.counts()).toEqual([1, 1, 1, 1, 1, 0, 0]);
       });
@@ -387,21 +413,21 @@ describe("production Trusted Authority Ingestor", () => {
       for (const evidence of [{ ...f.approval, extra: true }, { ...f.approval, payload: null },
         f.signApproval({ ...f.approval, payload: { ...f.approval.payload, approvalRequestId: randomUUID() } })]) {
         peer.evidence.mockReturnValue(evidence);
-        expect(() => api.collectApprovedHumanApproval(presentation)).toThrow();
+        await expect(api.collectApprovedHumanApproval(presentation)).rejects.toThrow();
       }
       expect(f.counts()).toEqual([1, 1, 1, 1, 1, 0, 0]);
     });
     it.each(["registerPresentation", "status", "evidence"] as const)("propagates peer %s failure", async method => {
       const { f, presentation, peer, api } = await peerFixture(); f.adopt();
       peer[method].mockImplementation(() => { throw new Error("peer offline"); });
-      expect(() => method === "registerPresentation" ? api.registerTrustedPresentation(presentation)
-        : api.collectApprovedHumanApproval(presentation)).toThrow(/peer offline/);
+      await expect(method === "registerPresentation" ? api.registerTrustedPresentation(presentation)
+        : api.collectApprovedHumanApproval(presentation)).rejects.toThrow(/peer offline/);
       expect(f.counts()).toEqual([1, 1, 1, 1, 1, 0, 0]);
     });
     it("cannot restore revoked authority through an approving peer", async () => {
       const { f, presentation, api } = await peerFixture(); f.adopt();
       f.authority.revokeReview(f.identity.attemptHash);
-      expect(() => api.collectApprovedHumanApproval(presentation)).toThrow();
+      await expect(api.collectApprovedHumanApproval(presentation)).rejects.toThrow();
       expect(f.counts()[6]).toBe(0);
     });
   });
