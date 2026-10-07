@@ -448,15 +448,32 @@ export function createMcpServer(ctx: McpContext): McpServer {
             `[3] Verification: ${JSON.stringify(latest.verify)}; execution_id: ${latest.worker.execution_id}`,
           ].join("\n\n");
           const validRefs: readonly number[] = [1, 2, 3];
-          const result = ctx.boundedSemanticReviewer
-            ? await ctx.boundedSemanticReviewer(prompt, latest.worker.session_id, validRefs)
-            : await semanticSession(prompt, latest.worker.session_id, validRefs);
+          let result: Awaited<ReturnType<typeof semanticSession>>;
+          try {
+            result = ctx.boundedSemanticReviewer
+              ? await ctx.boundedSemanticReviewer(prompt, latest.worker.session_id, validRefs)
+              : await semanticSession(prompt, latest.worker.session_id, validRefs);
+          } catch (error) {
+            const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+            const timedOut = (error instanceof Error && (error.message === "SEMANTIC_TIMEOUT" ||
+              error.name === "TimeoutError" || error.name === "AbortError")) ||
+              (typeof code === "string" && /TIMEOUT|TIMED_OUT/i.test(code));
+            tasks.recordSemanticReviewDiagnostic({ task_id: taskId, revision: latest.revision,
+              manifest_sha256: latest.manifest_sha256, phase: "SEMANTIC_REVIEW",
+              error_code: timedOut ? "SEMANTIC_REVIEW_TIMEOUT" : "SEMANTIC_REVIEW_FAILED" });
+            return;
+          }
           const decision = z.object({ decision: z.object({
             review_result: z.enum(["PASS", "NEEDS_WORK"]),
             unresolved_issues: z.array(z.string().min(1).max(2000)).max(10),
           }).passthrough() }).passthrough().safeParse(result);
           if (!decision.success ||
-              (decision.data.decision.review_result === "PASS" && decision.data.decision.unresolved_issues.length)) return;
+              (decision.data.decision.review_result === "PASS" && decision.data.decision.unresolved_issues.length)) {
+            tasks.recordSemanticReviewDiagnostic({ task_id: taskId, revision: latest.revision,
+              manifest_sha256: latest.manifest_sha256, phase: "SEMANTIC_REVIEW",
+              error_code: "SEMANTIC_REVIEW_INVALID" });
+            return;
+          }
           const beforeReview = tasks.status(taskId);
           const pending = beforeReview.revisions.at(-1);
           if (beforeReview.state !== "REVIEW_PENDING" || pending?.revision !== latest.revision ||
