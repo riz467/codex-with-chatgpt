@@ -35,13 +35,15 @@ const boundedRepos: Record<string, string> = {
   "codex-with-chatgpt": "C:\\work\\codex-with-chatgpt",
   "codex-with-chatgpt-control-plane": "C:\\work\\codex-with-chatgpt",
   "codex-with-chatgpt-authority-transport": "C:\\work\\codex-with-chatgpt",
+  "codex-with-chatgpt-ct700-peer-gateway": "C:\\work\\codex-with-chatgpt",
 };
 export function boundedFinalizationRoot(workspaceRoot: string, repo: string): string | null {
   const bridgeRoot = "C:\\work\\codex-with-chatgpt";
   if (workspaceRoot.toLowerCase() !== bridgeRoot.toLowerCase()) return null;
   if (repo === "autonomous-fixture") return "C:\\work\\bounded-review-live-fixture";
   if (repo === "codex-with-chatgpt" || repo === "codex-with-chatgpt-control-plane" ||
-      repo === "codex-with-chatgpt-authority-transport") return bridgeRoot;
+      repo === "codex-with-chatgpt-authority-transport" ||
+      repo === "codex-with-chatgpt-ct700-peer-gateway") return bridgeRoot;
   return null;
 }
 
@@ -108,6 +110,10 @@ export function productionVerificationPlan(profile: ExecutionProfile) {
       "tests/typed-action-authority-ingestor.test.ts",
       "tests/typed-action-approval.test.ts",
       "tests/ct700-production-approver.test.ts",
+    ] : profile === "tracked_typescript_ct700_peer_gateway" ? [
+      "tests/ct700-production-approver.test.ts",
+      "tests/typed-action-authority-ingestor.test.ts",
+      "tests/typed-action-approval.test.ts",
     ] : DASHBOARD_REGRESSIONS;
   return [
     { name: "tsc", toolPath: "typescript/bin/tsc", args: ["--noEmit"], timeout_ms: 120000 },
@@ -135,6 +141,7 @@ const boundedTasks = new BoundedTasks(boundedRepos, undefined, undefined, {
   "codex-with-chatgpt": "tracked_typescript_dashboard",
   "codex-with-chatgpt-control-plane": "tracked_typescript_control_plane",
   "codex-with-chatgpt-authority-transport": "tracked_typescript_authority_transport",
+  "codex-with-chatgpt-ct700-peer-gateway": "tracked_typescript_ct700_peer_gateway",
 }, productionVerifier); // Never pve-doc.
 
 const UNTRUSTED_NOTE =
@@ -611,10 +618,10 @@ export function createMcpServer(ctx: McpContext): McpServer {
   const boundedId = z.string().regex(/^bounded-[a-f0-9]{32}$/);
   server.registerTool("start_bounded_opencode_task", {
     title: "Start bounded OpenCode task",
-    description: "Fixed fixture-text and codex-with-chatgpt Dashboard/control-plane/authority-transport TypeScript profiles; Codex disabled. TypeScript profiles run fixed typecheck and Vitest regression. This does not commit, push or complete legacy DONE.",
-    inputSchema: z.object({ repo: z.enum(["autonomous-fixture", "codex-with-chatgpt", "codex-with-chatgpt-control-plane", "codex-with-chatgpt-authority-transport"]), goal: z.string().min(1).max(2000),
+    description: "Fixed fixture-text and codex-with-chatgpt Dashboard/control-plane/authority-transport/CT700 peer gateway TypeScript profiles; Codex disabled. TypeScript profiles run fixed typecheck and Vitest regression. This does not commit, push or complete legacy DONE.",
+    inputSchema: z.object({ repo: z.enum(["autonomous-fixture", "codex-with-chatgpt", "codex-with-chatgpt-control-plane", "codex-with-chatgpt-authority-transport", "codex-with-chatgpt-ct700-peer-gateway"]), goal: z.string().min(1).max(2000),
       edit_paths: z.array(z.string()).min(1).max(3), acceptance_criteria: z.array(z.string()).min(1).max(6),
-      task_kind: z.literal("text_change"), execution_profile: z.enum(["tracked_utf8_text", "tracked_typescript_dashboard", "tracked_typescript_control_plane", "tracked_typescript_authority_transport"]), worker: z.literal("opencode"),
+      task_kind: z.literal("text_change"), execution_profile: z.enum(["tracked_utf8_text", "tracked_typescript_dashboard", "tracked_typescript_control_plane", "tracked_typescript_authority_transport", "tracked_typescript_ct700_peer_gateway"]), worker: z.literal("opencode"),
       codex: z.object({ allowed: z.literal(false), max_calls: z.literal(0) }).strict(),
       max_revisions: z.number().int().min(1).max(3).default(3), timeout_ms: z.number().int().min(1000).max(600000).default(600000) }).strict(),
     annotations: { readOnlyHint: false, openWorldHint: false },

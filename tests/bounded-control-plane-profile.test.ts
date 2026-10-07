@@ -230,3 +230,94 @@ describe("bounded authority-transport profile", () => {
     expect(tasks.status(started.task_id).codex_calls).toBe(0);
   });
 });
+describe("bounded CT700 peer gateway profile", () => {
+  const alias = "codex-with-chatgpt-ct700-peer-gateway";
+  const profile = "tracked_typescript_ct700_peer_gateway" as const;
+  const allowed = [
+    "src/approver-service/production.ts",
+    "tests/ct700-production-approver.test.ts",
+    "docs/ct700-production-approver.md",
+  ];
+  const adjacent = [
+    "src/approver-service/production-helper.ts",
+    "tests/ct700-production-approver-extra.test.ts",
+    "docs/ct700-production-approver-extra.md",
+    "src/typed-action-finalizer/authority-ingestor.ts",
+    "tests/typed-action-authority-ingestor.test.ts",
+    "docs/ct701-authority-ingestor.md",
+  ];
+
+  it("uses only the fixed CT700 verification plan", () => {
+    expect(productionVerificationPlan(profile)).toEqual([
+      { name: "tsc", toolPath: "typescript/bin/tsc", args: ["--noEmit"], timeout_ms: 120000 },
+      { name: "vitest", toolPath: "vitest/vitest.mjs", args: [
+        "run", "--maxWorkers=2",
+        "tests/ct700-production-approver.test.ts",
+        "tests/typed-action-authority-ingestor.test.ts",
+        "tests/typed-action-approval.test.ts",
+      ], timeout_ms: 180000 },
+    ]);
+  });
+
+  it("pins the alias to the bridge finalization root", () => {
+    const bridge = "C:\\work\\codex-with-chatgpt";
+    expect(boundedFinalizationRoot(bridge, alias)).toBe(bridge);
+    expect(boundedFinalizationRoot("C:\\work\\other", alias)).toBeNull();
+    expect(boundedFinalizationRoot(bridge, `${alias}-other`)).toBeNull();
+  });
+
+  it("accepts exactly the three CT700 paths, rejects adjacent and authority paths, and uses the long worker budget", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "bounded-ct700-peer-")); roots.push(root);
+    const repo = path.join(root, "repo");
+    for (const name of [...allowed, ...adjacent]) {
+      const file = path.join(repo, name);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, "fixture\n");
+    }
+    const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+    git("init", "-q"); git("add", ".");
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "initial");
+    const observedBudgets: { timeout: number; promptTimeout?: number }[] = [];
+    const worker: Worker = async (_repo, _prompt, timeout, promptTimeout) => {
+      observedBudgets.push({ timeout, promptTimeout });
+      return {
+        worker: "opencode", session_id: "ses_ct700", execution_id: "msg_ct700",
+        provider: "fixture", model: "fixture", usage: null, tools: 0, state: "completed",
+        output: JSON.stringify({ edits: [{ path: allowed[0],
+          expected_sha256: createHash("sha256").update("fixture\n").digest("hex"),
+          start_line: 1, delete_count: 1, new_text: "updated\n",
+        }] }),
+      };
+    };
+    const verifier: Verifier = (_repo, verifiedProfile, paths) => ({
+      profile: verifiedProfile, passed: true, paths: [...paths], tests_run: 0, checks: [],
+    });
+    const actual = fs.realpathSync.native(repo);
+    const tasks = new BoundedTasks({ [alias]: actual, control: actual, authority: actual },
+      path.join(root, "store"), worker, { [alias]: profile,
+        control: "tracked_typescript_control_plane",
+        authority: "tracked_typescript_authority_transport" }, verifier);
+    const contract: Contract = {
+      repo: alias, goal: "Change CT700 production peer gateway", edit_paths: [...allowed],
+      acceptance_criteria: ["Only the three fixed CT700 paths"], task_kind: "text_change",
+      execution_profile: profile, worker: "opencode", codex: { allowed: false, max_calls: 0 },
+      max_revisions: 1, timeout_ms: 600000,
+    };
+    for (const name of adjacent) {
+      expect(() => tasks.start({ ...contract, edit_paths: [name] })).toThrow("INVALID_CONTRACT");
+    }
+    for (const wrongProfile of ["tracked_typescript_control_plane", "tracked_typescript_authority_transport"] as const) {
+      expect(() => tasks.start({ ...contract, execution_profile: wrongProfile })).toThrow("INVALID_CONTRACT");
+    }
+    for (const wrongRepo of ["control", "authority"]) {
+      expect(() => tasks.start({ ...contract, repo: wrongRepo })).toThrow("INVALID_CONTRACT");
+    }
+    const started = tasks.start(contract);
+    expect(tasks.status(started.task_id).contract.edit_paths).toEqual(allowed);
+    expect((await tasks.execute(started.task_id)).state).toBe("REVIEW_PENDING");
+    expect(observedBudgets).toEqual([{ timeout: 330000, promptTimeout: 300000 }]);
+    expect(tasks.artifacts(started.task_id, 1).verify).toMatchObject({
+      profile, passed: true, paths: [allowed[0]],
+    });
+  });
+});
