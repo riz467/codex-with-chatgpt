@@ -142,6 +142,27 @@ export const submitBoundedStart = async (fetcher, request) => {
   }
 };
 
+export const createBoundedStartController = (fetcher, submitter = submitBoundedStart) => {
+  let busy = false;
+  return {
+    get busy() { return busy; },
+    async start(repo, goalText, editPathText, criteriaText) {
+      if (busy) return { kind: 'busy' };
+      busy = true;
+      try {
+        const request = buildBoundedStartRequest(repo, goalText, editPathText, criteriaText);
+        const result = await submitter(fetcher, request);
+        if (typeof result?.task_id !== 'string' || !/^bounded-[a-f0-9]{32}$/.test(result.task_id)) throw boundedStartError();
+        return { kind: 'started', task_id: result.task_id };
+      } catch {
+        return { kind: 'failed' };
+      } finally {
+        busy = false;
+      }
+    }
+  };
+};
+
 export const boundedStatusRows = task => {
   const safe = normalizeBoundedTask(task);
   return [

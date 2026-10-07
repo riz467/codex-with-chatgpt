@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { stateLabel, taskStateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask, buildBoundedStartRequest, submitBoundedStart, boundedStatusRows } from "../src/dashboard/public/labels.js";
+import { stateLabel, taskStateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask, buildBoundedStartRequest, submitBoundedStart, createBoundedStartController, boundedStatusRows } from "../src/dashboard/public/labels.js";
 
 it("parses the dashboard app with the current Node runtime", () => {
   const appPath = fileURLToPath(new URL("../src/dashboard/public/app.js", import.meta.url));
@@ -198,6 +198,52 @@ describe("bounded start submission", () => {
     for (const fetcher of failures) {
       try { await submitBoundedStart(fetcher, request); throw new Error("unexpected success"); }
       catch (error) { expect(error).toEqual(new Error("Bounded start failed")); }
+    }
+  });
+});
+
+describe("bounded start controller", () => {
+  const repo = "codex-with-chatgpt";
+  const task_id = `bounded-${"b".repeat(32)}`;
+  const args = [repo, "  Fix labels  ", " src/a.ts ", " verify "] as const;
+
+  it("sets busy synchronously, rejects concurrent starts without building or submitting, and returns only the task ID", async () => {
+    const fetcher = () => { throw new Error("fetcher must not be called directly"); };
+    let resolve!: (value: { task_id: string; secret: string }) => void;
+    const pending = new Promise<{ task_id: string; secret: string }>(done => { resolve = done; });
+    const calls: unknown[][] = [];
+    const submitter = (...values: unknown[]) => { calls.push(values); return pending; };
+    const controller = createBoundedStartController(fetcher, submitter);
+    expect(controller.busy).toBe(false);
+    const first = controller.start(...args);
+    expect(controller.busy).toBe(true);
+    expect(calls).toEqual([[fetcher, { repo, goal: "Fix labels", edit_paths: ["src/a.ts"], acceptance_criteria: ["verify"] }]]);
+    expect(await controller.start("invalid repo", "", "", "")).toEqual({ kind: "busy" });
+    expect(controller.busy).toBe(true);
+    expect(calls).toHaveLength(1);
+    resolve({ task_id, secret: "private response detail" });
+    expect(await first).toEqual({ kind: "started", task_id });
+    expect(controller.busy).toBe(false);
+    expect(Object.keys(controller)).toEqual(["busy", "start"]);
+  });
+
+  it("fails closed on build errors without submitting, and allows a later start", async () => {
+    const calls: unknown[][] = [];
+    const submitter = async (...values: unknown[]) => { calls.push(values); return { task_id }; };
+    const controller = createBoundedStartController(null, submitter);
+    expect(await controller.start("invalid repo", "private goal", "a.ts", "ok")).toEqual({ kind: "failed" });
+    expect(controller.busy).toBe(false);
+    expect(calls).toHaveLength(0);
+    expect(await controller.start(...args)).toEqual({ kind: "started", task_id });
+    expect(controller.busy).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("hides submit errors and malformed responses, resetting busy after each failure", async () => {
+    for (const outcome of [Promise.reject(new Error("private response detail")), Promise.resolve({ task_id: "private", secret: "private response detail" })]) {
+      const controller = createBoundedStartController(null, () => outcome);
+      expect(await controller.start(...args)).toEqual({ kind: "failed" });
+      expect(controller.busy).toBe(false);
     }
   });
 });
