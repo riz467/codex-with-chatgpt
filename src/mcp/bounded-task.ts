@@ -50,6 +50,18 @@ type Ledger = { version: 2; task_id: string; contract: Contract; contract_sha256
   codex_calls: 0; codex_usage: null; elapsed_ms: number | null; worker_time_ms: number };
 const git = (repo: string, ...args: string[]) => execFileSync("git", ["-C", repo, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", ...args],
   { encoding: "utf8", env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }, timeout: 10000 }).trim();
+const rawBlobMatchesHead = (repo: string, name: string, file: string) => {
+  if (git(repo, "hash-object", "--no-filters", "--", file) === git(repo, "rev-parse", `HEAD:${name}`)) return true;
+  const eol = git(repo, "ls-files", "--eol", "-z", "--", name);
+  const reported = /^i\/lf[ \t]+w\/crlf[ \t]+attr\/[^\t]*\t([^\0]*)\0$/.exec(eol);
+  if (!reported || reported[1] !== name) return false;
+  const raw = fs.readFileSync(file).toString("latin1");
+  if (/(?<!\r)\n|\r(?!\n)/.test(raw)) return false;
+  const head = execFileSync("git", ["-C", repo, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+    "cat-file", "blob", `HEAD:${name}`],
+    { env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }, timeout: 10000, maxBuffer: 1024 * 1024 });
+  return Buffer.from(raw.replaceAll("\r\n", "\n"), "latin1").equals(head);
+};
 const text = (buffer: Buffer) => { if (buffer.length > 65536 || buffer.includes(0)) fail("NOT_BOUNDED_TEXT");
   const decoded = new TextDecoder("utf-8", { fatal: true }).decode(buffer); if (decoded.includes("\r") && /\r(?!\n)/.test(decoded)) fail("NOT_BOUNDED_TEXT"); return decoded; };
 const pathCheck = (repo: string, name: string) => {
@@ -445,7 +457,7 @@ export class BoundedTasks {
       if (git(repo, "status", "--porcelain=v1", "-uall")) fail("DIRTY_REPO");
       const baseline = Object.fromEntries(contract.edit_paths.map(p => {
         const file = pathCheck(repo, p);
-        if (git(repo, "hash-object", "--no-filters", "--", file) !== git(repo, "rev-parse", `HEAD:${p}`)) fail("DIRTY_REPO");
+        if (!rawBlobMatchesHead(repo, p, file)) fail("DIRTY_REPO");
         return [p, sha(fs.readFileSync(file))];
       }));
       fs.mkdirSync(this.root, { recursive: true });
