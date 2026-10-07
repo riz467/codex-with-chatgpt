@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { BoundedTasks, type Contract, type Verifier, type Worker } from "../src/mcp/bounded-task.js";
 import { boundedFinalizationRoot, productionVerificationPlan } from "../src/mcp/server.js";
+import { prepareBoundedCommit, commitBoundedPatch, getBoundedCommitStatus } from "../src/mcp/typed-actions.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
@@ -151,4 +153,80 @@ describe("bounded authority-transport profile", () => {
       expect(tasks.status(started.task_id).codex_calls).toBe(0);
     });
   }
+  it("prepares and commits one reviewed authority-transport edit locally without advancing origin", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "bounded-authority-commit-")); roots.push(root);
+    const repo = path.join(root, "repo");
+    const origin = path.join(root, "origin.git");
+    const name = "src/typed-action-finalizer/authority-ingestor.ts";
+    const file = path.join(repo, name);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, "export const authority = 1;\n");
+    const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+    execFileSync("git", ["init", "--bare", "-q", origin]);
+    git("init", "-q");
+    git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
+    git("add", "."); git("commit", "-qm", "initial");
+    const baseline = git("rev-parse", "HEAD");
+    const branch = git("branch", "--show-current");
+    git("remote", "add", "origin", origin);
+    git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
+    const originHead = () => execFileSync("git", ["--git-dir", origin, "rev-parse", `refs/heads/${branch}`], { encoding: "utf8" }).trim();
+    expect(originHead()).toBe(baseline);
+
+    const observedBudgets: { timeout: number; promptTimeout?: number }[] = [];
+    const worker: Worker = async (_repo, _prompt, timeout, promptTimeout) => {
+      observedBudgets.push({ timeout, promptTimeout });
+      return {
+        worker: "opencode", session_id: "ses_authority", execution_id: "msg_authority",
+        provider: "fixture", model: "fixture", usage: null, tools: 0, state: "completed",
+        output: JSON.stringify({ edits: [{ path: name,
+          expected_sha256: createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
+          start_line: 1, delete_count: 1, new_text: "export const authority = 2;\n",
+        }] }),
+      };
+    };
+    const verifier: Verifier = (_repo, verifiedProfile, paths) => ({
+      profile: verifiedProfile, passed: true, paths: [...paths], tests_run: 1, checks: [],
+    });
+    const stateDir = path.join(root, "commit-state");
+    fs.mkdirSync(stateDir);
+    const tasks = new BoundedTasks({ [alias]: fs.realpathSync.native(repo) }, path.join(root, "store"),
+      worker, { [alias]: profile }, verifier);
+    const contract: Contract = {
+      repo: alias, goal: "Change the authority ingestor locally", edit_paths: [name],
+      acceptance_criteria: ["One reviewed local edit"], task_kind: "text_change",
+      execution_profile: profile, worker: "opencode", codex: { allowed: false, max_calls: 0 },
+      max_revisions: 1, timeout_ms: 600000,
+    };
+    const started = tasks.start(contract);
+    const executed = await tasks.execute(started.task_id);
+    expect(executed.state).toBe("REVIEW_PENDING");
+    expect(observedBudgets).toEqual([{ timeout: 330000, promptTimeout: 300000 }]);
+    expect(tasks.artifacts(started.task_id, 1).verify).toMatchObject({
+      profile, passed: true, paths: [name],
+    });
+    expect(tasks.submitReview({
+      review_id: `review-${randomUUID()}`, task_id: started.task_id, revision: 1,
+      contract_sha256: started.contract_sha256, manifest_sha256: executed.manifest_sha256,
+      reviewer: "chatgpt", verdict: "PASS", findings: [],
+    }).state).toBe("REVIEW_ACCEPTED");
+
+    expect(prepareBoundedCommit(tasks, started.task_id, stateDir)).toMatchObject({
+      state: "PREPARED", authoritative_done: false,
+    });
+    expect(getBoundedCommitStatus(tasks, started.task_id, stateDir)).toMatchObject({
+      state: "PREPARED", authoritative_done: false,
+    });
+    expect(commitBoundedPatch(tasks, started.task_id, stateDir, repo)).toMatchObject({
+      state: "COMMITTED", authoritative_done: false,
+    });
+    expect(getBoundedCommitStatus(tasks, started.task_id, stateDir)).toMatchObject({
+      state: "COMMITTED", authoritative_done: false,
+    });
+    expect(git("rev-list", "--count", `${baseline}..HEAD`)).toBe("1");
+    expect(git("rev-parse", "HEAD^")).toBe(baseline);
+    expect(git("status", "--porcelain=v1", "-uall")).toBe("");
+    expect(originHead()).toBe(baseline);
+    expect(tasks.status(started.task_id).codex_calls).toBe(0);
+  });
 });
