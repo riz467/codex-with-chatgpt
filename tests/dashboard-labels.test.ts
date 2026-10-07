@@ -637,6 +637,7 @@ describe("bounded board and tracking source-slice rendering", () => {
     renderTasks([]);
     expect(dom.$("bounded-tracking-fields")!.children).toHaveLength(1);
     expect(dom.$("bounded-tracking-fields")!.children[0].tag).toBe("p");
+    expect(dom.$("bounded-tracking-fields")!.children[0].textContent).toBe("表示できるタスクはありません");
     renderTasks([running]);
     expect(rows()).toEqual(boundedTrackingRows(running).map(({ label, value }) => ({ label, value })));
     expect(dom.$("bounded-tracking-fields")!.children).toHaveLength(11);
