@@ -1,5 +1,5 @@
 import { stateLabel, taskStateLabel, modeLabel, actorLabel, stageLabel, pipelineLabel, eventTypeLabel, eventSummaryLabel, healthLabel, reviewLabel, completionLabel, stopLabel, stopSummaryLabel, actionLabel, displayValue, shortId, shortCommit, normalizeBoundedTask } from './labels.js';
-import { createBoundedStartController } from './labels.js';
+import { createBoundedStartController, boundedBoardBucket, boundedTrackingRows } from './labels.js';
 
 const $ = id => document.getElementById(id);
 const cell = (tag, content) => { const e = document.createElement(tag); e.textContent = displayValue(content); return e; };
@@ -107,7 +107,7 @@ function renderTaskBoard(snapshot) {
     buckets[boardBucket(task?.state, false)].push({ task, bounded: false });
   }
   for (const task of Array.isArray(snapshot.bounded_tasks) ? snapshot.bounded_tasks : []) {
-    buckets[boardBucket(task?.state, true)].push({ task, bounded: true });
+    buckets[boundedBoardBucket(task)].push({ task, bounded: true });
   }
   buckets.forEach((entries, index) => {
     const bucket = document.createElement('div'); bucket.className = 'task-board-bucket';
@@ -204,7 +204,7 @@ function createBoundedStartForm() {
   const fields = [repo, ...['Goal', 'Edit paths (one per line)', 'Acceptance criteria (one per line)'].map(() => document.createElement('textarea'))];
   for (const [index, input] of fields.entries()) {
     const label = document.createElement('label');
-    label.append(document.createTextNode(['Repository', 'Goal', 'Edit paths (one per line)', 'Acceptance criteria (one per line)'][index]), input);
+    label.append(document.createTextNode(['Repository', 'Goal', 'Edit paths (one per line)', 'Acceptance criteria (one per line)'][index]), document.createElement('br'), input);
     form.append(label);
   }
   const [selectedRepo, goal, paths, criteria] = fields;
@@ -246,9 +246,14 @@ function renderBoundedTasks(tasks) {
     const details = document.createElement('details');
     const summary = document.createElement('summary'); summary.id = 'bounded-opencode-summary';
     const list = document.createElement('div'); list.id = 'bounded-opencode-tasks';
-    details.append(summary, list); section.append(heading, createBoundedStartForm(), details);
+    const tracking = document.createElement('div'); tracking.id = 'bounded-tracking-fields';
+    details.append(summary, list); section.append(heading, createBoundedStartForm(), tracking, details);
     (autonomous.closest('section') || autonomous).insertAdjacentElement('afterend', section);
   }
+  const tracking = $('bounded-tracking-fields'); clear(tracking);
+  if (Array.isArray(tasks) && tasks.length) {
+    for (const row of boundedTrackingRows(tasks[0])) pair(tracking, row.label, row.value);
+  } else tracking.append(cell('p', '表示できるタスクはありません'));
   const list = $('bounded-opencode-tasks'); clear(list);
   $('bounded-opencode-summary').textContent = `Tasks (${Array.isArray(tasks) ? tasks.length : 0})`;
   if (!Array.isArray(tasks) || tasks.length === 0) {

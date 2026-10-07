@@ -13,11 +13,15 @@ it("parses the dashboard app with the current Node runtime", () => {
 
 it("wires the bounded start form and displays normalized lifecycle fields", () => {
   const source = readFileSync(fileURLToPath(new URL("../src/dashboard/public/app.js", import.meta.url)), "utf8");
-  expect(source).toContain("import { createBoundedStartController } from './labels.js';");
+  expect(source).toContain("import { createBoundedStartController, boundedBoardBucket, boundedTrackingRows } from './labels.js';");
   expect(source).toContain("createBoundedStartController(fetch)");
   expect(source).toContain("controller.start(selectedRepo.value, goal.value, paths.value, criteria.value)");
   expect(source).toContain("['codex-with-chatgpt', 'codex-with-chatgpt-control-plane']");
-  expect(source).toContain("section.append(heading, createBoundedStartForm(), details)");
+  expect(source).toContain("details.append(summary, list); section.append(heading, createBoundedStartForm(), tracking, details);");
+  expect(source.match(/const list = document.createElement\('div'\); list.id = 'bounded-opencode-tasks';/g)).toHaveLength(1);
+  expect(source.match(/const tracking = document.createElement\('div'\); tracking.id = 'bounded-tracking-fields';/g)).toHaveLength(1);
+  expect(source.match(/details.append\(summary, list\)/g)).toHaveLength(1);
+  expect(source.match(/section.append\(heading, createBoundedStartForm\(\), tracking, details\)/g)).toHaveLength(1);
   for (const field of ["review_reviewer", "latest_semantic_review_diagnostic_code", "commit_state", "local_commit", "authoritative_done"]) {
     expect(source).toContain(`['${field}',`);
     expect(source).toContain(`safe.${field}`);
@@ -70,6 +74,15 @@ it("submits the bounded form, ignores busy submissions, reports outcomes and re-
   expect(options.map(option => option.value)).toEqual(["codex-with-chatgpt", "codex-with-chatgpt-control-plane"]);
   const textareas = elements.filter(item => item.tag === "textarea");
   expect(textareas).toHaveLength(3);
+  const labels = elements.filter(item => item.tag === "label");
+  expect(labels).toHaveLength(4);
+  labels.forEach((label, index) => {
+    expect(label.children).toHaveLength(3);
+    expect((label.children[0] as { textContent: string }).textContent).toBe(
+      ["Repository", "Goal", "Edit paths (one per line)", "Acceptance criteria (one per line)"][index]);
+    expect((label.children[1] as { tag: string }).tag).toBe("br");
+    expect(label.children[2]).toBe(index === 0 ? select : textareas[index - 1]);
+  });
   const button = elements.find(item => item.tag === "button")!;
   const status = elements.find(item => item.attributes.role === "status")!;
   select.value = options[1].value;
@@ -506,5 +519,126 @@ describe("bounded status rows", () => {
     expect(rows.map(row => row.value)).toEqual(Array(11).fill("未確認"));
     expect(boundedTrackingRows(null).map(row => row.value)).toEqual(Array(11).fill("未確認"));
     expect(JSON.stringify(rows)).not.toContain("private");
+  });
+});
+
+describe("bounded board and tracking source-slice rendering", () => {
+  const source = readFileSync(fileURLToPath(new URL("../src/dashboard/public/app.js", import.meta.url)), "utf8");
+  class FakeElement {
+    id = "";
+    className = "";
+    textContent = "";
+    children: FakeElement[] = [];
+    parent: FakeElement | null = null;
+    classList = { add: (name: string) => { this.className += ` ${name}`; } };
+    constructor(readonly tag: string) {}
+    append(...children: FakeElement[]) {
+      for (const child of children) { child.parent = this; this.children.push(child); }
+    }
+    replaceChildren() { for (const child of this.children) child.parent = null; this.children = []; }
+    remove() {
+      if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this);
+      this.parent = null;
+    }
+    querySelectorAll(selector: string): FakeElement[] {
+      return this.children.flatMap(child => [
+        ...(selector.startsWith(".") && child.className.split(" ").includes(selector.slice(1)) ? [child] : []),
+        ...child.querySelectorAll(selector)
+      ]);
+    }
+    insertAdjacentElement(position: string, element: FakeElement) {
+      if (position !== "afterend" || !this.parent) throw new Error("unexpected insertion");
+      const siblings = this.parent.children;
+      siblings.splice(siblings.indexOf(this) + 1, 0, element);
+      element.parent = this.parent;
+    }
+    closest(selector: string): FakeElement | null {
+      for (let node: FakeElement | null = this; node; node = node.parent) {
+        if (selector === "section" && node.tag === "section") return node;
+      }
+      return null;
+    }
+    addEventListener(_name: string, _listener: () => void) {}
+  }
+  const setup = () => {
+    const root = new FakeElement("main");
+    const status = new FakeElement("div"); status.id = "status-bar";
+    const autonomousSection = new FakeElement("section");
+    const autonomous = new FakeElement("div"); autonomous.id = "autonomous";
+    autonomousSection.append(autonomous); root.append(status, autonomousSection);
+    const $ = (id: string): FakeElement | undefined => {
+      const find = (node: FakeElement): FakeElement | undefined =>
+        node.id === id ? node : node.children.map(find).find(Boolean);
+      return find(root);
+    };
+    const document = {
+      createElement: (tag: string) => new FakeElement(tag),
+      createTextNode: (text: string) => { const node = new FakeElement("#text"); node.textContent = text; return node; }
+    };
+    const cell = (tag: string, value: unknown) => {
+      const node = document.createElement(tag); node.textContent = displayValue(value); return node;
+    };
+    const clear = (node: FakeElement) => node.replaceChildren();
+    const pair = (node: FakeElement, label: string, value: unknown) => {
+      const row = document.createElement("div"); row.className = "pair";
+      row.append(cell("small", label), cell("strong", value)); node.append(row);
+    };
+    return { root, $, document, cell, clear, pair };
+  };
+
+  it("routes only bounded entries through the evidence-aware bucket helper", () => {
+    const start = source.indexOf("const boardBuckets =");
+    const end = source.indexOf("async function refreshAuthorityStatus()", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const dom = setup();
+    const renderBoard = new Function("document", "$", "cell", "clear", "displayValue", "normalizeBoundedTask",
+      "shortId", "taskStateLabel", "boundedBoardBucket", "showBoundedReviewSummary",
+      `${source.slice(start, end)}\nreturn renderTaskBoard;`)(dom.document, dom.$, dom.cell, dom.clear,
+      displayValue, normalizeBoundedTask, shortId, taskStateLabel, boundedBoardBucket, () => {});
+    const id = `bounded-${"b".repeat(32)}`;
+    const committed = { task_id: id, state: "REVIEW_ACCEPTED", commit_state: "COMMITTED",
+      local_commit: "a".repeat(40), authoritative_done: false };
+    const pending = { ...committed, state: "REVIEW_PENDING", commit_state: undefined, local_commit: undefined };
+    renderBoard({ recent_tasks: [{ task_id: "recent-done", state: "DONE", mode: "change", repo: "public" }],
+      bounded_tasks: [{ ...committed, state: "RUNNING", commit_state: undefined, local_commit: undefined },
+        pending, committed, { ...pending, commit_state: "COMMITTED", local_commit: committed.local_commit }] });
+    const buckets = dom.$("task-board")!.querySelectorAll(".task-board-bucket");
+    expect(buckets.map(bucket => bucket.children[0].textContent)).toEqual([
+      "処理中 (1)", "レビュー待ち (1)", "ローカル完了（Finalizer未確認） (2)", "要確認 (1)"
+    ]);
+    renderBoard({ recent_tasks: [], bounded_tasks: [pending] });
+    expect(dom.$("task-board")!.querySelectorAll(".task-board-bucket").map(bucket => bucket.children[0].textContent))
+      .toEqual(["処理中 (0)", "レビュー待ち (1)", "ローカル完了（Finalizer未確認） (0)", "要確認 (0)"]);
+  });
+
+  it("replaces normalized tracking rows on running, committed, empty and running renders", () => {
+    const start = source.indexOf("const boundedFields =");
+    const end = source.indexOf("const approvalFields =", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const dom = setup();
+    const renderTasks = new Function("document", "$", "cell", "clear", "pair", "normalizeBoundedTask",
+      "boundedTrackingRows", "createBoundedStartForm", `${source.slice(start, end)}\nreturn renderBoundedTasks;`)(
+        dom.document, dom.$, dom.cell, dom.clear, dom.pair, normalizeBoundedTask, boundedTrackingRows,
+        () => dom.document.createElement("form"));
+    const running = { task_id: `bounded-${"b".repeat(32)}`, state: "RUNNING", progress_mode: "EXECUTION",
+      authoritative_done: false, goal: "private goal", evidence: "private evidence" };
+    const committed = { ...running, state: "REVIEW_ACCEPTED", progress_mode: "REVIEW_ACCEPTED",
+      commit_state: "COMMITTED", local_commit: "a".repeat(40) };
+    const rows = () => dom.$("bounded-tracking-fields")!.children.map(row => ({
+      label: row.children[0].textContent, value: row.children[1].textContent
+    }));
+    for (const task of [running, committed]) {
+      renderTasks([task]);
+      expect(rows()).toEqual(boundedTrackingRows(task).map(({ label, value }) => ({ label, value })));
+      expect(JSON.stringify(rows())).not.toContain("private");
+    }
+    renderTasks([]);
+    expect(dom.$("bounded-tracking-fields")!.children).toHaveLength(1);
+    expect(dom.$("bounded-tracking-fields")!.children[0].tag).toBe("p");
+    renderTasks([running]);
+    expect(rows()).toEqual(boundedTrackingRows(running).map(({ label, value }) => ({ label, value })));
+    expect(dom.$("bounded-tracking-fields")!.children).toHaveLength(11);
   });
 });
