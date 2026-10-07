@@ -627,8 +627,10 @@ describe("failed bounded workspace recovery", () => {
   });
   afterEach(() => cleanup(fixtureRoot));
 
-  it.each([0, 1])("restores only observed in-scope changes after %i prior NEEDS_WORK revisions", (prior) => {
-    if (prior) (task.revisions as any[]).push({ revision: 1, review: { verdict: "NEEDS_WORK" } });
+  it.each(["VERIFY_FAILED", "VERIFY_TIMEOUT", "EXECUTION_UNKNOWN"] as const)(
+    "restores only observed in-scope changes after %s with prior revision evidence", (reason) => {
+    task.stop_reason = reason;
+    (task.revisions as any[]).push({ revision: 1, review: { verdict: "NEEDS_WORK" } });
     const evidence = JSON.stringify(task);
     write(fixtureRoot, "recovery.txt", "failed verification\n");
     expect(recover()).toEqual({ task_id: taskId, result: "recovered" });

@@ -532,7 +532,8 @@ export function recoverFailedBoundedWorkspace(
   root: string,
 ) {
   if (task.state !== "ESCALATE" ||
-      (task.stop_reason !== "VERIFY_FAILED" && task.stop_reason !== "VERIFY_TIMEOUT") ||
+      (task.stop_reason !== "VERIFY_FAILED" && task.stop_reason !== "VERIFY_TIMEOUT" &&
+       task.stop_reason !== "EXECUTION_UNKNOWN") ||
       tasks.executing(task.task_id) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(task.baseline_head)) {
     throw new GatewayError("RECOVERY_NOT_ALLOWED", "This task is not eligible for workspace recovery");
   }
@@ -634,7 +635,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       Object.values(boundedRepos).some((root) => path.resolve(root).toLowerCase() === path.resolve(workspace.root).toLowerCase())) {
     server.registerTool("recover_failed_bounded_task", {
       title: "Recover failed bounded task workspace",
-      description: "Restore observed in-scope unstaged changes after a verification failure; leave the failed task ledger unchanged.",
+      description: "Restore observed in-scope unstaged changes after a verification failure, timeout, or unknown execution outcome; leave the failed task ledger unchanged.",
       inputSchema: z.object({ task_id: boundedId }).strict(),
       annotations: { readOnlyHint: false, openWorldHint: false },
     }, async (args, extra) => {
