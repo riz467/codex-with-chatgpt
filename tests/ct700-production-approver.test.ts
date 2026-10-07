@@ -251,13 +251,24 @@ describe('CT700 production Human / peer trust boundary', () => {
     });
     const route = '/api/typed-action-presentations';
     expect(await fixed('GET', '/health')).toBe(503);
-    const first = await setup(), firstPresentation = fixture(); first.authorize(firstPresentation);
-    expect(await fixed('POST', route, firstPresentation)).toBe(201);
+    let firstCalls = 0, secondCalls = 0;
+    const firstHandler: NonNullable<typeof currentPeer> = (_req, res) => {
+      firstCalls++; res.writeHead(201); res.end();
+    };
+    const secondHandler: NonNullable<typeof currentPeer> = (_req, res) => {
+      secondCalls++; res.writeHead(202); res.end();
+    };
+    currentPeer = firstHandler;
+    expect(await fixed('POST', route)).toBe(201);
+    expect(firstCalls).toBe(1);
+    expect(secondCalls).toBe(0);
     currentPeer = undefined;
-    expect(await fixed('POST', route, firstPresentation)).toBe(503);
-    const next = await setup(), nextPresentation = fixture(); next.authorize(nextPresentation);
-    expect(await fixed('POST', route, nextPresentation)).toBe(201);
-    expect(first.store.presentation(nextPresentation.request.approvalRequestId)).toBeNull();
-    expect(next.store.presentation(nextPresentation.request.approvalRequestId)?.presentation).toEqual(nextPresentation);
+    expect(await fixed('POST', route)).toBe(503);
+    expect(firstCalls).toBe(1);
+    expect(secondCalls).toBe(0);
+    currentPeer = secondHandler;
+    expect(await fixed('POST', route)).toBe(202);
+    expect(firstCalls).toBe(1);
+    expect(secondCalls).toBe(1);
   });
 });
