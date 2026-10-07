@@ -1,12 +1,12 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, request, type Server } from 'node:http';
-import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, X509Certificate } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { ApproverStore } from '../src/approver-service/storage.js';
-import { createProductionApprover } from '../src/approver-service/production.js';
+import { createProductionApprover, validateCt701InboundPeerIdentity } from '../src/approver-service/production.js';
 import { presentationHash, type TrustedTypedActionPresentation, type TrustedTypedActionPresentationVerifier } from '../src/approver-service/presentation.js';
 import { actionBindingFields, type TypedActionApprovalRequest } from '../src/typed-action-approval/contract.js';
 import { verifyTypedActionApproval } from '../src/typed-action-approval/verifier.js';
@@ -423,4 +423,69 @@ describe('CT700 production Human / peer trust boundary', () => {
         expect(reply.headers['x-peer-secret']).toBeUndefined();
       } finally { currentPeer = previous; }
     });
+});
+
+// Inert, public-only DER construction: fixed public SPKI and dummy signature bytes.
+// No private key, certificate signing, TLS listener or external tooling is involved.
+describe('CT701 inbound offline client identity constraints (not TLS chain verification)', () => {
+  const role = 'urn:ct701:client';
+  const spki = Buffer.from('302a300506032b6570032100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a', 'hex');
+  const pin = createHash('sha256').update(spki).digest('hex');
+  const settings = { expectedClientSpkiSha256: pin, expectedUriSanRole: role };
+  const tlv = (tag: number, bytes: Buffer) => Buffer.concat([Buffer.from([tag, ...(bytes.length < 128 ? [bytes.length] : [0x82, bytes.length >> 8, bytes.length & 255])]), bytes]);
+  const seq = (...parts: Buffer[]) => tlv(0x30, Buffer.concat(parts));
+  const oid = (hex: string) => tlv(0x06, Buffer.from(hex, 'hex'));
+  const algorithm = seq(oid('2b6570')); // Ed25519; the signature below is deliberately not valid.
+  const name = seq(tlv(0x31, seq(oid('550403'), tlv(0x0c, Buffer.from('inert offline fixture')))));
+  const date = (value: string) => tlv(0x18, Buffer.from(value));
+  const extension = (id: string, value: Buffer) => seq(oid(id), tlv(0x04, value));
+  function certificate(options: { uris?: string[]; dns?: boolean; eku?: string; from?: string; to?: string } = {}) {
+    const sans = [...(options.uris ?? [role]).map(uri => tlv(0x86, Buffer.from(uri))),
+      ...(options.dns ? [tlv(0x82, Buffer.from('unexpected.example'))] : [])];
+    const extensions = seq(extension('551d11', seq(...sans)),
+      extension('551d25', seq(oid(options.eku ?? '2b06010505070302'))));
+    const tbs = seq(tlv(0xa0, tlv(0x02, Buffer.from([2]))), tlv(0x02, Buffer.from([1])), algorithm,
+      name, seq(date(options.from ?? '20200101000000Z'), date(options.to ?? '20490101000000Z')),
+      name, spki, tlv(0xa3, extensions));
+    return seq(tbs, algorithm, tlv(0x03, Buffer.alloc(65)));
+  }
+  it('accepts exactly the host pin, single URI role, clientAuth EKU and current dates', () => {
+    const der = certificate();
+    expect(new X509Certificate(der).subjectAltName).toBe(`URI:${role}`);
+    expect(validateCt701InboundPeerIdentity(der, settings)).toBe(true);
+  });
+  it('rejects wrong pin or role, absent/duplicate/extra SAN, and wrong EKU', () => {
+    const check = (der: Buffer, config = settings) => expect(validateCt701InboundPeerIdentity(der, config)).toBe(false);
+    check(certificate(), { ...settings, expectedClientSpkiSha256: '0'.repeat(64) });
+    check(certificate(), { ...settings, expectedUriSanRole: 'urn:ct701:other' });
+    check(certificate({ uris: [] }));
+    check(certificate({ uris: [role, role] }));
+    check(certificate({ uris: [role, 'urn:ct701:other'] }));
+    check(certificate({ dns: true }));
+    check(certificate({ eku: '2b06010505070301' })); // serverAuth
+  });
+  it('rejects malformed DER, expired and not-yet-valid leaves', () => {
+    for (const der of [Buffer.alloc(0), Buffer.from('not DER'), certificate().subarray(0, 40),
+      Buffer.concat([certificate(), Buffer.from([0])]), certificate({ to: '20210101000000Z' }),
+      certificate({ from: '20400101000000Z' })]) {
+      expect(validateCt701InboundPeerIdentity(der, settings)).toBe(false);
+    }
+  });
+  it('rejects missing, extra or malformed independently configured settings and non-DER inputs', () => {
+    const der = certificate();
+    for (const invalid of [null, {}, { expectedClientSpkiSha256: pin }, { expectedUriSanRole: role },
+      { ...settings, extra: true }, { ...settings, expectedClientSpkiSha256: pin.toUpperCase() },
+      { ...settings, expectedClientSpkiSha256: 'a' }, { ...settings, expectedUriSanRole: 'https://example.test' },
+      { ...settings, expectedUriSanRole: 'urn:ct701:client,URI:urn:ct701:other' }]) {
+      expect(validateCt701InboundPeerIdentity(der, invalid)).toBe(false);
+    }
+    expect(validateCt701InboundPeerIdentity('caller-supplied certificate', settings)).toBe(false);
+  });
+  it('rejects non-enumerable and symbol settings keys', () => {
+    const der = certificate();
+    const hidden = Object.defineProperty({ ...settings }, 'extra', { value: true });
+    const symbolic = { ...settings, [Symbol('extra')]: true };
+    expect(validateCt701InboundPeerIdentity(der, hidden)).toBe(false);
+    expect(validateCt701InboundPeerIdentity(der, symbolic)).toBe(false);
+  });
 });

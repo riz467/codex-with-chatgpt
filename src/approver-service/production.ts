@@ -1,6 +1,6 @@
 import express from 'express';
 import { request as httpRequest } from 'node:http';
-import { randomBytes, timingSafeEqual, type KeyObject } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual, X509Certificate, type KeyObject } from 'node:crypto';
 import { createApproverService, type ApproverConfig } from './server.js';
 import { ApproverStore } from './storage.js';
 import { denyAllPresentationVerifier, parsePresentation, sameRequest, type TrustedTypedActionPresentationVerifier } from './presentation.js';
@@ -8,6 +8,38 @@ import { idSchema } from '../typed-action-approval/contract.js';
 
 export const humanPort = 48768;
 export const peerPort = 48769;
+/** Offline identity constraints only. This does not verify a TLS client chain or socket authorization;
+ * Stage 2B-2b must supply verified TLS peer authentication before using this predicate.
+ */
+export function validateCt701InboundPeerIdentity(
+  leafDer: unknown, settings: unknown,
+): boolean {
+  try {
+    if (!Buffer.isBuffer(leafDer) || leafDer.length === 0 || leafDer.length > 64 * 1024 ||
+        !settings || typeof settings !== 'object' || Array.isArray(settings) ||
+        Reflect.ownKeys(settings).length !== 2 ||
+        !Reflect.ownKeys(settings).includes('expectedClientSpkiSha256') ||
+        !Reflect.ownKeys(settings).includes('expectedUriSanRole')) throw Error();
+    const values = settings as Record<string, unknown>;
+    const pin = Object.getOwnPropertyDescriptor(values, 'expectedClientSpkiSha256');
+    const role = Object.getOwnPropertyDescriptor(values, 'expectedUriSanRole');
+    if (!pin || !role || !('value' in pin) || !('value' in role) ||
+        typeof pin.value !== 'string' || !/^[0-9a-f]{64}$/.test(pin.value) ||
+        typeof role.value !== 'string' ||
+        !/^urn:[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?:[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$/.test(role.value)) throw Error();
+    const certificate = new X509Certificate(leafDer);
+    // Reject DER with trailing data even if the X.509 parser accepts the first certificate.
+    if (!certificate.raw.equals(leafDer) || certificate.subjectAltName !== `URI:${role.value}` ||
+        !certificate.keyUsage?.includes('1.3.6.1.5.5.7.3.2')) throw Error();
+    const from = Date.parse(certificate.validFrom), to = Date.parse(certificate.validTo), now = Date.now();
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from > now || to < now || from > to) throw Error();
+    const spki = certificate.publicKey.export({ type: 'spki', format: 'der' });
+    return timingSafeEqual(createHash('sha256').update(spki).digest(), Buffer.from(pin.value, 'hex'));
+  } catch {
+    return false;
+  }
+}
+
 /** No config switch/module loader enables peer authority. Reviewed host composition only. */
 export function createProductionApprover(config: ApproverConfig, store: ApproverStore, key: KeyObject,
   verifier: TrustedTypedActionPresentationVerifier = denyAllPresentationVerifier, now = Date.now) {
