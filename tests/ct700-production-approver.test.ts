@@ -742,7 +742,8 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
             verifyRegistration: () => registrationEnabled ? pinned : null,
             authorizeLookup: ({ approvalRequestId }) => lookupEnabled && approvalRequestId === pinned.request.approvalRequestId,
           };
-          const apps = createProductionApprover(config, store, generateKeyPairSync('ed25519').privateKey, verifier, () => base);
+          const signingKey = generateKeyPairSync('ed25519');
+          const apps = createProductionApprover(config, store, signingKey.privateKey, verifier, () => base);
           const peer = createServer(apps.peer);
           try {
             await new Promise<void>((resolve, reject) => {
@@ -824,6 +825,59 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
               expect(directStatus).toBe(403);
               expect(store.presentation(id)?.presentation).toEqual(pinned);
               expect(store.typedEvidence(id)).toBeNull();
+              const human = createServer(apps.human);
+              try {
+                await new Promise<void>((resolve, reject) => {
+                  human.once('error', reject);
+                  human.listen(0, '127.0.0.1', () => { human.off('error', reject); resolve(); });
+                });
+                const humanAddress = human.address();
+                if (!humanAddress || typeof humanAddress === 'string') throw Error('missing Human listener');
+                const humanJson = (route: string, body: unknown) => new Promise<{ status: number; body: any }>((resolve, reject) => {
+                  const req = request({ hostname: '127.0.0.1', port: humanAddress.port, path: route, method: 'POST',
+                    agent: false, headers: { Host: config.rp_id, Origin: config.origin, 'Content-Type': 'application/json' } }, res => {
+                    const chunks: Buffer[] = [];
+                    res.on('error', reject);
+                    res.on('data', (chunk: Buffer) => chunks.push(chunk));
+                    res.on('end', () => {
+                      const text = Buffer.concat(chunks).toString();
+                      try { resolve({ status: res.statusCode!, body: JSON.parse(text) }); } catch { reject(Error('invalid Human JSON response')); }
+                    });
+                  });
+                  req.setTimeout(1500, () => req.destroy(Error('Human request timed out')));
+                  req.on('error', reject);
+                  req.end(JSON.stringify(body));
+                });
+                const device = authenticator();
+                const token = store.openEnrollment(base);
+                const enrollment = await humanJson('/enrollment/options', { token });
+                expect(enrollment.status).toBe(200);
+                expect((await humanJson('/enrollment/verify', { token, ceremony: enrollment.body.ceremony,
+                  credential: device.registration(enrollment.body.options.challenge, config.origin, config.rp_id) })).status).toBe(201);
+                const identity = { approvalRequestId: id, presentationHash: pinned.presentationHash };
+                const options = await humanJson('/api/webauthn/typed-action/options', identity);
+                expect(options.status).toBe(200);
+                expect((await humanJson('/api/webauthn/typed-action/verify', { ...identity, ceremony: options.body.ceremony,
+                  credential: device.assertion(options.body.options.challenge, config.origin, config.rp_id, 1) })).status).toBe(201);
+                const evidence = store.typedEvidence(id);
+                expect(evidence).not.toBeNull();
+                expect(verifyTypedActionApproval(evidence!, pinned.context, new Map([['test', signingKey.publicKey]]), base).valid).toBe(true);
+                expect(await get(`/api/typed-action-evidence/${id}`)).toEqual({ status: 200, protocol: 'TLSv1.3' });
+                const directEvidence = await new Promise<number>((resolve, reject) => {
+                  const req = request({ hostname: '127.0.0.1', port: 48769, method: 'GET',
+                    path: `/api/typed-action-evidence/${id}`, agent: false }, res => {
+                    res.on('error', reject);
+                    res.resume();
+                    res.on('end', () => resolve(res.statusCode!));
+                  });
+                  req.setTimeout(1500, () => req.destroy(Error('direct peer evidence request timed out')));
+                  req.on('error', reject);
+                  req.end();
+                });
+                expect(directEvidence).toBe(403);
+              } finally {
+                if (human.listening) await new Promise<void>(resolve => human.close(() => resolve()));
+              }
             } finally {
               if (integrated.listening) await new Promise<void>(resolve => integrated.close(() => resolve()));
             }
