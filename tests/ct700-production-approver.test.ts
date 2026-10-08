@@ -862,7 +862,45 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
                 const evidence = store.typedEvidence(id);
                 expect(evidence).not.toBeNull();
                 expect(verifyTypedActionApproval(evidence!, pinned.context, new Map([['test', signingKey.publicKey]]), base).valid).toBe(true);
-                expect(await get(`/api/typed-action-evidence/${id}`)).toEqual({ status: 200, protocol: 'TLSv1.3' });
+                const getEvidence = () => new Promise<{ status: number; protocol: string | null; cacheControl: string | string[] | undefined; body: any }>((resolve, reject) => {
+                  const req = https.request({ hostname: '127.0.0.1', port: integratedAddress.port,
+                    path: `/api/typed-action-evidence/${id}`, method: 'GET',
+                    minVersion: 'TLSv1.3', maxVersion: 'TLSv1.3', ca: caPem, cert: clientPem, key: clientPrivateKey,
+                    rejectUnauthorized: true, agent: false }, res => {
+                    const protocol = (res.socket as TLSSocket).getProtocol();
+                    const chunks: Buffer[] = [];
+                    let size = 0;
+                    res.on('error', reject);
+                    res.on('aborted', () => reject(Error('integrated evidence response aborted')));
+                    res.on('data', (chunk: Buffer) => {
+                      size += chunk.length;
+                      if (size > 64 * 1024) { res.destroy(Error('oversized integrated evidence response')); return; }
+                      chunks.push(chunk);
+                    });
+                    res.on('end', () => {
+                      try {
+                        resolve({ status: res.statusCode!, protocol, cacheControl: res.headers['cache-control'],
+                          body: JSON.parse(Buffer.concat(chunks).toString()) });
+                      } catch { reject(Error('invalid integrated evidence JSON response')); }
+                    });
+                  });
+                  req.setTimeout(1500, () => req.destroy(Error('integrated evidence request timed out')));
+                  req.on('error', reject);
+                  req.end();
+                });
+                const reply = await getEvidence();
+                expect(reply.status).toBe(200);
+                expect(reply.protocol).toBe('TLSv1.3');
+                expect(reply.cacheControl).toBe('no-store');
+                expect(reply.body).toBeTypeOf('object');
+                expect(reply.body).not.toBeNull();
+                expect(Array.isArray(reply.body)).toBe(false);
+                expect(reply.body).toEqual(evidence);
+                expect(verifyTypedActionApproval(reply.body, pinned.context, new Map([['test', signingKey.publicKey]]), base).valid).toBe(true);
+                const responseJson = JSON.stringify(reply.body);
+                expect(responseJson).not.toContain(clientPrivateKey);
+                expect(responseJson).not.toContain(serverPrivateKey);
+                expect(responseJson).not.toMatch(/-----BEGIN [^-]*PRIVATE KEY-----|"(?:privateKey|rawKey)"\s*:/i);
                 const directEvidence = await new Promise<number>((resolve, reject) => {
                   const req = request({ hostname: '127.0.0.1', port: 48769, method: 'GET',
                     path: `/api/typed-action-evidence/${id}`, agent: false }, res => {
