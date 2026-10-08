@@ -1,6 +1,7 @@
 // Version 2 bounded task ledger. This is separate from the Codex-only v03 ledger and DONE contract.
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { GatewayError, safePath } from "./local-gateway.js";
@@ -8,7 +9,7 @@ import { getStateDir } from "../config/paths.js";
 import { collectReferenceEvidence, type ReferenceEvidence } from "./bounded-reference-evidence.js";
 import { acquireProcessLock } from "./bounded-process-lock.js";
 import { deployment } from "../config/deployment.js";
-import { terminateOwnedProcess } from "./owned-process.js";
+import { terminateOwnedProcess, terminateOwnedProcessAndWait } from "./owned-process.js";
 
 const sha = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
 const json = (value: unknown) => JSON.stringify(value);
@@ -45,7 +46,7 @@ export type Review = { review_id: string; task_id: string; revision: number; con
   manifest_sha256: string; reviewer: "chatgpt" | "opencode-semantic"; verdict: "PASS" | "NEEDS_WORK";
   findings: string[] };
 export type SemanticReviewDiagnostic = { task_id: string; revision: number; manifest_sha256: string;
-  phase: "SEMANTIC_REVIEW"; error_code: "SEMANTIC_REVIEW_FAILED" | "SEMANTIC_REVIEW_TIMEOUT" | "SEMANTIC_REVIEW_INVALID" | "SEMANTIC_EVIDENCE_EXHAUSTED" };
+  phase: "SEMANTIC_REVIEW"; error_code: "SEMANTIC_REVIEW_FAILED" | "SEMANTIC_REVIEW_TIMEOUT" | "SEMANTIC_REVIEW_INVALID" | "SEMANTIC_EVIDENCE_EXHAUSTED" | "SEMANTIC_PROCESS_REQUIRES_INSPECTION" };
 export type WorkerDiagnostic = { phase: string; error_code: string; session_id: string | null };
 type Ledger = { version: 2; task_id: string; contract: Contract; contract_sha256: string; baseline_head: string;
   baseline: Record<string, string>; state: "RUNNING" | "REVIEW_PENDING" | "REVIEW_ACCEPTED" | "ESCALATE";
@@ -332,9 +333,7 @@ const withWorkerDeadline = <T>(operation: Promise<T>, timeout: number): Promise<
 });
 // Only a dedicated read-only agent may propose edits; it is not allowed to write, shell, or invoke Codex.
 export const opencodeWorker: Worker = (repo, prompt, timeout, promptTimeout = workerPromptBudgetMs) => new Promise((resolve, reject) => {
-  // ponytail: external PowerShell transport still needs an owner-reviewed Linux port.
-  if (process.platform !== "win32") throw new GatewayError("WORKER_FAILED", "PREFLIGHT:OPENCODE_TRANSPORT_NOT_PORTABLE:UNKNOWN");
-  const script = path.join(deployment.configRoot, "scripts", "bounded-opencode-proposal.ps1");
+  const script = fileURLToPath(new URL("./proposer/bounded-opencode-proposal.ps1", import.meta.url));
   const child = spawn(deployment.pwsh, ["-NoProfile", "-NonInteractive", "-File", script, "-Repo", repo, "-PromptTimeoutMs", String(promptTimeout)],
     { cwd: repo, shell: false, windowsHide: true, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"] });
   let out = "", err = "";
@@ -361,7 +360,7 @@ export const opencodeWorker: Worker = (repo, prompt, timeout, promptTimeout = wo
         if (typeof d.session_id === "string" && /^ses_[A-Za-z0-9]+$/.test(d.session_id)) session = d.session_id;
       } catch { /* no untrusted stderr in the ledger */ }
     }
-    return new GatewayError(code, `${stage}:${reason}:${session}`);
+    return new GatewayError(reason === "PROCESS_TERMINATION_REQUIRES_INSPECTION" ? reason : code, `${stage}:${reason}:${session}`);
   };
 
   const settleReject = (error: unknown) => {
@@ -395,7 +394,7 @@ export const opencodeWorker: Worker = (repo, prompt, timeout, promptTimeout = wo
       child.stdout?.destroy();
       child.stderr?.destroy();
       child.unref();
-      settleReject(failure(code));
+      settleReject(new GatewayError("PROCESS_TERMINATION_REQUIRES_INSPECTION", "Worker close was not observed"));
     }, workerSettleGraceMs);
   };
 
@@ -415,9 +414,14 @@ export const opencodeWorker: Worker = (repo, prompt, timeout, promptTimeout = wo
     else settleReject(e);
   });
 
-  child.on("close", code => {
+  child.on("close", async code => {
     if (settled) return;
+    if (forceTimer) { clearTimeout(forceTimer); forceTimer = null; }
     try {
+      if (process.platform !== "win32") {
+        try { await terminateOwnedProcessAndWait(child); }
+        catch { throw new GatewayError("PROCESS_TERMINATION_REQUIRES_INSPECTION", "Worker group cleanup is unconfirmed"); }
+      }
       if (termination || code !== 0 || out.length > 100000) {
         settleReject(failure(termination ?? "WORKER_FAILED"));
         return;
@@ -426,7 +430,7 @@ export const opencodeWorker: Worker = (repo, prompt, timeout, promptTimeout = wo
       const result = JSON.parse(out) as WorkerResult;
       if (result.worker !== "opencode" || result.state !== "completed" || !/^ses_/.test(result.session_id ?? "") ||
           !/^msg_/.test(result.execution_id ?? "") || typeof result.output !== "string" || result.output.length > 65536 ||
-          typeof result.tools !== "number" || result.tools > 12) fail("WORKER_EVIDENCE_INVALID");
+          result.provider !== "openai" || result.model !== "gpt-6-sol" || result.tools !== 0) fail("WORKER_EVIDENCE_INVALID");
       settleResolve(result);
     } catch (e) {
       settleReject(e);
@@ -838,7 +842,7 @@ export class BoundedTasks {
     if (task.state !== "REVIEW_PENDING" || rev.review || rev.semantic_review_diagnostic ||
         diagnostic.revision !== rev.revision || diagnostic.manifest_sha256 !== rev.manifest_sha256 ||
         diagnostic.phase !== "SEMANTIC_REVIEW" ||
-        !["SEMANTIC_REVIEW_FAILED", "SEMANTIC_REVIEW_TIMEOUT", "SEMANTIC_REVIEW_INVALID", "SEMANTIC_EVIDENCE_EXHAUSTED"].includes(diagnostic.error_code))
+        !["SEMANTIC_REVIEW_FAILED", "SEMANTIC_REVIEW_TIMEOUT", "SEMANTIC_REVIEW_INVALID", "SEMANTIC_EVIDENCE_EXHAUSTED", "SEMANTIC_PROCESS_REQUIRES_INSPECTION"].includes(diagnostic.error_code))
       fail("REVIEW_BINDING_INVALID");
     rev.semantic_review_diagnostic = { task_id: task.task_id, revision: rev.revision,
       manifest_sha256: rev.manifest_sha256, phase: "SEMANTIC_REVIEW", error_code: diagnostic.error_code };

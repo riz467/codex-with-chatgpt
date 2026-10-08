@@ -95,7 +95,7 @@ export const normalizeBoundedTask = task => {
     worker: item.worker === 'opencode' ? 'opencode' : boundedUnknown,
     review_reviewer: boundedLabel({ chatgpt: 'chatgpt', 'opencode-semantic': 'opencode-semantic' }, item.review_reviewer),
     review_verdict: item.review_verdict === 'PASS' ? '\u5408\u683c' : item.review_verdict === 'NEEDS_WORK' ? '\u8981\u4fee\u6b63' : boundedUnknown,
-    latest_semantic_review_diagnostic_code: boundedLabel({ SEMANTIC_REVIEW_FAILED: 'SEMANTIC_REVIEW_FAILED', SEMANTIC_REVIEW_TIMEOUT: 'SEMANTIC_REVIEW_TIMEOUT', SEMANTIC_REVIEW_INVALID: 'SEMANTIC_REVIEW_INVALID' }, item.latest_semantic_review_diagnostic_code),
+    latest_semantic_review_diagnostic_code: boundedLabel({ SEMANTIC_REVIEW_FAILED: 'SEMANTIC_REVIEW_FAILED', SEMANTIC_REVIEW_TIMEOUT: 'SEMANTIC_REVIEW_TIMEOUT', SEMANTIC_REVIEW_INVALID: 'SEMANTIC_REVIEW_INVALID', SEMANTIC_PROCESS_REQUIRES_INSPECTION: 'SEMANTIC_PROCESS_REQUIRES_INSPECTION' }, item.latest_semantic_review_diagnostic_code),
     commit_state: boundedLabel({ NOT_PREPARED: '\u672a\u6e96\u5099', PREPARED: '\u6e96\u5099\u6e08\u307f', COMMITTED: '\u30b3\u30df\u30c3\u30c8\u6e08\u307f' }, item.commit_state),
     local_commit: typeof item.local_commit === 'string' && /^[a-f0-9]{40}$/.test(item.local_commit) ? item.local_commit : boundedUnknown,
     authoritative_done: item.authoritative_done === true ? '\u3042\u308a' : item.authoritative_done === false ? '\u306a\u3057' : boundedUnknown

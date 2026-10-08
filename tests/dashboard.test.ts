@@ -281,7 +281,7 @@ describe("dashboard read-only evidence", () => {
     probe.mockImplementationOnce(() => { throw new Error("private failure"); });
     expect(projected()).toMatchObject({ commit_state: null, local_commit: null, authoritative_done: false });
     status = { task_id: taskId, state: "NOT_PREPARED", authoritative_done: false };
-    for (const code of ["SEMANTIC_REVIEW_FAILED", "SEMANTIC_REVIEW_TIMEOUT", "SEMANTIC_REVIEW_INVALID"]) {
+    for (const code of ["SEMANTIC_REVIEW_FAILED", "SEMANTIC_REVIEW_TIMEOUT", "SEMANTIC_REVIEW_INVALID", "SEMANTIC_PROCESS_REQUIRES_INSPECTION"]) {
       save({ ...evidence, revisions: [{ ...revision, semantic_review_diagnostic: { phase: "SEMANTIC_REVIEW", error_code: code, secret: "diagnostic secret" } }] });
       expect(projected()?.latest_semantic_review_diagnostic_code).toBe(code);
       expect(JSON.stringify(projected())).not.toMatch(/diagnostic secret|receipt|session secret/);

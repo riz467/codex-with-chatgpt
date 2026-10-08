@@ -95,6 +95,16 @@ it.each([false, true])("durably consumes both review claims after a timeout (bot
   expect(calls).toBe(2);
   expect(f.tasks.status(f.id).revisions).toHaveLength(1);
 });
+it("never replays semantic review after an unconfirmed process-group exit", async () => {
+  const f = await fixture();
+  const reviewer = vi.fn(async () => { throw new Error("PROCESS_GROUP_EXIT_REQUIRES_INSPECTION"); });
+  const review = () => reviewWithReferences(f.tasks, f.id, 1, "contract", "ses_fixture", reviewer);
+  await expect(review()).rejects.toThrow("SEMANTIC_PROCESS_REQUIRES_INSPECTION");
+  await expect(review()).rejects.toThrow("SEMANTIC_PROCESS_REQUIRES_INSPECTION");
+  expect(reviewer).toHaveBeenCalledOnce();
+  expect(f.tasks.status(f.id).revisions[0].semantic_review_diagnostic?.error_code).toBe("SEMANTIC_PROCESS_REQUIRES_INSPECTION");
+  expect(fs.existsSync(path.join(f.root, "tasks", f.id, "revision-1-semantic-attempt-2.json"))).toBe(false);
+});
 it.each(["missing", "truncated"])("cannot accept PASS when required edit-path evidence is %s", async kind => {
   const f = await fixture(), evidence = f.tasks.referenceEvidence(f.id, 1);
   if (kind === "missing") evidence.references = evidence.references.filter(ref => ref.path !== "src/mcp/server.ts");

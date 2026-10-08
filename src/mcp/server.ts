@@ -494,6 +494,7 @@ export function createBoundedLifecycleController(
             result = await reviewWithReferences(tasks, taskId, latest.revision, prompt,
               latest.worker.session_id, boundedSemanticReviewer ?? semanticSession);
           } catch (error) {
+            if (tasks.status(taskId).revisions.at(-1)?.semantic_review_diagnostic) return;
             const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
             const timedOut = (error instanceof Error && (error.message === "SEMANTIC_TIMEOUT" ||
               error.name === "TimeoutError" || error.name === "AbortError")) ||

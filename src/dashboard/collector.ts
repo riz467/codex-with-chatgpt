@@ -151,7 +151,7 @@ function boundedProjection(raw: Record<string, unknown> | null, taskId: string) 
   const latest = obj(revisions.at(-1)), review = obj(latest?.review);
   const diagnostic = obj(latest?.semantic_review_diagnostic);
   const latest_semantic_review_diagnostic_code = diagnostic?.phase === "SEMANTIC_REVIEW" ?
-    enumValue(diagnostic.error_code, ["SEMANTIC_REVIEW_FAILED", "SEMANTIC_REVIEW_TIMEOUT", "SEMANTIC_REVIEW_INVALID"]) : null;
+    enumValue(diagnostic.error_code, ["SEMANTIC_REVIEW_FAILED", "SEMANTIC_REVIEW_TIMEOUT", "SEMANTIC_REVIEW_INVALID", "SEMANTIC_PROCESS_REQUIRES_INSPECTION"]) : null;
   if ((raw.state === "REVIEW_PENDING" || raw.state === "REVIEW_ACCEPTED") && !latest) return null;
   if (raw.state === "REVIEW_ACCEPTED" && review?.verdict !== "PASS") return null;
   if (raw.stop_reason !== undefined && raw.stop_reason !== null && !cleanString(raw.stop_reason, 500)) return null;

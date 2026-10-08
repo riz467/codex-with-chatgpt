@@ -4,6 +4,8 @@ import { validateSemantic, type semanticSession } from "./semantic-session.js";
 
 export async function reviewWithReferences(tasks: BoundedTasks, taskId: string, revision: number,
   prompt: string, executionSessionId: string, reviewer: typeof semanticSession) {
+  const diagnostic = tasks.status(taskId).revisions[revision - 1]?.semantic_review_diagnostic;
+  if (diagnostic) throw new Error(diagnostic.error_code);
   const initialEvidence = tasks.referenceEvidence(taskId, revision);
   const requiredMissing = (evidence: typeof initialEvidence) => tasks.status(taskId).contract.edit_paths.some(name =>
     !evidence.references.some(ref => ref.path === name) || evidence.unavailable.some(ref => ref.path === name));
@@ -32,6 +34,13 @@ export async function reviewWithReferences(tasks: BoundedTasks, taskId: string, 
     ].join("\n\n"), executionSessionId, [1, 2, 3, 4]);
     } catch (error) {
       tasks.recordSemanticAttemptFailure(taskId, revision, attempt);
+      if (error instanceof Error && ["PROCESS_TREE_TERMINATION_REQUIRES_INSPECTION", "PROCESS_EXIT_REQUIRES_INSPECTION",
+        "PROCESS_GROUP_EXIT_REQUIRES_INSPECTION"].includes(error.message)) {
+        tasks.recordSemanticReviewDiagnostic({ task_id: taskId, revision,
+          manifest_sha256: tasks.status(taskId).revisions[revision - 1].manifest_sha256,
+          phase: "SEMANTIC_REVIEW", error_code: "SEMANTIC_PROCESS_REQUIRES_INSPECTION" });
+        throw new Error("SEMANTIC_PROCESS_REQUIRES_INSPECTION");
+      }
       if (attempt === 2) throw error;
       continue;
     }

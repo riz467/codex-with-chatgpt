@@ -8,7 +8,8 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(
 it("waits for delayed exit before allowing a caller to retry", async () => {
   vi.useFakeTimers();
   const child = Object.assign(new EventEmitter(), { pid: 12345, exitCode: null, signalCode: null }) as ChildProcess;
-  vi.stubGlobal("process", { ...process, platform: "linux", kill: vi.fn(() => {
+  vi.stubGlobal("process", { ...process, platform: "linux", kill: vi.fn((_pid, signal) => {
+    if (signal === 0) throw Object.assign(new Error(), { code: "ESRCH" });
     setTimeout(() => child.emit("exit", null, "SIGKILL"), 100); return true;
   }) });
   const retry = vi.fn();
@@ -16,6 +17,24 @@ it("waits for delayed exit before allowing a caller to retry", async () => {
   await vi.advanceTimersByTimeAsync(99); expect(retry).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(1); await stopped; expect(retry).toHaveBeenCalledOnce();
   expect(child.listenerCount("exit")).toBe(0);
+});
+
+it("waits for the group after leader exit, and refuses an unobservable group exit", async () => {
+  vi.useFakeTimers();
+  const child = { pid: 12345, exitCode: 0, signalCode: null } as ChildProcess;
+  let present = true;
+  vi.stubGlobal("process", { ...process, platform: "linux", kill: vi.fn((_pid, signal) => {
+    if (signal === 0 && !present) throw Object.assign(new Error(), { code: "ESRCH" });
+    return true;
+  }) });
+  const completed = vi.fn();
+  const waiting = terminateOwnedProcessAndWait(child).then(completed);
+  await vi.advanceTimersByTimeAsync(100); expect(completed).not.toHaveBeenCalled();
+  present = false; await vi.advanceTimersByTimeAsync(25); await waiting;
+  expect(completed).toHaveBeenCalledOnce();
+  present = true;
+  const failure = expect(terminateOwnedProcessAndWait(child)).rejects.toThrow("PROCESS_GROUP_EXIT_REQUIRES_INSPECTION");
+  await vi.advanceTimersByTimeAsync(2000); await failure;
 });
 
 it("bounds exit waiting and requires inspection if termination is not observed", async () => {

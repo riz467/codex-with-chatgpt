@@ -195,7 +195,7 @@ describe("bounded dashboard task normalization", () => {
     for (const reviewer of ["chatgpt", "opencode-semantic"]) {
       expect(normalizeBoundedTask({ ...valid, review_reviewer: reviewer }).review_reviewer).toBe(reviewer);
     }
-    for (const code of ["SEMANTIC_REVIEW_FAILED", "SEMANTIC_REVIEW_TIMEOUT", "SEMANTIC_REVIEW_INVALID"]) {
+    for (const code of ["SEMANTIC_REVIEW_FAILED", "SEMANTIC_REVIEW_TIMEOUT", "SEMANTIC_REVIEW_INVALID", "SEMANTIC_PROCESS_REQUIRES_INSPECTION"]) {
       expect(normalizeBoundedTask({ ...valid, latest_semantic_review_diagnostic_code: code }).latest_semantic_review_diagnostic_code).toBe(code);
     }
     for (const [state, label] of Object.entries({ NOT_PREPARED: "未準備", PREPARED: "準備済み", COMMITTED: "コミット済み" })) {
