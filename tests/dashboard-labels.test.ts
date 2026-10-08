@@ -644,4 +644,79 @@ describe("bounded board and tracking source-slice rendering", () => {
     expect(rows()).toEqual(boundedTrackingRows(running).map(({ label, value }) => ({ label, value })));
     expect(dom.$("bounded-tracking-fields")!.children).toHaveLength(11);
   });
+
+
+describe("autonomous campaigns rendering", () => {
+  const source = readFileSync(fileURLToPath(new URL("../src/dashboard/public/app.js", import.meta.url)), "utf8");
+  it("shows the Japanese empty message, preserves populated cards, and retains the projection on failed fetches", async () => {
+    type Node = { tag: string; id: string; textContent: string; children: Node[];
+      append: (...children: Node[]) => void; replaceChildren: () => void;
+      insertAdjacentElement: (position: string, element: Node) => void };
+    const nodes = new Map<string, Node>();
+    const createElement = (tag: string): Node => {
+      const node: Node = {
+        tag, id: "", textContent: "", children: [],
+        append(...children) { this.children.push(...children); },
+        replaceChildren() { this.children = []; },
+        insertAdjacentElement(position, element) {
+          expect(position).toBe("afterend");
+          nodes.set(element.id, element);
+        }
+      };
+      return node;
+    };
+    const anchor = createElement("section"); anchor.id = "bounded-opencode";
+    nodes.set(anchor.id, anchor);
+    const $ = (id: string) => nodes.get(id);
+    const cell = (tag: string, value: unknown) => {
+      const node = createElement(tag); node.textContent = displayValue(value); return node;
+    };
+    const clear = (node: Node) => node.replaceChildren();
+    const pair = (root: Node, label: string, value: unknown) => {
+      const row = createElement("div");
+      row.append(cell("small", label), cell("strong", value)); root.append(row);
+    };
+    let campaigns: unknown = [];
+    let ok = true;
+    const calls: unknown[][] = [];
+    const fetcher = async (...args: unknown[]) => {
+      calls.push(args);
+      return { ok, json: async () => campaigns };
+    };
+    const start = source.indexOf("let campaignFetchRunning = false;");
+    const end = source.indexOf("const approvalFields =", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const renderCampaigns = new Function("document", "$", "cell", "clear", "pair", "fetch",
+      `${source.slice(start, end)}\nreturn renderCampaigns;`)(
+        { createElement }, $, cell, clear, pair, fetcher) as () => Promise<void>;
+    await renderCampaigns();
+    const section = $("bounded-campaigns")!;
+    expect(section.children.map(child => [child.tag, child.textContent])).toEqual([
+      ["h2", "Autonomous campaigns (local commits only)"],
+      ["p", "現在実行中のキャンペーンはありません"]
+    ]);
+    campaigns = [{ campaign_id: "campaign-1", state: "RUNNING", task_ids: ["task-1"] }];
+    await renderCampaigns();
+    expect($("bounded-campaigns")).toBe(section);
+    expect(section.children).toHaveLength(2);
+    expect(section.children[0].textContent).toBe("Autonomous campaigns (local commits only)");
+    expect(section.children[1].children.map(row => [row.children[0].textContent, row.children[1].textContent]))
+      .toEqual([
+        ["campaign_id", "campaign-1"], ["state", "RUNNING"], ["current_task", "未確認"],
+        ["task_ids", "task-1"], ["stop_reason", "未確認"], ["impact_paths", "未確認"],
+        ["human_action", "未確認"],
+        ["Budget", "3 tasks × at most 3 revisions; 45 minutes; repeated failure limit 2"]
+      ]);
+    ok = false;
+    await renderCampaigns();
+    expect(section.children[1].children[1].children[1].textContent).toBe("RUNNING");
+    ok = true;
+    campaigns = [];
+    await renderCampaigns();
+    expect(section.children.map(child => child.tag)).toEqual(["h2", "p"]);
+    expect(section.children[1].textContent).toBe("現在実行中のキャンペーンはありません");
+    expect(calls).toEqual(Array(4).fill(["/api/bounded/campaigns", { credentials: "same-origin", cache: "no-store" }]));
+  });
+});
 });

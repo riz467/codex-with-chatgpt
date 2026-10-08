@@ -282,6 +282,7 @@ async function renderCampaigns() {
       $('bounded-opencode').insertAdjacentElement('afterend', section);
     }
     clear(section); section.append(cell('h2', 'Autonomous campaigns (local commits only)'));
+    if (campaigns.length === 0) section.append(cell('p', '現在実行中のキャンペーンはありません'));
     for (const campaign of campaigns.slice(-20).reverse()) {
       const card = document.createElement('div'); card.className = 'task-grid';
       for (const key of ['campaign_id', 'state', 'current_task', 'task_ids', 'stop_reason', 'impact_paths', 'human_action']) {
