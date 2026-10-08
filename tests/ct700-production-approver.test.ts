@@ -637,6 +637,33 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
     }
     expect(wrongSpkiCert.subjectAltName).toBe(`URI:${role}`);
     expect(wrongRoleCert.subjectAltName).toBe('URI:urn:ct701:other');
+    const futureClientCert = issue(7, 'CT701 future test client', 'CT700 test root', clientKey.publicKey, root.privateKey,
+      leafExtensions('2b06010505070302', tlv(0x86, text(role))), new Date(now + 86_400_000), new Date(now + 2 * 86_400_000));
+    const wrongEkuCert = issue(8, 'CT701 serverAuth test client', 'CT700 test root', clientKey.publicKey, root.privateKey,
+      leafExtensions('2b06010505070301', tlv(0x86, text(role))));
+    const duplicateSanCert = issue(9, 'CT701 duplicate SAN test client', 'CT700 test root', clientKey.publicKey, root.privateKey,
+      leafExtensions('2b06010505070302', Buffer.concat([tlv(0x86, text(role)), tlv(0x86, text(role))])));
+    const untrustedIssuer = generateKeyPairSync('ed25519');
+    const untrustedCa = issue(10, 'CT700 untrusted issuer', 'CT700 untrusted issuer',
+      untrustedIssuer.publicKey, untrustedIssuer.privateKey, caExtensions);
+    const untrustedClientCert = issue(11, 'CT701 untrusted test client', 'CT700 untrusted issuer',
+      clientKey.publicKey, untrustedIssuer.privateKey,
+      leafExtensions('2b06010505070302', tlv(0x86, text(role))));
+    for (const cert of [futureClientCert, wrongEkuCert, duplicateSanCert]) {
+      expect(cert.verify(root.publicKey)).toBe(true);
+      expect(cert.publicKey.export({ format: 'der', type: 'spki' })).toEqual(clientKey.publicKey.export({ format: 'der', type: 'spki' }));
+    }
+    expect(Date.parse(futureClientCert.validFrom)).toBeGreaterThan(Date.now());
+    expect(Date.parse(wrongEkuCert.validFrom)).toBeLessThan(Date.now());
+    expect(Date.parse(wrongEkuCert.validTo)).toBeGreaterThan(Date.now());
+    expect(Date.parse(duplicateSanCert.validFrom)).toBeLessThan(Date.now());
+    expect(Date.parse(duplicateSanCert.validTo)).toBeGreaterThan(Date.now());
+    expect(untrustedCa.ca).toBe(true);
+    expect(untrustedCa.verify(untrustedIssuer.publicKey)).toBe(true);
+    expect(untrustedClientCert.verify(untrustedIssuer.publicKey)).toBe(true);
+    expect(untrustedClientCert.verify(root.publicKey)).toBe(false);
+    expect(untrustedClientCert.publicKey.export({ format: 'der', type: 'spki' })).toEqual(clientKey.publicKey.export({ format: 'der', type: 'spki' }));
+    expect(untrustedClientCert.subjectAltName).toBe(`URI:${role}`);
     const caPem = pem(ca.raw), serverPem = pem(serverCert.raw), clientPem = pem(clientCert.raw);
     const serverPrivateKey = serverKey.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString();
     const clientPrivateKey = clientKey.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString();
@@ -655,11 +682,13 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
       });
       const address = listener.address();
       if (!address || typeof address === 'string') throw Error('missing loopback listener');
-      const send = (options: { cert?: string; key?: string; minVersion?: 'TLSv1.2' | 'TLSv1.3'; maxVersion?: 'TLSv1.2' | 'TLSv1.3' }) =>
+      const send = (options: { cert?: string; key?: string; minVersion?: 'TLSv1.2' | 'TLSv1.3'; maxVersion?: 'TLSv1.2' | 'TLSv1.3' },
+        onResponse?: (response: IncomingMessage) => void) =>
         new Promise<{ status: number; protocol: string | null; body: string }>((resolve, reject) => {
           const req = https.request({ hostname: '127.0.0.1', port: address.port, path: '/probe', method: 'GET',
             ca: caPem, rejectUnauthorized: true, agent: false, minVersion: options.minVersion ?? 'TLSv1.3',
             maxVersion: options.maxVersion ?? 'TLSv1.3', cert: options.cert, key: options.key }, res => {
+            onResponse?.(res);
             const protocol = (res.socket as TLSSocket).getProtocol();
             const chunks: Buffer[] = [];
             res.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -671,6 +700,15 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
           req.on('error', reject);
           req.end();
         });
+      const expectRejectedClient = async (cert: string, key: string) => {
+        let cacheControl: string | string[] | undefined;
+        const reply = await send({ cert, key }, res => { cacheControl = res.headers['cache-control']; }).catch(() => null);
+        if (reply) {
+          expect(reply).toEqual({ status: 403, protocol: 'TLSv1.3', body: '' });
+          expect(cacheControl).toBe('no-store');
+        }
+        expect(calls).toBe(1);
+      };
       expect(await send({ cert: clientPem, key: clientPrivateKey })).toEqual({ status: 200, protocol: 'TLSv1.3', body: 'ok' });
       expect(calls).toBe(1);
       expect(await send({ cert: pem(wrongSpkiCert.raw),
@@ -679,6 +717,16 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
       expect(calls).toBe(1);
       expect(await send({ cert: pem(wrongRoleCert.raw), key: clientPrivateKey }))
         .toEqual({ status: 403, protocol: 'TLSv1.3', body: '' });
+      expect(calls).toBe(1);
+      await expectRejectedClient(pem(wrongEkuCert.raw), clientPrivateKey);
+      await expectRejectedClient(pem(expiredClientCert.raw), clientPrivateKey);
+      await expectRejectedClient(pem(futureClientCert.raw), clientPrivateKey);
+      await expectRejectedClient(pem(untrustedClientCert.raw) + pem(untrustedCa.raw), clientPrivateKey);
+      let duplicateCacheControl: string | string[] | undefined;
+      expect(await send({ cert: pem(duplicateSanCert.raw), key: clientPrivateKey },
+        res => { duplicateCacheControl = res.headers['cache-control']; }))
+        .toEqual({ status: 403, protocol: 'TLSv1.3', body: '' });
+      expect(duplicateCacheControl).toBe('no-store');
       expect(calls).toBe(1);
       await expect(send({})).rejects.toThrow();
       expect(calls).toBe(1);
