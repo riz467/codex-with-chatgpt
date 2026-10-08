@@ -5,6 +5,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { GatewayError, safePath } from "./local-gateway.js";
 import { getStateDir } from "../config/paths.js";
+import { collectReferenceEvidence, type ReferenceEvidence } from "./bounded-reference-evidence.js";
+import { acquireProcessLock } from "./bounded-process-lock.js";
 
 const sha = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
 const json = (value: unknown) => JSON.stringify(value);
@@ -41,7 +43,7 @@ export type Review = { review_id: string; task_id: string; revision: number; con
   manifest_sha256: string; reviewer: "chatgpt" | "opencode-semantic"; verdict: "PASS" | "NEEDS_WORK";
   findings: string[] };
 export type SemanticReviewDiagnostic = { task_id: string; revision: number; manifest_sha256: string;
-  phase: "SEMANTIC_REVIEW"; error_code: "SEMANTIC_REVIEW_FAILED" | "SEMANTIC_REVIEW_TIMEOUT" | "SEMANTIC_REVIEW_INVALID" };
+  phase: "SEMANTIC_REVIEW"; error_code: "SEMANTIC_REVIEW_FAILED" | "SEMANTIC_REVIEW_TIMEOUT" | "SEMANTIC_REVIEW_INVALID" | "SEMANTIC_EVIDENCE_EXHAUSTED" };
 export type WorkerDiagnostic = { phase: string; error_code: string; session_id: string | null };
 type Ledger = { version: 2; task_id: string; contract: Contract; contract_sha256: string; baseline_head: string;
   baseline: Record<string, string>; state: "RUNNING" | "REVIEW_PENDING" | "REVIEW_ACCEPTED" | "ESCALATE";
@@ -454,7 +456,7 @@ export class BoundedTasks {
         sha(json(task.contract)) !== task.contract_sha256 || this.repos[task.contract.repo] === undefined ||
         task.contract.execution_profile !== this.profileFor(task.contract.repo) ||
         task.contract.edit_paths.some(p => !profilePathAllowed(task.contract.execution_profile, p))) fail("CONTRACT_MISMATCH"); return task; }
-  start(contract: Contract) {
+  start(contract: Contract, reservedId?: string) {
     if (!contract || contract.worker !== "opencode" || contract.task_kind !== "text_change" ||
         !["tracked_utf8_text", "tracked_typescript_dashboard", "tracked_typescript_control_plane", "tracked_typescript_authority_transport", "tracked_typescript_ct700_peer_gateway"].includes(contract.execution_profile) ||
         contract.execution_profile !== this.profileFor(contract.repo) ||
@@ -471,7 +473,8 @@ export class BoundedTasks {
         !Number.isInteger(contract.timeout_ms) || contract.timeout_ms < 1000 || contract.timeout_ms > 600000) fail("INVALID_CONTRACT");
     const repo = this.repos[contract.repo];
     if (fs.realpathSync.native(repo).toLowerCase() !== path.resolve(repo).toLowerCase()) fail("INVALID_REPO");
-    const id = `bounded-${randomUUID().replaceAll("-", "")}`;
+    const id = reservedId ?? `bounded-${randomUUID().replaceAll("-", "")}`;
+    if (!idPattern.test(id) || fs.existsSync(this.dir(id))) fail("INVALID_TASK_ID");
     fs.mkdirSync(this.repoLocks, { recursive: true });
     const lock = this.repoLock(repo);
     try { fs.mkdirSync(lock); } catch { fail("REPO_BUSY"); }
@@ -498,6 +501,7 @@ export class BoundedTasks {
     }
   }
   status(id: string) { return this.load(id); }
+  lifecycleLock(id: string) { return acquireProcessLock(safePath(this.dir(id), "lifecycle.lock")); }
   withRecoveryLock<T>(id: string, operation: (task: Ledger) => T): T {
     const task = this.load(id), lock = this.repoLock(this.repos[task.contract.repo]);
     fs.mkdirSync(this.repoLocks, { recursive: true });
@@ -604,6 +608,7 @@ export class BoundedTasks {
           updated.some(u => text(fs.readFileSync(u.file)) !== u.after)) fail("VERIFY_FAILED");
       files.push(store(dir, `${prefix}-diff.patch`, reviewedDiff));
       files.push(store(dir, `${prefix}-verification.json`, json(verification)));
+      files.push(store(dir, `${prefix}-references.json`, json(collectReferenceEvidence(repo, task.baseline_head, task.contract))));
       const manifest_sha256 = sha(json(files));
       const { output: _output, ...workerEvidence } = result;
       task.revisions.push({ revision, execution_id: result.execution_id ?? `unknown-${randomUUID()}`, input_sha256: sha(json(input)),
@@ -633,6 +638,27 @@ export class BoundedTasks {
     const bytes = fs.readFileSync(safePath(this.dir(id), name)); const page = bytes.subarray(offset, offset + 8192);
     return { task_id: id, revision, manifest_sha256: bundle.manifest_sha256, file_sha256: entry.sha256,
       offset, next_offset: offset + page.length < bytes.length ? offset + page.length : null, content_base64: page.toString("base64") }; }
+  referenceEvidence(id: string, revision: number): ReferenceEvidence {
+    const bundle = this.artifacts(id, revision), name = `revision-${revision}-references.json`;
+    if (!bundle.files.some(f => f.name === name)) return { version: 1, baseline_head: this.load(id).baseline_head,
+      references: [], unavailable: [{ path: "", reason: "LEGACY_REFERENCE_EVIDENCE_MISSING" }] };
+    return JSON.parse(fs.readFileSync(safePath(this.dir(id), name), "utf8")) as ReferenceEvidence;
+  }
+  claimSemanticAttempt(id: string, revision: number, attempt: number): boolean {
+    const task = this.load(id);
+    if (task.state !== "REVIEW_PENDING" || task.revisions.at(-1)?.revision !== revision ||
+        ![1, 2].includes(attempt)) fail("REVIEW_BINDING_INVALID");
+    this.artifacts(id, revision);
+    try { store(this.dir(id), `revision-${revision}-semantic-attempt-${attempt}.json`, json({
+      task_id: id, revision, attempt, manifest_sha256: task.revisions.at(-1)!.manifest_sha256,
+    })); return true; } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
+    }
+  }
+  recordSemanticAttempt(id: string, revision: number, attempt: number, result: unknown) {
+    store(this.dir(id), `revision-${revision}-semantic-result-${attempt}.json`, json(result));
+  }
   verifiedExhaustedWorkspaceDiff(id: string): boolean {
     try {
       const task = this.load(id), rev = task.revisions.at(-1);
@@ -716,7 +742,7 @@ export class BoundedTasks {
     if (task.state !== "REVIEW_PENDING" || rev.review || rev.semantic_review_diagnostic ||
         diagnostic.revision !== rev.revision || diagnostic.manifest_sha256 !== rev.manifest_sha256 ||
         diagnostic.phase !== "SEMANTIC_REVIEW" ||
-        !["SEMANTIC_REVIEW_FAILED", "SEMANTIC_REVIEW_TIMEOUT", "SEMANTIC_REVIEW_INVALID"].includes(diagnostic.error_code))
+        !["SEMANTIC_REVIEW_FAILED", "SEMANTIC_REVIEW_TIMEOUT", "SEMANTIC_REVIEW_INVALID", "SEMANTIC_EVIDENCE_EXHAUSTED"].includes(diagnostic.error_code))
       fail("REVIEW_BINDING_INVALID");
     rev.semantic_review_diagnostic = { task_id: task.task_id, revision: rev.revision,
       manifest_sha256: rev.manifest_sha256, phase: "SEMANTIC_REVIEW", error_code: diagnostic.error_code };

@@ -24,3 +24,20 @@ This is a development record, not authoritative DONE. No runtime promotion yet.
 - Runtime: not promoted.
 - Remaining: sealed evidence for verification-failure recovery, durable campaign/restart orchestration,
   reviewer reference evidence, real Dashboard A–D execution.
+
+## Sealed reviewer reference evidence
+
+- Previous recovery commit: `e07d905`.
+- Files: bounded task/server, new bounded-reference-evidence / bounded-semantic-review /
+  bounded-process-lock modules, bridge test injection, associated tests.
+- Commit: the commit containing this section.
+- Baseline source/tests are sealed into the revision manifest with file path, commit SHA,
+  whole-file/content SHA-256 and explicit line ranges. Read scope and byte budgets are controller-owned.
+- Evidence insufficiency reacquires a larger sealed excerpt at most twice per revision;
+  attempt claims/results survive restart. No evidence failure can authorize a commit.
+- Lifecycle gets a cross-process owner lock and can enter at pending review / accepted finalization.
+- Checks: typecheck PASS; reference + authenticated review + MCP integration 72 tests PASS;
+  bounded-task 29 tests PASS in the preceding combined run.
+- Fixed an outdated manual-continue test: authenticated NEEDS_WORK already starts continuation automatically.
+- Review: developer inspection; independent review still pending. Runtime not promoted.
+- Remaining: durable campaign scheduling/finite handoff, interrupted execution, live A–D scenarios.

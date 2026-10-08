@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { reviewWithReferences } from "./bounded-semantic-review.js";
 import { getStateDir } from "../config/paths.js";
 import { canonicalJson, scopePathSchema } from "../task-contract/contract.js";
 import { runGit } from "../workspace/git.js";
@@ -419,7 +420,7 @@ export interface McpContext {
   repoResearchRoots?: RepoResearchRoots;
 }
 
-function createBoundedLifecycleController(
+export function createBoundedLifecycleController(
   tasks: BoundedTasks,
   workspaceRoot: string,
   boundedFinalizer?: (taskId: string) => void,
@@ -437,11 +438,15 @@ function createBoundedLifecycleController(
   };
   const runBoundedLifecycle = (taskId: string) => {
     if (lifecycleRunning.has(taskId) || tasks.executing(taskId)) return false;
+    const release = tasks.lifecycleLock(taskId);
+    if (!release) return false;
     lifecycleRunning.add(taskId);
     void (async () => {
       try {
         for (;;) {
-          await tasks.execute(taskId);
+          const initial = tasks.status(taskId);
+          if (initial.state === "REVIEW_ACCEPTED") { finalizeBoundedPass(taskId, initial.contract.repo); return; }
+          if (initial.state === "RUNNING") await tasks.execute(taskId);
           const current = tasks.status(taskId);
           const latest = current.revisions.at(-1);
           if (current.state !== "REVIEW_PENDING" || !latest || !latest.worker?.session_id ||
@@ -471,12 +476,10 @@ function createBoundedLifecycleController(
             `[2] Verified diff (${diffName}):\n${diff.toString("utf8")}`,
             `[3] Verification: ${JSON.stringify(latest.verify)}; execution_id: ${latest.worker.execution_id}`,
           ].join("\n\n");
-          const validRefs: readonly number[] = [1, 2, 3];
           let result: Awaited<ReturnType<typeof semanticSession>>;
           try {
-            result = boundedSemanticReviewer
-              ? await boundedSemanticReviewer(prompt, latest.worker.session_id, validRefs)
-              : await semanticSession(prompt, latest.worker.session_id, validRefs);
+            result = await reviewWithReferences(tasks, taskId, latest.revision, prompt,
+              latest.worker.session_id, boundedSemanticReviewer ?? semanticSession);
           } catch (error) {
             const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
             const timedOut = (error instanceof Error && (error.message === "SEMANTIC_TIMEOUT" ||
@@ -484,7 +487,8 @@ function createBoundedLifecycleController(
               (typeof code === "string" && /TIMEOUT|TIMED_OUT/i.test(code));
             tasks.recordSemanticReviewDiagnostic({ task_id: taskId, revision: latest.revision,
               manifest_sha256: latest.manifest_sha256, phase: "SEMANTIC_REVIEW",
-              error_code: timedOut ? "SEMANTIC_REVIEW_TIMEOUT" : "SEMANTIC_REVIEW_FAILED" });
+              error_code: error instanceof Error && error.message === "SEMANTIC_EVIDENCE_EXHAUSTED"
+                ? "SEMANTIC_EVIDENCE_EXHAUSTED" : timedOut ? "SEMANTIC_REVIEW_TIMEOUT" : "SEMANTIC_REVIEW_FAILED" });
             return;
           }
           const decision = z.object({ decision: z.object({
@@ -525,6 +529,7 @@ function createBoundedLifecycleController(
         // semantic review leaves REVIEW_PENDING untouched and cannot authorize finalization.
       } finally {
         lifecycleRunning.delete(taskId);
+        release();
       }
     })();
     return true;

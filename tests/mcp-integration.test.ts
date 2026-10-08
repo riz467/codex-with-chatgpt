@@ -535,13 +535,15 @@ describe("bounded semantic lifecycle over MCP", () => {
       return { state: task.state };
     });
     const tasks = { start: vi.fn(() => ({ task_id: taskId, state: "RUNNING" })),
-      executing: vi.fn(() => false), execute, status: vi.fn(() => task),
+      executing: vi.fn(() => false), lifecycleLock: vi.fn(() => () => {}), execute, status: vi.fn(() => task),
       artifacts: vi.fn((_id: string, revision: number) => ({ files: [{ name: `revision-${revision}-diff.patch`,
         size: diff.length, sha256: diffHash }] })),
       readArtifact: vi.fn((_id: string, _revision: number, _name: string, offset: number) => ({
         offset, manifest_sha256: hash, file_sha256: diffHash, next_offset: null,
         content_base64: diff.toString("base64") })),
       recordSemanticReviewDiagnostic: diagnostic,
+      referenceEvidence: vi.fn(() => ({ version: 1, baseline_head: hash, references: [], unavailable: [] })),
+      claimSemanticAttempt: vi.fn(() => true), recordSemanticAttempt: vi.fn(),
       submitReview };
     server = createMcpServer({ workspace: { root: "C:\\work\\bounded-review-live-fixture" } as Workspace,
       logger: {} as Logger, boundedTasks: tasks as unknown as BoundedTasks,
@@ -561,7 +563,7 @@ describe("bounded semantic lifecycle over MCP", () => {
     expect(reviewer).toHaveBeenCalledTimes(1);
     expect(reviewer.mock.calls[0][0]).toContain("execution-1");
     expect(reviewer.mock.calls[0][0]).toContain("[2] Verified diff");
-    expect(reviewer.mock.calls[0].slice(1)).toEqual(["session-1", [1, 2, 3]]);
+    expect(reviewer.mock.calls[0].slice(1)).toEqual(["session-1", [1, 2, 3, 4]]);
     expect(task.revisions[0].review).toMatchObject({ reviewer: "opencode-semantic", verdict: "PASS",
       contract_sha256: hash, manifest_sha256: hash, findings: [] });
     expect(finalizer).toHaveBeenCalledWith(taskId);
@@ -583,7 +585,7 @@ describe("bounded semantic lifecycle over MCP", () => {
     release!();
     await settled(() => finalizer.mock.calls.length === 1);
     expect(task.revisions).toHaveLength(2);
-    expect(reviewer.mock.calls[1].slice(1)).toEqual(["session-2", [1, 2, 3]]);
+    expect(reviewer.mock.calls[1].slice(1)).toEqual(["session-2", [1, 2, 3, 4]]);
     expect(submitReview).toHaveBeenCalledTimes(2);
     expect(diagnostic).not.toHaveBeenCalled();
   });

@@ -47,6 +47,8 @@ export interface BridgeOptions {
   boundedReviewerClientId?: string;
   /** Isolated fixture injection only. */
   boundedTasks?: BoundedTasks;
+  /** Trusted test-only reviewer injection; never accepted from an HTTP request. */
+  boundedSemanticReviewer?: typeof import("../mcp/semantic-session.js").semanticSession;
 }
 
 export interface Bridge {
@@ -136,7 +138,7 @@ export async function startBridge(opts: BridgeOptions, orchestrationReads?: Orch
 
   const mcpHandler = createMcpHttpHandler(() => createMcpServer({ workspace, logger,
     boundedReviewerClientId: opts.boundedReviewerClientId ?? process.env.C2C_BOUNDED_REVIEW_CLIENT_ID,
-    boundedTasks: opts.boundedTasks, orchestrationReads, repoResearchRoots }), logger);
+    boundedTasks: opts.boundedTasks, boundedSemanticReviewer: opts.boundedSemanticReviewer, orchestrationReads, repoResearchRoots }), logger);
   app.all(
     "/mcp",
     express.json({ limit: "8mb" }),

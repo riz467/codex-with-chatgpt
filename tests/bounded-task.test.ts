@@ -142,6 +142,7 @@ describe("bounded OpenCode contract and review", () => {
     expect(tasks.artifacts(started.task_id, 1).worker.worker).toBe("opencode");
     expect(tasks.artifacts(started.task_id, 1).files.map(f => f.name)).toEqual([
       "revision-1-input.json", "revision-1-proposal.json", "revision-1-diff.patch", "revision-1-verification.json",
+      "revision-1-references.json",
     ]);
     const page = tasks.readArtifact(started.task_id, 1, "revision-1-diff.patch");
     expect(Buffer.from(page.content_base64, "base64").toString()).toContain("First draft.");

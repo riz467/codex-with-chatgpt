@@ -78,7 +78,7 @@ beforeAll(async () => {
   tasks = new BoundedTasks({ "autonomous-fixture": fs.realpathSync.native(repo) }, path.join(root, "ledger"), mock);
   bridge = await startBridge({ workspaceRoot: repo, port: 0, persistRuntime: false,
     authStoreFile: path.join(root, "auth.json"), boundedReviewerClientId: approvedId,
-    boundedTasks: tasks });
+    boundedTasks: tasks, boundedSemanticReviewer: async () => { throw new Error("FIXTURE_EXTERNAL_REVIEW_ONLY"); } });
   reviewer = await connect(approvedId, ["review.read", "orchestration.review"]);
   reader = await connect("c2c_client_reader", ["review.read"]);
   impostor = await connect("c2c_client_worker", ["review.read", "orchestration.review"]);
@@ -132,7 +132,7 @@ describe("bounded reviewer via isolated authenticated MCP", () => {
       review_id: review.review_id, review_result: "PASS" });
   }, 30000);
 
-  it("continues only a NEEDS_WORK bounded task with orchestration.start and preserves immutable scope", async () => {
+  it("automatically continues NEEDS_WORK, rejects duplicate continuation and preserves immutable scope", async () => {
     await resetFixture();
     const review = await pending(2);
     const needsWork = { ...review, verdict: "NEEDS_WORK" as const, findings: ["Revise the heading again"] };
@@ -160,19 +160,9 @@ describe("bounded reviewer via isolated authenticated MCP", () => {
       name: "continue_bounded_opencode_task",
       arguments: { task_id: review.task_id },
     });
-    expect(continued.isError).not.toBe(true);
-    expect(data(continued)).toMatchObject({
-      task_id: review.task_id,
-      state: "RUNNING",
-      next_revision: 2,
-    });
-
-    expect(data(await starter.callTool({
-      name: "continue_bounded_opencode_task",
-      arguments: { task_id: review.task_id },
-    }))).toMatchObject({
-      error: "BOUNDED_CONTINUE_ALREADY_RUNNING",
-    });
+    expect(continued.isError).toBe(true);
+    expect(["BOUNDED_CONTINUE_ALREADY_RUNNING", "BOUNDED_CONTINUE_NOT_ALLOWED"])
+      .toContain(data(continued).error);
 
     let current: Record<string, unknown> | undefined;
     for (let i = 0; i < 100; i++) {
