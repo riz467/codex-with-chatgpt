@@ -551,6 +551,7 @@ describe("bounded semantic lifecycle over MCP", () => {
         total_lines: 1, content: "before\n" }], unavailable: [] })),
       claimSemanticAttempt: vi.fn(() => true), recordSemanticAttempt: vi.fn(),
       recordSemanticAttemptFailure: vi.fn(),
+      reacquireReferenceEvidence: vi.fn(() => tasks.referenceEvidence()),
       semanticAttemptResult: vi.fn(() => null),
       assertWithinDeadline: vi.fn(),
       submitReview };

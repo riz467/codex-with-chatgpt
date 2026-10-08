@@ -4,8 +4,8 @@ import { validateSemantic, type semanticSession } from "./semantic-session.js";
 
 export async function reviewWithReferences(tasks: BoundedTasks, taskId: string, revision: number,
   prompt: string, executionSessionId: string, reviewer: typeof semanticSession) {
-  const evidence = tasks.referenceEvidence(taskId, revision);
-  const requiredMissing = tasks.status(taskId).contract.edit_paths.some(name =>
+  const initialEvidence = tasks.referenceEvidence(taskId, revision);
+  const requiredMissing = (evidence: typeof initialEvidence) => tasks.status(taskId).contract.edit_paths.some(name =>
     !evidence.references.some(ref => ref.path === name) || evidence.unavailable.some(ref => ref.path === name));
   // Evidence acquisition has its own finite budget; it does not burn edit revisions.
   // Durable attempt claims prevent restart from resetting this budget.
@@ -13,13 +13,15 @@ export async function reviewWithReferences(tasks: BoundedTasks, taskId: string, 
     tasks.assertWithinDeadline(taskId);
     const saved = tasks.semanticAttemptResult(taskId, revision, attempt) as Awaited<ReturnType<typeof semanticSession>> | null;
     if (saved) {
+      const evidence = attempt === 1 ? initialEvidence : tasks.reacquireReferenceEvidence(taskId, revision, attempt, true);
       validateSemantic(JSON.stringify(saved.decision), [1, 2, 3, 4]);
       if (!saved.session_id || saved.session_id === executionSessionId) throw new Error("SEMANTIC_RESULT_INVALID");
-      if (!requiredMissing && saved.decision.reason_category !== "EVIDENCE_INSUFFICIENT" &&
+      if (!requiredMissing(evidence) && saved.decision.reason_category !== "EVIDENCE_INSUFFICIENT" &&
           saved.decision.reason_category !== "SEMANTIC_REVIEW_INTERNAL_ERROR") return saved;
       continue;
     }
     if (!tasks.claimSemanticAttempt(taskId, revision, attempt)) continue;
+    const evidence = attempt === 1 ? initialEvidence : tasks.reacquireReferenceEvidence(taskId, revision, attempt);
     let result: Awaited<ReturnType<typeof semanticSession>>;
     try { result = await reviewer([
       prompt,
@@ -34,7 +36,7 @@ export async function reviewWithReferences(tasks: BoundedTasks, taskId: string, 
       continue;
     }
     tasks.recordSemanticAttempt(taskId, revision, attempt, result);
-    if (!requiredMissing && result.decision.reason_category !== "EVIDENCE_INSUFFICIENT" &&
+    if (!requiredMissing(evidence) && result.decision.reason_category !== "EVIDENCE_INSUFFICIENT" &&
         result.decision.reason_category !== "SEMANTIC_REVIEW_INTERNAL_ERROR") return result;
   }
   throw new Error("SEMANTIC_EVIDENCE_EXHAUSTED");

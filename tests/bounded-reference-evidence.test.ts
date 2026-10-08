@@ -100,6 +100,7 @@ it.each(["missing", "truncated"])("cannot accept PASS when required edit-path ev
   if (kind === "missing") evidence.references = evidence.references.filter(ref => ref.path !== "src/mcp/server.ts");
   evidence.unavailable.push({ path: "src/mcp/server.ts", reason: kind === "missing" ? "REFERENCE_UNAVAILABLE" : "REFERENCE_TRUNCATED" });
   vi.spyOn(f.tasks, "referenceEvidence").mockReturnValue(evidence);
+  vi.spyOn(f.tasks, "reacquireReferenceEvidence").mockReturnValue(evidence);
   let calls = 0;
   const reviewer: typeof semanticSession = async () => {
     calls++;
@@ -113,4 +114,28 @@ it.each(["missing", "truncated"])("cannot accept PASS when required edit-path ev
   expect(calls).toBe(2);
   expect(f.tasks.status(f.id).state).toBe("REVIEW_PENDING");
   expect(f.tasks.status(f.id).revisions[0].review).toBeUndefined();
+});
+it("reacquires unavailable required references from baseline and seals them for restart", async () => {
+  const f = await fixture(), initial = f.tasks.referenceEvidence(f.id, 1);
+  const unavailable = { ...initial, references: initial.references.filter(ref => ref.path !== "src/mcp/server.ts"),
+    unavailable: [...initial.unavailable, { path: "src/mcp/server.ts", reason: "REFERENCE_UNAVAILABLE" }] };
+  vi.spyOn(f.tasks, "referenceEvidence").mockReturnValue(unavailable);
+  let calls = 0;
+  const reviewer: typeof semanticSession = async () => {
+    calls++;
+    return { decision: { review_result: "PASS", reason_category: "GOAL_SATISFIED", summary: "Reviewed baseline and diff",
+      evidence_refs: [1, 2, 3, 4], unresolved_issues: [] }, session_id: "ses_independent", reviewer_profile: "fixture",
+      reviewer_agent_sha256: "0".repeat(64), model: null, provider: null, usage: null };
+  };
+  const review = () => reviewWithReferences(f.tasks, f.id, 1, "contract", "ses_fixture", reviewer);
+  expect((await review()).decision.review_result).toBe("PASS");
+  const file = path.join(f.root, "tasks", f.id, "revision-1-reference-acquisition-2.json");
+  const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+  expect(saved.evidence.references.find((r: any) => r.path === "src/mcp/server.ts").content).toContain("value = 1");
+  expect(saved.baseline_head).toBe(f.git("rev-parse", "HEAD"));
+  expect((await review()).decision.review_result).toBe("PASS");
+  expect(calls).toBe(2);
+  saved.evidence.references[0].content = "tampered"; fs.writeFileSync(file, JSON.stringify(saved));
+  await expect(review()).rejects.toThrow("REVIEW_BINDING_INVALID");
+  expect(calls).toBe(2);
 });

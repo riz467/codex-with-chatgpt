@@ -219,3 +219,20 @@ it("never overwrites a newer committed ledger when controller acquisition conten
   expect(f.campaigns.status(started.task_id).state).toBe("COMMITTED");
   expect(f.counts()).toEqual({ proposals: 1, reviews: 1, finalizations: 1 });
 }, 30000);
+it("preserves partial task initialization and its unknown repository reservation for inspection", () => {
+  const f = fixture(0);
+  const idle = new BoundedCampaigns(path.join(f.root, "campaigns"), f.tasks,
+    { lifecycleRunning: new Set(), runBoundedLifecycle: () => false }, f.recover, f.committed);
+  const started = idle.start(f.contract), campaign = idle.status(started.task_id);
+  fs.unlinkSync(path.join(f.root, "tasks", started.task_id, "task.json"));
+  fs.writeFileSync(path.join(f.root, "campaigns", `${started.task_id}.json`), JSON.stringify({ ...campaign,
+    task_ids: [], pending_task: started.task_id }));
+  const locks = path.join(f.root, "bounded-repo-locks-v2");
+  const owner = path.join(locks, fs.readdirSync(locks)[0], "owner.txt");
+  const before = fs.readFileSync(owner, "utf8");
+  idle.tick(started.task_id);
+  expect(idle.status(started.task_id)).toMatchObject({ state: "STOPPED", stop_reason: "TASK_INITIALIZATION_REQUIRES_INSPECTION" });
+  expect(fs.readFileSync(owner, "utf8")).toBe(before);
+  expect(fs.existsSync(path.join(f.root, "tasks", started.task_id))).toBe(true);
+  expect(f.counts()).toEqual({ proposals: 0, reviews: 0, finalizations: 0 });
+}, 30000);

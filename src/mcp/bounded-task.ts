@@ -483,7 +483,11 @@ export class BoundedTasks {
     const repo = this.repos[contract.repo];
     if (fs.realpathSync.native(repo).toLowerCase() !== path.resolve(repo).toLowerCase()) fail("INVALID_REPO");
     const id = reservedId ?? `bounded-${randomUUID().replaceAll("-", "")}`;
-    if (!idPattern.test(id) || fs.existsSync(this.dir(id))) fail("INVALID_TASK_ID");
+    if (!idPattern.test(id)) fail("INVALID_TASK_ID");
+    if (fs.existsSync(this.dir(id))) {
+      if (reservedId && !fs.existsSync(safePath(this.dir(id), "task.json"))) fail("TASK_INITIALIZATION_REQUIRES_INSPECTION");
+      fail("INVALID_TASK_ID");
+    }
     fs.mkdirSync(this.repoLocks, { recursive: true });
     const lock = this.repoLock(repo);
     try { fs.mkdirSync(lock); } catch { fail("REPO_BUSY"); }
@@ -709,6 +713,24 @@ export class BoundedTasks {
     store(this.dir(id), `revision-${revision}-semantic-failure-${attempt}.json`, json({ task_id: id,
       revision, attempt, manifest_sha256: task.revisions[revision - 1].manifest_sha256,
       error_code: "SEMANTIC_ATTEMPT_FAILED" }));
+  }
+  reacquireReferenceEvidence(id: string, revision: number, attempt: number, readOnly = false) {
+    const task = this.load(id), bundle = this.artifacts(id, revision);
+    if (attempt !== 2) fail("REVIEW_BINDING_INVALID");
+    const name = `revision-${revision}-reference-acquisition-${attempt}.json`;
+    const file = safePath(this.dir(id), name);
+    if (!fs.existsSync(file)) {
+      if (readOnly) fail("REVIEW_BINDING_INVALID");
+      const evidence = collectReferenceEvidence(this.repos[task.contract.repo], task.baseline_head, task.contract);
+      store(this.dir(id), name, json({ task_id: id, revision, attempt, baseline_head: task.baseline_head,
+        contract_sha256: task.contract_sha256, manifest_sha256: bundle.manifest_sha256,
+        evidence_sha256: sha(json(evidence)), evidence }));
+    }
+    const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (saved.task_id !== id || saved.revision !== revision || saved.attempt !== attempt ||
+        saved.baseline_head !== task.baseline_head || saved.contract_sha256 !== task.contract_sha256 ||
+        saved.manifest_sha256 !== bundle.manifest_sha256 || saved.evidence_sha256 !== sha(json(saved.evidence))) fail("REVIEW_BINDING_INVALID");
+    return saved.evidence as ReturnType<typeof collectReferenceEvidence>;
   }
   semanticAttemptResult(id: string, revision: number, attempt: number): unknown | null {
     const bundle = this.artifacts(id, revision);
