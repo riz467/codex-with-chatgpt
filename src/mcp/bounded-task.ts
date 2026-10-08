@@ -7,6 +7,8 @@ import { GatewayError, safePath } from "./local-gateway.js";
 import { getStateDir } from "../config/paths.js";
 import { collectReferenceEvidence, type ReferenceEvidence } from "./bounded-reference-evidence.js";
 import { acquireProcessLock } from "./bounded-process-lock.js";
+import { deployment } from "../config/deployment.js";
+import { terminateOwnedProcess } from "./owned-process.js";
 
 const sha = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
 const json = (value: unknown) => JSON.stringify(value);
@@ -237,8 +239,8 @@ const resolveRepoTool = (repo: string, relative: string) => {
   const repoReal = fs.realpathSync.native(repo);
   let tool: string;
   try { tool = fs.realpathSync.native(path.resolve(repo, ...relative.split("/"))); } catch { return fail("VERIFY_TOOLCHAIN_INVALID"); }
-  const lowerRepo = repoReal.toLowerCase(), lowerTool = tool.toLowerCase();
-  if (lowerTool !== lowerRepo && !lowerTool.startsWith(lowerRepo + path.sep.toLowerCase())) fail("VERIFY_TOOLCHAIN_INVALID");
+  const rel = path.relative(repoReal, tool);
+  if (!rel || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) fail("VERIFY_TOOLCHAIN_INVALID");
   if (!fs.statSync(tool).isFile()) fail("VERIFY_TOOLCHAIN_INVALID");
   return tool;
 };
@@ -293,17 +295,6 @@ const workerProcessOverheadMs = 30000;
 const workerTreeKillTimeoutMs = 2000;
 const workerSettleGraceMs = 500;
 const controllerWorkerGraceMs = workerTreeKillTimeoutMs + workerSettleGraceMs + 500;
-type SpawnedChild = ReturnType<typeof spawn>;
-
-const terminateWorkerTree = (child: SpawnedChild) => {
-  if (process.platform === "win32" && child.pid) {
-    const killed = spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"],
-      { windowsHide: true, stdio: "ignore", timeout: workerTreeKillTimeoutMs });
-    if (!killed.error && killed.status === 0) return;
-  }
-  try { child.kill(); } catch { /* best-effort non-Windows/fallback termination */ }
-};
-
 const workerDiagnostic = (error: unknown): WorkerDiagnostic | null => {
   if (!(error instanceof GatewayError) || !["WORKER_FAILED", "WORKER_TIMEOUT"].includes(error.code)) return null;
 
@@ -341,9 +332,11 @@ const withWorkerDeadline = <T>(operation: Promise<T>, timeout: number): Promise<
 });
 // Only a dedicated read-only agent may propose edits; it is not allowed to write, shell, or invoke Codex.
 export const opencodeWorker: Worker = (repo, prompt, timeout, promptTimeout = workerPromptBudgetMs) => new Promise((resolve, reject) => {
-  const script = "C:\\work\\ai-orchestration-config\\scripts\\bounded-opencode-proposal.ps1";
-  const child = spawn("C:\\Program Files\\PowerShell\\7\\pwsh.exe", ["-NoProfile", "-NonInteractive", "-File", script, "-Repo", repo, "-PromptTimeoutMs", String(promptTimeout)],
-    { cwd: repo, shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+  // ponytail: external PowerShell transport still needs an owner-reviewed Linux port.
+  if (process.platform !== "win32") throw new GatewayError("WORKER_FAILED", "PREFLIGHT:OPENCODE_TRANSPORT_NOT_PORTABLE:UNKNOWN");
+  const script = path.join(deployment.configRoot, "scripts", "bounded-opencode-proposal.ps1");
+  const child = spawn(deployment.pwsh, ["-NoProfile", "-NonInteractive", "-File", script, "-Repo", repo, "-PromptTimeoutMs", String(promptTimeout)],
+    { cwd: repo, shell: false, windowsHide: true, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"] });
   let out = "", err = "";
   let settled = false;
   let termination: "WORKER_TIMEOUT" | "WORKER_FAILED" | null = null;
@@ -388,7 +381,12 @@ export const opencodeWorker: Worker = (repo, prompt, timeout, promptTimeout = wo
   const terminate = (code: "WORKER_TIMEOUT" | "WORKER_FAILED") => {
     if (settled || termination) return;
     termination = code;
-    terminateWorkerTree(child);
+    try { terminateOwnedProcess(child); }
+    catch {
+      child.stdin?.destroy(); child.stdout?.destroy(); child.stderr?.destroy(); child.unref();
+      settleReject(new GatewayError("PROCESS_TERMINATION_REQUIRES_INSPECTION", "Worker tree termination is unconfirmed"));
+      return;
+    }
 
     // taskkill /T /F normally causes "close" immediately. Do not trust that
     // contract indefinitely: descendants may retain inherited stdio handles.
@@ -481,7 +479,7 @@ export class BoundedTasks {
         !Number.isInteger(contract.max_revisions) || contract.max_revisions < 1 || contract.max_revisions > 3 ||
         !Number.isInteger(contract.timeout_ms) || contract.timeout_ms < 1000 || contract.timeout_ms > 600000) fail("INVALID_CONTRACT");
     const repo = this.repos[contract.repo];
-    if (fs.realpathSync.native(repo).toLowerCase() !== path.resolve(repo).toLowerCase()) fail("INVALID_REPO");
+    if (path.relative(fs.realpathSync.native(repo), path.resolve(repo)) !== "") fail("INVALID_REPO");
     const id = reservedId ?? `bounded-${randomUUID().replaceAll("-", "")}`;
     if (!idPattern.test(id)) fail("INVALID_TASK_ID");
     if (fs.existsSync(this.dir(id))) {
@@ -667,7 +665,7 @@ export class BoundedTasks {
       task.stop_reason = error instanceof GatewayError ? error.code : "EXECUTION_UNKNOWN";
       task.worker_diagnostic = workerDiagnostic(error);
       record(dir, task);
-      this.releaseRepo(task);
+      if (task.stop_reason !== "PROCESS_TERMINATION_REQUIRES_INSPECTION") this.releaseRepo(task);
       throw error;
     }
   }

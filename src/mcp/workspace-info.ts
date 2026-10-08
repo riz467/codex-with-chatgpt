@@ -3,12 +3,13 @@ import path from "node:path";
 import { gitInfo } from "../workspace/git.js";
 import type { Workspace } from "../workspace/manager.js";
 import { REVIEW_ROOT } from "./local-gateway.js";
+import { sameDeploymentPath } from "../config/deployment.js";
 
 type GitIdentity = ReturnType<typeof gitInfo>;
 
 /** The review root is fixed by the host, not a tool argument or caller-supplied path. */
 export function isReviewWorkspace(workspace: Workspace, expectedReviewRoot = REVIEW_ROOT): boolean {
-  return process.platform === "win32" && workspace.root.toLowerCase() === path.resolve(expectedReviewRoot).toLowerCase();
+  return sameDeploymentPath(workspace.root, expectedReviewRoot);
 }
 
 export function workspaceOverview(

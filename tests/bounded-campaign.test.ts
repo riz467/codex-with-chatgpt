@@ -9,6 +9,7 @@ import { createBoundedLifecycleController, recoverFailedBoundedWorkspace } from 
 import { prepareBoundedCommit, commitBoundedPatch, reconcileBoundedCommit } from "../src/mcp/typed-actions.js";
 import type { semanticSession } from "../src/mcp/semantic-session.js";
 import type { Workspace } from "../src/workspace/manager.js";
+import { GatewayError } from "../src/mcp/local-gateway.js";
 
 const roots: string[] = [];
 afterEach(() => { vi.restoreAllMocks(); roots.splice(0).forEach(root => fs.rmSync(root, { recursive: true, force: true })); });
@@ -63,6 +64,19 @@ async function complete(campaigns: BoundedCampaigns, id: string) {
   }
   throw new Error("Fixture campaign did not settle");
 }
+it("persists uncertain tree termination, stops retries and retains the repo reservation", async () => {
+  const f = fixture(0, () => { throw new GatewayError("PROCESS_TERMINATION_REQUIRES_INSPECTION", "Unconfirmed tree exit"); });
+  const started = f.campaigns.start(f.contract);
+  const result = await complete(f.campaigns, started.task_id);
+  expect(result).toMatchObject({ state: "STOPPED", stop_reason: "PROCESS_TERMINATION_REQUIRES_INSPECTION" });
+  expect(result.task_ids).toHaveLength(1);
+  expect(f.tasks.status(started.task_id).stop_reason).toBe("PROCESS_TERMINATION_REQUIRES_INSPECTION");
+  const restarted = new BoundedCampaigns(path.join(f.root, "campaigns"), f.tasks, f.lifecycle(), f.recover, f.committed);
+  restarted.tick(started.task_id);
+  expect(restarted.status(started.task_id).state).toBe("STOPPED");
+  expect(f.counts()).toEqual({ proposals: 1, reviews: 0, finalizations: 0 });
+  expect(() => f.tasks.start(f.contract)).toThrow("REPO_BUSY");
+});
 it.each([0, 1, 3])("finishes a real Git fixture with %i NEEDS_WORK decisions without manual resume", async count => {
   const f = fixture(count), started = f.campaigns.start(f.contract);
   const result = await complete(f.campaigns, started.task_id);
@@ -164,7 +178,7 @@ it.each([["lifecycle", "unknown"], ["lifecycle", "live"], ["controller", "unknow
   const lock = kind === "lifecycle" ? path.join(f.root, "tasks", started.task_id, "lifecycle.lock")
     : path.join(f.root, "campaigns", `${started.task_id}.controller.lock`);
   fs.mkdirSync(lock);
-  if (owner === "live") fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: process.pid, nonce: "fixture" }));
+  if (owner === "live") fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: process.pid, nonce: "fixture", host: os.hostname(), platform: process.platform }));
   vi.spyOn(Date, "now").mockReturnValue(completed.deadline + 1);
   f.campaigns.tick(started.task_id);
   expect(f.campaigns.status(started.task_id)).toMatchObject({ state: "STOPPED",
@@ -207,7 +221,7 @@ it("never overwrites a newer committed ledger when controller acquisition conten
   fs.writeFileSync(file, JSON.stringify({ ...committed, state: "RUNNING" }));
   const lock = path.join(f.root, "campaigns", `${started.task_id}.controller.lock`);
   fs.mkdirSync(lock);
-  fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: process.pid, nonce: "fixture" }));
+  fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: process.pid, nonce: "fixture", host: os.hostname(), platform: process.platform }));
   vi.spyOn(Date, "now").mockReturnValue(committed.deadline + 1);
   const mkdir = fs.mkdirSync;
   vi.spyOn(fs, "mkdirSync").mockImplementation(((target: fs.PathLike, options: any) => {

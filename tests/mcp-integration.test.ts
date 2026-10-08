@@ -21,6 +21,16 @@ import { createScratch, type Scratch } from "./support/scratch.js";
 import { writeCompletedTask } from "./support/synthetic-review.js";
 import { writeResearchRepos } from "./support/synthetic-repos.js";
 import { DevelopmentStore } from "../src/execution-orchestrator/development/store.js";
+import { deployment } from "../src/config/deployment.js";
+
+vi.mock("../src/config/deployment.js", async importOriginal => {
+  const actual = await importOriginal<typeof import("../src/config/deployment.js")>();
+  const fs = await import("node:fs"), os = await import("node:os"), path = await import("node:path");
+  const executionRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-placement-"));
+  // In-process legacy commit fixture, not Linux production execution permission.
+  return { ...actual, deployment: { ...actual.deployment, executionRoot, localExecutionEnabled: true } };
+});
+afterAll(() => fs.rmSync(deployment.executionRoot, { recursive: true, force: true }));
 
 let root: string;
 let bridge: Bridge;
@@ -212,10 +222,10 @@ describe("RC-02 request-only startup over MCP", () => {
 });
 
 describe("bounded PASS finalization routing", () => {
-  const bridgeRoot = "C:\\work\\codex-with-chatgpt";
+  const bridgeRoot = deployment.executionRoot;
   it("maps all three eligible durable repos from the fixed Execution Bridge root", () => {
     expect(boundedFinalizationRoot(bridgeRoot, "autonomous-fixture"))
-      .toBe("C:\\work\\bounded-review-live-fixture");
+      .toBe(deployment.fixtureRoot);
     expect(boundedFinalizationRoot(bridgeRoot, "codex-with-chatgpt"))
       .toBe(bridgeRoot);
     expect(boundedFinalizationRoot(bridgeRoot, "codex-with-chatgpt-control-plane"))
@@ -224,8 +234,7 @@ describe("bounded PASS finalization routing", () => {
 
   it("rejects unknown repos and all three eligible repos from non-Bridge workspace roots", () => {
     expect(boundedFinalizationRoot(bridgeRoot, "unknown")).toBeNull();
-    for (const root of ["C:\\work\\bounded-review-live-fixture", "C:\\work\\other",
-      "C:\\work\\codex-with-chatgpt-extra"]) {
+    for (const root of [deployment.fixtureRoot, path.join(bridgeRoot, "other"), `${bridgeRoot}-extra`]) {
       for (const repo of ["autonomous-fixture", "codex-with-chatgpt", "codex-with-chatgpt-control-plane"]) {
         expect(boundedFinalizationRoot(root, repo)).toBeNull();
       }
@@ -326,7 +335,7 @@ describe("bounded PREPARED over the fixed execution MCP workspace", () => {
     artifactsSpy = vi.spyOn(BoundedTasks.prototype, "artifacts").mockImplementation(() => listing as any);
     pageSpy = vi.spyOn(BoundedTasks.prototype, "readArtifact")
       .mockImplementation((_id, _revision, _name, offset) => pages(offset) as any);
-    localServer = createMcpServer({ workspace: { root: "C:\\work\\codex-with-chatgpt" } as Workspace,
+    localServer = createMcpServer({ workspace: { root: deployment.executionRoot } as Workspace,
       logger: {} as Logger });
     localClient = new Client({ name: "prepared-integration", version: "1" });
     const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();

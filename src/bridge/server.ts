@@ -7,6 +7,7 @@ import { createOAuthRouter } from "../auth/oauth.js";
 import { bearerAuth } from "../auth/middleware.js";
 import { PairingManager } from "../pairing/manager.js";
 import { createMcpServer, runProductionBoundedCampaigns } from "../mcp/server.js";
+import { deployment, sameDeploymentPath } from "../config/deployment.js";
 import type { BoundedTasks } from "../mcp/bounded-task.js";
 import type { OrchestrationReadDependencies } from "../mcp/local-gateway.js";
 import type { RepoResearchRoots } from "../mcp/repo-research.js";
@@ -243,7 +244,8 @@ export async function startBridge(opts: BridgeOptions, orchestrationReads?: Orch
     writeRuntimeState(state);
   };
   persistRuntime();
-  if (!opts.boundedTasks && workspace.root.toLowerCase() === "c:\\work\\codex-with-chatgpt") runProductionBoundedCampaigns();
+  if (!opts.boundedTasks && sameDeploymentPath(workspace.root, deployment.executionRoot) &&
+      !sameDeploymentPath(workspace.root, deployment.reviewRoot)) runProductionBoundedCampaigns();
 
   let closed = false;
   const shutdown = async (): Promise<void> => {

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { randomUUID } from "node:crypto";
 
 export class ProcessLockInspectionRequired extends Error {
@@ -19,14 +20,16 @@ export function acquireProcessLock(lock: string): (() => void) | null {
     } catch (error) { if (error instanceof ProcessLockInspectionRequired) throw error; }
     return null;
   }
-  const owner = { pid: process.pid, nonce: randomUUID() };
+  const owner = { pid: process.pid, nonce: randomUUID(), host: os.hostname(), platform: process.platform };
   try {
     if (fs.existsSync(lock)) {
-      let prior: { pid: number };
+      let prior: typeof owner;
       try { prior = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")); }
       catch { throw new ProcessLockInspectionRequired("PROCESS_LOCK_OWNER_REQUIRES_INSPECTION"); }
       if (!prior || !Number.isSafeInteger(prior.pid) || prior.pid < 1)
         throw new ProcessLockInspectionRequired("PROCESS_LOCK_OWNER_REQUIRES_INSPECTION");
+      if (prior.host !== owner.host || prior.platform !== owner.platform || typeof prior.nonce !== "string" || !prior.nonce)
+        throw new ProcessLockInspectionRequired("PROCESS_LOCK_HOST_REQUIRES_INSPECTION");
       try { process.kill(prior.pid, 0); return null; } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ESRCH") return null;
       }

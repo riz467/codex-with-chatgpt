@@ -26,9 +26,9 @@ describe("fixed review workspace identity with a trusted in-process expected roo
     const workspace = new Workspace(fixture.root);
     const info = workspaceOverview(workspace, undefined, undefined, fixture.root);
     expect(isReviewWorkspace(workspace)).toBe(false);
-    expect(isReviewWorkspace(workspace, fixture.root)).toBe(process.platform === "win32");
+    expect(isReviewWorkspace(workspace, fixture.root)).toBe(true);
     expect(info).toMatchObject({ workspaceId: workspace.id, git: { isRepo: false, branch: null, commit: null } });
-    if (process.platform === "win32") expect(info).toMatchObject({ workspaceRoot: fixture.root, readOnly: true,
+    expect(info).toMatchObject({ workspaceRoot: fixture.root, readOnly: true,
       directoryExists: true, currentReviewExists: true, git: { available: false } });
     const errors: unknown[] = [];
     const unavailable = workspaceOverview(workspace, () => { throw new Error("Git unavailable"); }, error => errors.push(error), fixture.root);
@@ -37,7 +37,7 @@ describe("fixed review workspace identity with a trusted in-process expected roo
     const pointer = path.join(fixture.root, "CURRENT_REVIEW.json");
     scratch.remove(pointer);
     const absent = workspaceOverview(workspace, undefined, undefined, fixture.root);
-    if (process.platform === "win32") expect(absent).toMatchObject({ readOnly: true, currentReviewExists: false });
+    expect(absent).toMatchObject({ readOnly: true, currentReviewExists: false });
   });
 
   it("does not promote a scratch-local pointer to the production review identity", () => {

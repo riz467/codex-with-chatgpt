@@ -8,6 +8,7 @@ import { getStateDir } from "../config/paths.js";
 import { canonicalJson, scopePathSchema } from "../task-contract/contract.js";
 import { runGit } from "../workspace/git.js";
 import { isReviewWorkspace } from "./workspace-info.js";
+import { deployment, sameDeploymentPath } from "../config/deployment.js";
 import { hashDevelopmentGoal, hashDevelopmentAcceptanceCriteria, prepareRequestInputHandle } from "../execution-orchestrator/development/request-input.js";
 import { hashRecord, type DevelopmentBinding } from "../execution-orchestrator/development/contract.js";
 import { DevelopmentStore } from "../execution-orchestrator/development/store.js";
@@ -35,16 +36,16 @@ import { semanticSession } from "./semantic-session.js";
 
 // The new ledger is not the legacy Codex execution/approval path. Repository/profile pairings are fixed here.
 const boundedRepos: Record<string, string> = {
-  "autonomous-fixture": "C:\\work\\bounded-review-live-fixture",
-  "codex-with-chatgpt": "C:\\work\\codex-with-chatgpt",
-  "codex-with-chatgpt-control-plane": "C:\\work\\codex-with-chatgpt",
-  "codex-with-chatgpt-authority-transport": "C:\\work\\codex-with-chatgpt",
-  "codex-with-chatgpt-ct700-peer-gateway": "C:\\work\\codex-with-chatgpt",
+  "autonomous-fixture": deployment.fixtureRoot,
+  "codex-with-chatgpt": deployment.executionRoot,
+  "codex-with-chatgpt-control-plane": deployment.executionRoot,
+  "codex-with-chatgpt-authority-transport": deployment.executionRoot,
+  "codex-with-chatgpt-ct700-peer-gateway": deployment.executionRoot,
 };
 export function boundedFinalizationRoot(workspaceRoot: string, repo: string): string | null {
-  const bridgeRoot = "C:\\work\\codex-with-chatgpt";
-  if (workspaceRoot.toLowerCase() !== bridgeRoot.toLowerCase()) return null;
-  if (repo === "autonomous-fixture") return "C:\\work\\bounded-review-live-fixture";
+  const bridgeRoot = deployment.executionRoot;
+  if (!sameDeploymentPath(workspaceRoot, bridgeRoot) || sameDeploymentPath(workspaceRoot, deployment.reviewRoot)) return null;
+  if (repo === "autonomous-fixture") return deployment.fixtureRoot;
   if (repo === "codex-with-chatgpt" || repo === "codex-with-chatgpt-control-plane" ||
       repo === "codex-with-chatgpt-authority-transport" ||
       repo === "codex-with-chatgpt-ct700-peer-gateway") return bridgeRoot;
@@ -127,6 +128,7 @@ export function productionVerificationPlan(profile: ExecutionProfile) {
 
 const productionVerifier: NonNullable<ConstructorParameters<typeof BoundedTasks>[4]> =
   (root, profile, paths, timeout) => {
+    assertProductionExecution();
     const deadline = Date.now() + Math.max(1000, timeout);
     const remaining = (cap: number) => {
       const left = deadline - Date.now();
@@ -431,6 +433,7 @@ export function createBoundedLifecycleController(
 ) {
   const lifecycleRunning = new Set<string>();
   const finalizeBoundedPass = (taskId: string, repo: string) => {
+    if (tasks === boundedTasks) assertProductionExecution();
     tasks.assertWithinDeadline(taskId);
     const fixedRoot = boundedFinalizationRoot(workspaceRoot, repo);
     if (boundedFinalizer) {
@@ -441,6 +444,7 @@ export function createBoundedLifecycleController(
     }
   };
   const runBoundedLifecycle = (taskId: string) => {
+    if (tasks === boundedTasks) assertProductionExecution();
     if (lifecycleRunning.has(taskId) || tasks.executing(taskId)) return false;
     const release = tasks.lifecycleLock(taskId);
     if (!release) return false;
@@ -559,6 +563,7 @@ const productionBoundedLifecycle = createBoundedLifecycleController(
 );
 
 export function startProductionBoundedTask(input: Parameters<BoundedTasks["start"]>[0]) {
+  assertProductionExecution();
   productionBoundedCampaigns.run();
   return productionBoundedCampaigns.start(input);
 }
@@ -572,7 +577,12 @@ const productionBoundedCampaigns = new BoundedCampaigns(path.join(getStateDir(),
     });
   }, id => reconcileBoundedCommit(boundedTasks, id, getStateDir(), boundedRepos[boundedTasks.status(id).contract.repo]));
 export const getProductionBoundedCampaigns = () => productionBoundedCampaigns.list();
-export const runProductionBoundedCampaigns = () => productionBoundedCampaigns.run();
+function assertProductionExecution() {
+  if (!deployment.localExecutionEnabled) throw new GatewayError("EXECUTOR_NOT_CONNECTED", "Linux candidate execution requires an isolated Executor");
+}
+export const runProductionBoundedCampaigns = () => {
+  if (deployment.localExecutionEnabled) productionBoundedCampaigns.run();
+};
 
 export function getProductionBoundedCommitStatus(taskId: string) {
   return getBoundedCommitStatus(boundedTasks, taskId, getStateDir());
@@ -631,7 +641,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     } catch (error) { return mapError(error); }
   });
   if (!ctx.boundedTasks && !isReviewWorkspace(workspace) &&
-      Object.values(boundedRepos).some((root) => path.resolve(root).toLowerCase() === path.resolve(workspace.root).toLowerCase())) {
+      Object.values(boundedRepos).some((root) => sameDeploymentPath(root, workspace.root))) {
     server.registerTool("recover_failed_bounded_task", {
       title: "Recover failed bounded task workspace",
       description: "Restore observed in-scope unstaged changes after a verification failure, timeout, or unknown execution outcome; leave the failed task ledger unchanged.",
@@ -642,7 +652,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       try {
         const task = tasks.status(args.task_id);
         const root = boundedRepos[task.contract.repo];
-        if (!root || path.resolve(root).toLowerCase() !== path.resolve(workspace.root).toLowerCase()) {
+        if (!root || !sameDeploymentPath(root, workspace.root)) {
           throw new GatewayError("RECOVERY_NOT_ALLOWED", "This task is not eligible for workspace recovery");
         }
         return okStructured(tasks.withRecoveryLock(task.task_id,
@@ -651,7 +661,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     });
   }
   if (!ctx.boundedTasks && !isReviewWorkspace(workspace) &&
-      path.resolve(workspace.root).toLowerCase() === path.resolve(boundedRepos["codex-with-chatgpt-control-plane"]).toLowerCase()) {
+      deployment.localExecutionEnabled && sameDeploymentPath(workspace.root, boundedRepos["codex-with-chatgpt-control-plane"])) {
     const inputSchema = z.object({ task_id: boundedId }).strict();
     server.registerTool("prepare_bounded_commit", {
       title: "Seal accepted bounded diff", description: "Bind the latest accepted PASS to a verified diff; no commit or completion.",
@@ -707,7 +717,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     // Unlike local stdio tools, an absent auth principal must never impersonate ChatGPT.
     if (!extra.authInfo) return fail("UNAUTHENTICATED_REVIEW", "Authenticated review transport required");
     if (!extra.authInfo.scopes.includes("orchestration.review")) return fail("INSUFFICIENT_SCOPE", "Review scope required");
-    if (workspace.root.toLowerCase() === REVIEW_ROOT.toLowerCase() || !ctx.boundedReviewerClientId ||
+    if (isReviewWorkspace(workspace) || !ctx.boundedReviewerClientId ||
         extra.authInfo.clientId !== ctx.boundedReviewerClientId) return fail("REVIEW_CLIENT_NOT_AUTHORIZED", "Reviewer client is not authorized on this workspace");
     try {
       const result = tasks.submitReview(args);
@@ -836,7 +846,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     try { return okStructured(retryOrchestration(args.id, args.retry_reason)); } catch (error) { return mapError(error); }
   });
   // Do not expose any completion write through the review-bound connector.
-  if (workspace.root.toLowerCase() !== REVIEW_ROOT.toLowerCase()) server.registerTool("complete_orchestration", {
+  if (!isReviewWorkspace(workspace)) server.registerTool("complete_orchestration", {
     title: "Disabled legacy completion compatibility endpoint",
     description: "Legacy compatibility endpoint; authoritative completion disabled. Always rejects before discovery or engine calls, including caller PASS and done_approved=true. RC-02 bound request required.",
     inputSchema: z.object({ task_id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/),
@@ -846,7 +856,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     const denied = requireScope(extra.authInfo, "orchestration.start"); if (denied) return denied;
     try { return okStructured(completeOrchestration(args.task_id, args.review_result, args.done_approved)); } catch (error) { return mapError(error); }
   });
-  if (workspace.root.toLowerCase() !== REVIEW_ROOT.toLowerCase()) server.registerTool("complete_integrated_orchestration", {
+  if (!isReviewWorkspace(workspace)) server.registerTool("complete_integrated_orchestration", {
     title: "Disabled legacy integrated completion endpoint",
     description: "Legacy compatibility endpoint; integrated authoritative completion disabled. Always rejects before discovery or engine calls, including caller PASS and done_approved=true. RC-02 bound request required.",
     inputSchema: z.object({ task_id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/),
@@ -856,7 +866,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     const denied = requireScope(extra.authInfo, "orchestration.start"); if (denied) return denied;
     try { return okStructured(completeIntegratedOrchestration(args.task_id, args.review_result, args.done_approved)); } catch (error) { return mapError(error); }
   });
-  if (workspace.root.toLowerCase() !== REVIEW_ROOT.toLowerCase()) server.registerTool("complete_autonomous_orchestration", {
+  if (!isReviewWorkspace(workspace)) server.registerTool("complete_autonomous_orchestration", {
     title: "Disabled legacy autonomous completion endpoint",
     description: "Legacy compatibility endpoint; autonomous authoritative completion disabled. Always rejects before reading CURRENT_REVIEW, consuming approval, preflight or engine calls. Dashboard-local approval is not CT700 Human Approval; RC-02 bound request required.",
     inputSchema: z.object({ task_id: z.string().regex(/^rpc-[a-f0-9]{32}$/), review_result: z.literal("PASS"),

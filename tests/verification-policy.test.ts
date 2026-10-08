@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, symlinkSync, linkSync, realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 // These repository-local JS modules are deliberately outside production src/.
@@ -337,8 +337,12 @@ describe("FULL fixed sequential shards and exact coverage proof", () => {
         if (mode === "relative name") report.testResults[0].name = "tests/verification-policy.test.ts";
         if (mode === "path escape") report.testResults[0].name = resolve(repositoryRoot, "../outside.test.ts");
         if (mode === "case alias") report.testResults[0].name = report.testResults[0].name.replace("tests", "TESTS");
-        if (mode === "root case alias") report.testResults[0].name = report.testResults[0].name.replace("codex-with-chatgpt", "CODEX-WITH-CHATGPT");
-        if (mode === "drive case alias") report.testResults[0].name = report.testResults[0].name.replace(process.platform === "win32" ? /^[A-Z]/ : /work/, s => s === s.toUpperCase() ? s.toLowerCase() : s.toUpperCase());
+        if (mode === "root case alias") {
+          const name = basename(resolve(repositoryRoot));
+          report.testResults[0].name = report.testResults[0].name.replace(name,
+            name.replace(/[a-z]/i, s => s === s.toUpperCase() ? s.toLowerCase() : s.toUpperCase()));
+        }
+        if (mode === "drive case alias") report.testResults[0].name = report.testResults[0].name.replace(/[a-z]/i, s => s === s.toUpperCase() ? s.toLowerCase() : s.toUpperCase());
         return report;
       });
       const result = await verify(["FULL"], execute, noContainment);

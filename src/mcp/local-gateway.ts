@@ -6,11 +6,12 @@ import { fileURLToPath } from "node:url";
 import { IgnoreRules } from "../workspace/ignore.js";
 import { reviewProfiles, reviewWorkspaces } from "./review-profiles.js";
 import { autonomousObservation } from "./autonomous-gateway.js";
+import { deployment } from "../config/deployment.js";
 
-export const REVIEW_ROOT = "C:\\work\\ai-orchestration-review";
+export const REVIEW_ROOT = deployment.reviewRoot;
 export const REPOS = {
-  "pve-doc": "C:\\work\\pve-doc",
-  "ai-orchestration-config": "C:\\work\\ai-orchestration-config",
+  "pve-doc": deployment.pveDocsRoot,
+  "ai-orchestration-config": deployment.configRoot,
 } as const;
 /** Filesystem locations for legacy read-only lookup. Logical identities remain fixed in REPOS. */
 export type LedgerReadRoots = Readonly<Record<keyof typeof REPOS, string>>;

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +7,15 @@ import { execFileSync } from "node:child_process";
 import { BoundedTasks, type Contract, type Verifier, type Worker } from "../src/mcp/bounded-task.js";
 import { boundedFinalizationRoot, productionVerificationPlan } from "../src/mcp/server.js";
 import { prepareBoundedCommit, commitBoundedPatch, getBoundedCommitStatus } from "../src/mcp/typed-actions.js";
+import { deployment } from "../src/config/deployment.js";
+
+vi.mock("../src/config/deployment.js", async importOriginal => {
+  const actual = await importOriginal<typeof import("../src/config/deployment.js")>();
+  const fs = await import("node:fs"), os = await import("node:os"), path = await import("node:path");
+  const executionRoot = fs.mkdtempSync(path.join(os.tmpdir(), "profile-placement-"));
+  return { ...actual, deployment: { ...actual.deployment, executionRoot } };
+});
+afterAll(() => fs.rmSync(deployment.executionRoot, { recursive: true, force: true }));
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
@@ -111,9 +120,9 @@ describe("bounded authority-transport profile", () => {
   });
 
   it("pins finalization to the fixed bridge root", () => {
-    const bridge = "C:\\work\\codex-with-chatgpt";
+    const bridge = deployment.executionRoot;
     expect(boundedFinalizationRoot(bridge, alias)).toBe(bridge);
-    expect(boundedFinalizationRoot("C:\\work\\other", alias)).toBeNull();
+    expect(boundedFinalizationRoot(`${bridge}-other`, alias)).toBeNull();
     expect(boundedFinalizationRoot(bridge, `${alias}-other`)).toBeNull();
   });
 
@@ -260,9 +269,9 @@ describe("bounded CT700 peer gateway profile", () => {
   });
 
   it("pins the alias to the bridge finalization root", () => {
-    const bridge = "C:\\work\\codex-with-chatgpt";
+    const bridge = deployment.executionRoot;
     expect(boundedFinalizationRoot(bridge, alias)).toBe(bridge);
-    expect(boundedFinalizationRoot("C:\\work\\other", alias)).toBeNull();
+    expect(boundedFinalizationRoot(`${bridge}-other`, alias)).toBeNull();
     expect(boundedFinalizationRoot(bridge, `${alias}-other`)).toBeNull();
   });
 
