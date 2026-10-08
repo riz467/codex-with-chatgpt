@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { ApproverStore } from '../src/approver-service/storage.js';
-import { createProductionApprover, validateCt701InboundPeerIdentity } from '../src/approver-service/production.js';
+import { compileCt700PeerMtlsOptions, createProductionApprover, validateCt701InboundPeerIdentity } from '../src/approver-service/production.js';
 import { presentationHash, type TrustedTypedActionPresentation, type TrustedTypedActionPresentationVerifier } from '../src/approver-service/presentation.js';
 import { actionBindingFields, type TypedActionApprovalRequest } from '../src/typed-action-approval/contract.js';
 import { verifyTypedActionApproval } from '../src/typed-action-approval/verifier.js';
@@ -487,5 +487,48 @@ describe('CT701 inbound offline client identity constraints (not TLS chain verif
     const symbolic = { ...settings, [Symbol('extra')]: true };
     expect(validateCt701InboundPeerIdentity(der, hidden)).toBe(false);
     expect(validateCt701InboundPeerIdentity(der, symbolic)).toBe(false);
+  });
+});
+
+// Pure options compilation: dummy bytes are never parsed as certificates or used to create a server.
+describe('CT700 offline peer mTLS options compiler', () => {
+  const host = () => ({ serverCertificate: 'dummy cert', serverPrivateKey: 'dummy key',
+    trustedClientCa: 'dummy CA', expectedClientSpkiSha256: 'a'.repeat(64), expectedUriSanRole: 'urn:ct701:client' });
+  it('requires explicit CA and returns only frozen TLS 1.3 mutual-auth options, not a server', () => {
+    const options = compileCt700PeerMtlsOptions(host());
+    expect(options).toEqual({ minVersion: 'TLSv1.3', maxVersion: 'TLSv1.3', requestCert: true,
+      rejectUnauthorized: true, ca: 'dummy CA', cert: 'dummy cert', key: 'dummy key' });
+    expect(Reflect.ownKeys(options).sort()).toEqual(['ca', 'cert', 'key', 'maxVersion', 'minVersion', 'rejectUnauthorized', 'requestCert'].sort());
+    expect(Object.isFrozen(options)).toBe(true);
+    expect('listen' in options).toBe(false);
+  });
+  it('rejects missing, injected, hidden, symbolic, accessor and non-plain host settings', () => {
+    const { trustedClientCa: _ca, ...withoutCa } = host();
+    const hidden = Object.defineProperty(host(), 'extra', { value: true });
+    const accessor = Object.defineProperty(host(), 'serverCertificate', { get: () => 'dummy cert' });
+    const nonenumerable = Object.defineProperty(host(), 'trustedClientCa', { value: 'dummy CA', enumerable: false });
+    for (const input of [null, [], Object.create(null), withoutCa, { ...host(), ca: 'injected' },
+      { ...host(), headers: {} }, { ...host(), [Symbol('injected')]: true }, hidden, accessor, nonenumerable,
+      Object.assign(Object.create({ inherited: true }), host()),
+      { ...host(), trustedClientCa: '' }, { ...host(), serverPrivateKey: 'x'.repeat(65537) },
+      { ...host(), serverCertificate: Buffer.alloc(0) },
+      { ...host(), expectedClientSpkiSha256: 'A'.repeat(64) },
+      { ...host(), expectedUriSanRole: 'https://example.test' },
+      { ...host(), expectedUriSanRole: 'urn:a:client' }]) {
+      expect(() => compileCt700PeerMtlsOptions(input)).toThrow('INVALID_CT700_PEER_MTLS_CONFIG');
+    }
+  });
+  it('snapshots Buffer material without freezing the caller or the copies', () => {
+    const cert = Buffer.from('cert'), key = Buffer.from('key'), ca = Buffer.from('CA');
+    const options = compileCt700PeerMtlsOptions({ ...host(), serverCertificate: cert,
+      serverPrivateKey: key, trustedClientCa: ca });
+    cert.fill(0); key.fill(0); ca.fill(0);
+    expect(options.cert).toEqual(Buffer.from('cert'));
+    expect(options.key).toEqual(Buffer.from('key'));
+    expect(options.ca).toEqual(Buffer.from('CA'));
+    expect(options.cert).not.toBe(cert);
+    expect(options.key).not.toBe(key);
+    expect(options.ca).not.toBe(ca);
+    expect(Object.isFrozen(options.cert)).toBe(false);
   });
 });

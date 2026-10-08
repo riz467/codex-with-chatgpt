@@ -1,5 +1,6 @@
 import express from 'express';
 import { request as httpRequest } from 'node:http';
+import type * as https from 'node:https';
 import { createHash, randomBytes, timingSafeEqual, X509Certificate, type KeyObject } from 'node:crypto';
 import { createApproverService, type ApproverConfig } from './server.js';
 import { ApproverStore } from './storage.js';
@@ -8,6 +9,37 @@ import { idSchema } from '../typed-action-approval/contract.js';
 
 export const humanPort = 48768;
 export const peerPort = 48769;
+/** Compile host-owned TLS material offline; peer authorization belongs to the later verified server factory. */
+export function compileCt700PeerMtlsOptions(hostConfig: unknown): https.ServerOptions {
+  const invalid = () => { throw Error('INVALID_CT700_PEER_MTLS_CONFIG'); };
+  if (hostConfig === null || typeof hostConfig !== 'object' ||
+      Object.getPrototypeOf(hostConfig) !== Object.prototype) return invalid();
+  const fields = ['serverCertificate', 'serverPrivateKey', 'trustedClientCa',
+    'expectedClientSpkiSha256', 'expectedUriSanRole'] as const;
+  const keys = Reflect.ownKeys(hostConfig);
+  if (keys.length !== fields.length || keys.some(key => typeof key !== 'string' || !fields.includes(key as typeof fields[number])))
+    return invalid();
+  const values: Record<string, unknown> = {};
+  for (const field of fields) {
+    const descriptor = Object.getOwnPropertyDescriptor(hostConfig, field);
+    if (!descriptor?.enumerable || !('value' in descriptor)) return invalid();
+    values[field] = descriptor.value;
+  }
+  const material = (value: unknown): string | Buffer => {
+    if (Buffer.isBuffer(value) && value.length > 0 && value.length <= 64 * 1024) return Buffer.from(value);
+    if (typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= 64 * 1024) return value;
+    return invalid();
+  };
+  if (typeof values.expectedClientSpkiSha256 !== 'string' ||
+      !/^[0-9a-f]{64}$/.test(values.expectedClientSpkiSha256) ||
+      typeof values.expectedUriSanRole !== 'string' ||
+      !/^urn:[a-z0-9][a-z0-9-]{0,30}[a-z0-9]:[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$/.test(values.expectedUriSanRole))
+    return invalid();
+  return Object.freeze({ minVersion: 'TLSv1.3', maxVersion: 'TLSv1.3', requestCert: true,
+    rejectUnauthorized: true, ca: material(values.trustedClientCa),
+    cert: material(values.serverCertificate), key: material(values.serverPrivateKey) });
+}
+
 /** Offline identity constraints only. This does not verify a TLS client chain or socket authorization;
  * Stage 2B-2b must supply verified TLS peer authentication before using this predicate.
  */
