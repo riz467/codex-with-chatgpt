@@ -16,7 +16,6 @@ export function createDashboard(collector = new Collector(), fixtureApprovalEnab
   campaigns = getProductionBoundedCampaigns) {
   const app = express();
   if (startBoundedTask === startProductionBoundedTask) runProductionBoundedCampaigns();
-  app.get("/api/bounded/campaigns", (_req, res) => res.json(campaigns()));
   app.disable("x-powered-by");
   const approvalSessions = new Map<string, { csrf: string; expires: number }>();
   const localRequest = (req: express.Request) => {
@@ -26,6 +25,16 @@ export function createDashboard(collector = new Collector(), fixtureApprovalEnab
       (address === "127.0.0.1" || address === "::ffff:127.0.0.1");
   };
   app.use((_req, res, next) => { res.set("Cache-Control", "no-store"); res.set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"); res.set("X-Content-Type-Options", "nosniff"); next(); });
+  app.get("/api/bounded/campaigns", (req, res) => {
+    if (!localRequest(req)) { res.status(403).json({ error: "LOCAL_REQUEST_REQUIRED" }); return; }
+    try {
+      res.json(campaigns().map(c => ({ campaign_id: c.campaign_id, state: c.state,
+        current_task: c.current_task, task_ids: c.task_ids, stop_reason: c.stop_reason,
+        human_action: c.human_action, impact_paths: c.impact_paths,
+        started_at: "started_at" in c ? c.started_at : null,
+        deadline: "deadline" in c ? c.deadline : null, authoritative_done: false })));
+    } catch { res.status(503).json({ error: "CAMPAIGN_STATUS_UNAVAILABLE" }); }
+  });
   app.get("/", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
   app.get("/app.js", (_req, res) => res.sendFile(path.join(publicDir, "app.js")));
   app.get("/labels.js", (_req, res) => res.sendFile(path.join(publicDir, "labels.js")));

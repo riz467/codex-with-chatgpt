@@ -298,10 +298,10 @@ describe("dashboard read-only evidence", () => {
 describe("local bounded start boundary", () => {
   const task_id = `bounded-${"a".repeat(32)}`, contract_sha256 = "b".repeat(64);
   const body = { repo: "codex-with-chatgpt", goal: "Change the dashboard", edit_paths: ["src/dashboard/server.ts"], acceptance_criteria: ["Tests pass"] };
-  async function setup() {
+  async function setup(campaigns?: Parameters<typeof createDashboard>[5]) {
     let time = 1000;
     const start = vi.fn((_contract: unknown) => ({ task_id, contract_sha256, secret: "private" }));
-    const server = createServer(createDashboard(fixture().collector, false, undefined, start, () => time)); servers.push(server);
+    const server = createServer(createDashboard(fixture().collector, false, undefined, start, () => time, campaigns)); servers.push(server);
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     const address = server.address(); if (!address || typeof address === "string") throw new Error("No port");
     const base = `http://127.0.0.1:${address.port}`;
@@ -355,6 +355,23 @@ describe("local bounded start boundary", () => {
     expect((await post(expired)).status).toBe(403);
     expect((await fetch(base + "/api/bounded/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).status).toBe(403);
     expect(start).toHaveBeenCalledTimes(1);
+  });
+  it("projects only campaign status metadata, excluding raw goals and acceptance criteria", async () => {
+    const { base, start } = await setup(() => [{ campaign_id: task_id, state: "RUNNING",
+      current_task: task_id, task_ids: [task_id], stop_reason: null, human_action: null,
+      impact_paths: ["src/dashboard/server.ts"], started_at: "2026-10-08T00:00:00Z", deadline: 1234,
+      contract: { goal: "PRIVATE_GOAL", acceptance_criteria: ["PRIVATE_CRITERION"] },
+      contract_digest: "PRIVATE_DIGEST", failures: ["PRIVATE_FAILURE"] } as any]);
+    const response = await fetch(base + "/api/bounded/campaigns");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    const result = await response.json();
+    expect(result).toEqual([{ campaign_id: task_id, state: "RUNNING", current_task: task_id,
+      task_ids: [task_id], stop_reason: null, human_action: null, impact_paths: ["src/dashboard/server.ts"],
+      started_at: "2026-10-08T00:00:00Z", deadline: 1234, authoritative_done: false }]);
+    expect(JSON.stringify(result)).not.toContain("PRIVATE");
+    expect(start).not.toHaveBeenCalled();
   });
   it("rejects malformed bodies, paths and limits without starting", async () => {
     const { start, session, post } = await setup();

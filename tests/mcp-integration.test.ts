@@ -643,6 +643,8 @@ describe("bounded semantic lifecycle over MCP", () => {
   it("keeps command and approval authority outside the lifecycle tools", async () => {
     const tools = (await localClient.listTools()).tools;
     const start = tools.find((tool) => tool.name === "start_bounded_opencode_task")!;
+    expect(start.description).toContain("local commit automatically");
+    expect(start.description).not.toContain("does not commit");
     expect(Object.keys(start.inputSchema.properties ?? {}).sort()).toEqual(Object.keys(input).sort());
     for (const extra of [{ command: "git push" }, { deploy: true }, { passkey: true },
       { done_approved: true }, { production_approval: true }]) {

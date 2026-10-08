@@ -593,7 +593,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
   const boundedId = z.string().regex(/^bounded-[a-f0-9]{32}$/);
   server.registerTool("start_bounded_opencode_task", {
     title: "Start bounded OpenCode task",
-    description: "Fixed fixture-text and codex-with-chatgpt Dashboard/control-plane/authority-transport/CT700 peer gateway TypeScript profiles; Codex disabled. TypeScript profiles run fixed typecheck and Vitest regression. This does not commit, push or complete legacy DONE.",
+    description: "Starts a bounded autonomous campaign for fixed fixture-text or codex-with-chatgpt TypeScript profiles; Codex disabled. After verification and independent review, it may create a local commit automatically. No push, deployment, approval or authoritative DONE is granted.",
     inputSchema: z.object({ repo: z.enum(["autonomous-fixture", "codex-with-chatgpt", "codex-with-chatgpt-control-plane", "codex-with-chatgpt-authority-transport", "codex-with-chatgpt-ct700-peer-gateway"]), goal: z.string().min(1).max(2000),
       edit_paths: z.array(z.string()).min(1).max(3), acceptance_criteria: z.array(z.string()).min(1).max(6),
       task_kind: z.literal("text_change"), execution_profile: z.enum(["tracked_utf8_text", "tracked_typescript_dashboard", "tracked_typescript_control_plane", "tracked_typescript_authority_transport", "tracked_typescript_ct700_peer_gateway"]), worker: z.literal("opencode"),
