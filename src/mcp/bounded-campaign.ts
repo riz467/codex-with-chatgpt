@@ -8,6 +8,7 @@ import { acquireProcessLock, ProcessLockInspectionRequired } from "./bounded-pro
 const idPattern = /^bounded-[a-f0-9]{32}$/;
 const newId = () => `bounded-${randomUUID().replaceAll("-", "")}`;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const inspectionAction = "Inspect the task ledger and affected paths; resolve the reported cause before authorizing a new campaign. Do not manually replay commit or delete unknown locks.";
 export type Campaign = {
   version: 1; campaign_id: string; contract: Contract; contract_digest: string;
   task_ids: string[]; current_task: string; pending_task: string | null;
@@ -37,6 +38,17 @@ export class BoundedCampaigns {
         !idPattern.test(c.current_task) || (c.pending_task !== null && !idPattern.test(c.pending_task)) ||
         !Number.isFinite(c.deadline) || c.deadline > Date.parse(c.started_at) + 45 * 60_000)
       throw new Error("CAMPAIGN_LEDGER_INVALID");
+    if (c.state === "COMMITTED" || c.state === "STOPPED") return c;
+    const inspection = `${this.file(id)}.inspection`;
+    if (fs.existsSync(inspection)) {
+      const reason = JSON.parse(fs.readFileSync(inspection, "utf8")).reason;
+      if (typeof reason !== "string") throw new Error("CAMPAIGN_LEDGER_INVALID");
+      return { ...c, state: "STOPPED", stop_reason: reason, human_action: inspectionAction };
+    }
+    // A contending observer can display an expired budget without overwriting
+    // the controller owner's newer ledger. Execution has its own deadline guards.
+    if (Date.now() >= c.deadline) return { ...c, state: "STOPPED",
+      stop_reason: "CAMPAIGN_TIME_BUDGET_EXHAUSTED", human_action: inspectionAction };
     return c;
   }
   list() {
@@ -57,17 +69,20 @@ export class BoundedCampaigns {
       stop_reason: null, human_action: null, impact_paths: [...contract.edit_paths] };
     // Write intent before task creation; restart uses this same ID, never a fresh one.
     c.deadline = Date.parse(c.started_at) + 45 * 60_000;
-    this.save(c);
+    const release = acquireProcessLock(safePath(this.root, `${id}.controller.lock`));
+    if (!release) throw new Error("CAMPAIGN_START_LOCK_UNAVAILABLE");
     try {
+      this.save(c);
       const started = this.tasks.start(contract, id, undefined, c.deadline);
       c.task_ids.push(id); c.pending_task = null; this.save(c);
       this.lifecycle.runBoundedLifecycle(id);
       return started;
     } catch (error) { this.stop(c, "START_FAILED"); throw error; }
+    finally { release(); }
   }
   private stop(c: Campaign, reason: string) {
     c.state = "STOPPED"; c.stop_reason = reason;
-    c.human_action = "Inspect the task ledger and affected paths; resolve the reported cause before authorizing a new campaign. Do not manually replay commit or delete unknown locks.";
+    c.human_action = inspectionAction;
     this.save(c);
   }
   tick(id: string) {
@@ -77,10 +92,7 @@ export class BoundedCampaigns {
       c = this.status(id);
       if (c.state === "COMMITTED" || c.state === "STOPPED" && c.stop_reason !== "CAMPAIGN_TIME_BUDGET_EXHAUSTED") return;
       release = acquireProcessLock(safePath(this.root, `${id}.controller.lock`));
-      if (!release) {
-        if (Date.now() >= c.deadline) this.stop(c, "CAMPAIGN_TIME_BUDGET_EXHAUSTED");
-        return;
-      }
+      if (!release) return;
       c = this.status(id);
       if (c.state === "COMMITTED" || c.state === "STOPPED" && c.stop_reason !== "CAMPAIGN_TIME_BUDGET_EXHAUSTED") return;
       // Project an existing verified receipt even after downtime outlasts the
@@ -147,7 +159,16 @@ export class BoundedCampaigns {
       c.pending_task = newId(); this.save(c);
       // A subsequent tick consumes the persisted handoff intent, including after restart.
     } catch (error) {
-      if (c) this.stop(c, error instanceof GatewayError ? error.code : error instanceof ProcessLockInspectionRequired ? error.message : "CAMPAIGN_RECONCILIATION_FAILED");
+      if (c) {
+        const reason = error instanceof GatewayError ? error.code : error instanceof ProcessLockInspectionRequired ? error.message : "CAMPAIGN_RECONCILIATION_FAILED";
+        if (release) this.stop(c, reason);
+        else {
+          // An inspection sidecar never overwrites the owner's campaign ledger;
+          // a concurrently committed ledger takes precedence in status().
+          try { fs.writeFileSync(`${this.file(id)}.inspection`, JSON.stringify({ reason }), { flag: "wx" }); }
+          catch { /* Preserve any existing inspection record and the controller ledger. */ }
+        }
+      }
     } finally { release?.(); }
   }
   run() {

@@ -200,3 +200,22 @@ it("stops a pending review whose revision evidence is missing", () => {
   expect(idle.status(started.task_id)).toMatchObject({ state: "STOPPED", stop_reason: "REVIEW_EVIDENCE_MISSING" });
   expect(f.counts()).toEqual({ proposals: 0, reviews: 0, finalizations: 0 });
 }, 30000);
+it("never overwrites a newer committed ledger when controller acquisition contends", async () => {
+  const f = fixture(0), started = f.campaigns.start(f.contract);
+  const committed = await complete(f.campaigns, started.task_id);
+  const file = path.join(f.root, "campaigns", `${started.task_id}.json`);
+  fs.writeFileSync(file, JSON.stringify({ ...committed, state: "RUNNING" }));
+  const lock = path.join(f.root, "campaigns", `${started.task_id}.controller.lock`);
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: process.pid, nonce: "fixture" }));
+  vi.spyOn(Date, "now").mockReturnValue(committed.deadline + 1);
+  const mkdir = fs.mkdirSync;
+  vi.spyOn(fs, "mkdirSync").mockImplementation(((target: fs.PathLike, options: any) => {
+    if (String(target) === `${lock}.gate`) fs.writeFileSync(file, JSON.stringify(committed));
+    return mkdir(target, options);
+  }) as typeof fs.mkdirSync);
+  f.campaigns.tick(started.task_id);
+  expect(JSON.parse(fs.readFileSync(file, "utf8")).state).toBe("COMMITTED");
+  expect(f.campaigns.status(started.task_id).state).toBe("COMMITTED");
+  expect(f.counts()).toEqual({ proposals: 1, reviews: 1, finalizations: 1 });
+}, 30000);
