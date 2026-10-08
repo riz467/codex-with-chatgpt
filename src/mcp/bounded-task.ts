@@ -623,6 +623,41 @@ export class BoundedTasks {
     const bytes = fs.readFileSync(safePath(this.dir(id), name)); const page = bytes.subarray(offset, offset + 8192);
     return { task_id: id, revision, manifest_sha256: bundle.manifest_sha256, file_sha256: entry.sha256,
       offset, next_offset: offset + page.length < bytes.length ? offset + page.length : null, content_base64: page.toString("base64") }; }
+  verifiedExhaustedWorkspaceDiff(id: string): boolean {
+    try {
+      const task = this.load(id), rev = task.revisions.at(-1);
+      if (task.state !== "ESCALATE" || task.stop_reason !== "REVISION_BUDGET_EXHAUSTED" ||
+          this.executing(id) || fs.existsSync(safePath(this.dir(id), "review.lock")) ||
+          !rev || !Array.isArray(task.revisions) ||
+          !Number.isInteger(rev.revision) || rev.revision !== task.revisions.length ||
+          rev.revision < 1 || rev.revision > task.contract.max_revisions ||
+          !Number.isFinite(task.worker_time_ms) || task.worker_time_ms < 0 ||
+          (rev.revision < task.contract.max_revisions && task.worker_time_ms < task.contract.timeout_ms) ||
+          rev.verify?.passed !== true || rev.verify.profile !== task.contract.execution_profile ||
+          !rev.review || !Array.isArray(rev.files)) return false;
+      const review = rev.review;
+      if (Object.keys(review).sort().join() !== "contract_sha256,findings,manifest_sha256,review_id,reviewer,revision,task_id,verdict" ||
+          !/^review-[a-f0-9-]{36}$/.test(review.review_id) ||
+          review.task_id !== id || review.revision !== rev.revision ||
+          review.contract_sha256 !== task.contract_sha256 || review.manifest_sha256 !== rev.manifest_sha256 ||
+          (review.reviewer !== "chatgpt" && review.reviewer !== "opencode-semantic") ||
+          review.verdict !== "NEEDS_WORK" || !Array.isArray(review.findings) || !review.findings.length ||
+          review.findings.some(f => typeof f !== "string" || f.length > 1000)) return false;
+      const dir = this.dir(id), prefix = `revision-${rev.revision}`;
+      if (fs.readFileSync(safePath(dir, `${prefix}-review.json`), "utf8") !== json(review)) return false;
+      const bundle = this.artifacts(id, rev.revision);
+      if (bundle.manifest_sha256 !== rev.manifest_sha256 || bundle.verify?.passed !== true) return false;
+      const patches = bundle.files.filter(f => f.name === `${prefix}-diff.patch`);
+      if (patches.length !== 1 || !Number.isInteger(patches[0].size) ||
+          patches[0].size < 1 || patches[0].size > 65536) return false;
+      const sealed = fs.readFileSync(safePath(dir, patches[0].name));
+      const repo = this.repos[task.contract.repo];
+      if (git(repo, "rev-parse", "HEAD") !== task.baseline_head ||
+          git(repo, "ls-files", "--others", "--exclude-standard").split("\n").filter(Boolean).length) return false;
+      const current = gitPatch(repo);
+      return current.length === 0 || current.equals(sealed);
+    } catch { return false; }
+  }
   acceptedSnapshot(id: string) {
     const { reviewer: _reviewer, ...snapshot } = this.reviewedSnapshot(id, false);
     return snapshot;
