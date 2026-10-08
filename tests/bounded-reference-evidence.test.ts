@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,7 +9,7 @@ import { reviewWithReferences } from "../src/mcp/bounded-semantic-review.js";
 import type { semanticSession } from "../src/mcp/semantic-session.js";
 
 const roots: string[] = [];
-afterEach(() => roots.splice(0).forEach(root => fs.rmSync(root, { recursive: true, force: true })));
+afterEach(() => { vi.restoreAllMocks(); roots.splice(0).forEach(root => fs.rmSync(root, { recursive: true, force: true })); });
 async function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "reference-evidence-")); roots.push(root);
   const repo = path.join(root, "repo"); fs.mkdirSync(path.join(repo, "src/mcp"), { recursive: true });
@@ -94,4 +94,23 @@ it.each([false, true])("durably consumes both review claims after a timeout (bot
   else expect((await review()).decision.review_result).toBe("PASS");
   expect(calls).toBe(2);
   expect(f.tasks.status(f.id).revisions).toHaveLength(1);
+});
+it.each(["missing", "truncated"])("cannot accept PASS when required edit-path evidence is %s", async kind => {
+  const f = await fixture(), evidence = f.tasks.referenceEvidence(f.id, 1);
+  if (kind === "missing") evidence.references = evidence.references.filter(ref => ref.path !== "src/mcp/server.ts");
+  evidence.unavailable.push({ path: "src/mcp/server.ts", reason: kind === "missing" ? "REFERENCE_UNAVAILABLE" : "REFERENCE_TRUNCATED" });
+  vi.spyOn(f.tasks, "referenceEvidence").mockReturnValue(evidence);
+  let calls = 0;
+  const reviewer: typeof semanticSession = async () => {
+    calls++;
+    return { decision: { review_result: "PASS", reason_category: "GOAL_SATISFIED", summary: "Reviewer proposal",
+      evidence_refs: [1, 2, 3, 4], unresolved_issues: [] }, session_id: "ses_independent", reviewer_profile: "fixture",
+      reviewer_agent_sha256: "0".repeat(64), model: null, provider: null, usage: null };
+  };
+  const review = () => reviewWithReferences(f.tasks, f.id, 1, "contract", "ses_fixture", reviewer);
+  await expect(review()).rejects.toThrow("SEMANTIC_EVIDENCE_EXHAUSTED");
+  await expect(review()).rejects.toThrow("SEMANTIC_EVIDENCE_EXHAUSTED");
+  expect(calls).toBe(2);
+  expect(f.tasks.status(f.id).state).toBe("REVIEW_PENDING");
+  expect(f.tasks.status(f.id).revisions[0].review).toBeUndefined();
 });

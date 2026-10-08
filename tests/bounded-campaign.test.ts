@@ -171,6 +171,12 @@ it.each([["lifecycle", "unknown"], ["lifecycle", "live"], ["controller", "unknow
     stop_reason: owner === "unknown" ? "PROCESS_LOCK_OWNER_REQUIRES_INSPECTION" : "CAMPAIGN_TIME_BUDGET_EXHAUSTED" });
   expect(fs.existsSync(lock)).toBe(true);
   expect(f.counts()).toEqual({ proposals: 1, reviews: 1, finalizations: 1 });
+  if (owner === "live") {
+    fs.rmSync(lock, { recursive: true }); // the fixture owner releases after committing
+    f.campaigns.tick(started.task_id);
+    expect(f.campaigns.status(started.task_id)).toMatchObject({ state: "COMMITTED", stop_reason: null, human_action: null });
+    expect(f.counts()).toEqual({ proposals: 1, reviews: 1, finalizations: 1 });
+  }
 }, 30000);
 it("projects invalid campaign ledgers for inspection without rewriting or resuming them", () => {
   const f = fixture(0);

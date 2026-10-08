@@ -75,14 +75,14 @@ export class BoundedCampaigns {
     let c: Campaign | undefined;
     try {
       c = this.status(id);
-      if (c.state === "COMMITTED" || c.state === "STOPPED") return;
+      if (c.state === "COMMITTED" || c.state === "STOPPED" && c.stop_reason !== "CAMPAIGN_TIME_BUDGET_EXHAUSTED") return;
       release = acquireProcessLock(safePath(this.root, `${id}.controller.lock`));
       if (!release) {
         if (Date.now() >= c.deadline) this.stop(c, "CAMPAIGN_TIME_BUDGET_EXHAUSTED");
         return;
       }
       c = this.status(id);
-      if (c.state === "COMMITTED" || c.state === "STOPPED") return;
+      if (c.state === "COMMITTED" || c.state === "STOPPED" && c.stop_reason !== "CAMPAIGN_TIME_BUDGET_EXHAUSTED") return;
       // Project an existing verified receipt even after downtime outlasts the
       // execution budget. This path never starts work or creates a new commit.
       if (!c.pending_task && this.tasks.status(c.current_task).state === "REVIEW_ACCEPTED") {
@@ -92,9 +92,14 @@ export class BoundedCampaigns {
           return;
         }
         try {
-          if (this.committed(c.current_task)) { c.state = "COMMITTED"; this.save(c); return; }
+          if (this.committed(c.current_task)) {
+            c.state = "COMMITTED"; c.stop_reason = null; c.human_action = null; this.save(c); return;
+          }
         } finally { unlock(); }
       }
+      // A deadline-stopped campaign may project a commit that another owner
+      // completed, but must never resume execution, review, recovery or commit.
+      if (c.state === "STOPPED") return;
       if (Date.now() >= c.deadline) { this.stop(c, "CAMPAIGN_TIME_BUDGET_EXHAUSTED"); return; }
       if (this.lifecycle.lifecycleRunning.has(c.current_task)) return;
       // Another Dashboard/Gateway process may own this task's full lifecycle.
