@@ -229,11 +229,14 @@ program
   .description("Run the bridge in the foreground (internal)")
   .requiredOption("--workspace <path>")
   .option("--port <port>", "preferred port")
-  .action(async (opts: { workspace: string; port?: string }) => {
+  .option("--control-plane-staging", "Linux health-only staging; no auth, management or MCP operations", false)
+  .action(async (opts: { workspace: string; port?: string; controlPlaneStaging?: boolean }) => {
     const logger = new Logger({ name: "bridge", console: true });
     const bridge = await startBridge({
       workspaceRoot: resolveWorkspace(opts.workspace),
       port: opts.port ? parseInt(opts.port, 10) : undefined,
+      controlPlaneStaging: opts.controlPlaneStaging,
+      persistRuntime: opts.controlPlaneStaging ? false : undefined,
       logger,
     });
     const shutdown = (): void => {

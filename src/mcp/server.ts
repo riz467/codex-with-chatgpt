@@ -571,6 +571,7 @@ export function startProductionBoundedTask(input: Parameters<BoundedTasks["start
 
 const productionBoundedCampaigns = new BoundedCampaigns(path.join(getStateDir(), "bounded-campaigns"),
   boundedTasks, productionBoundedLifecycle, id => {
+    assertProductionExecution();
     boundedTasks.withRecoveryLock(id, task => {
       const root = boundedRepos[task.contract.repo];
       if (!boundedTasks.verifiedExhaustedWorkspaceDiff(id) && !boundedTasks.verifiedFailedWorkspaceDiff(id)) throw new GatewayError("RECOVERY_NOT_ALLOWED", "Evidence mismatch");
@@ -651,6 +652,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     }, async (args, extra) => {
       const denied = requireScope(extra.authInfo, "orchestration.start"); if (denied) return denied;
       try {
+        assertProductionExecution();
         const task = tasks.status(args.task_id);
         const root = boundedRepos[task.contract.repo];
         if (!root || !sameDeploymentPath(root, workspace.root)) {
@@ -721,6 +723,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     if (isReviewWorkspace(workspace) || !ctx.boundedReviewerClientId ||
         extra.authInfo.clientId !== ctx.boundedReviewerClientId) return fail("REVIEW_CLIENT_NOT_AUTHORIZED", "Reviewer client is not authorized on this workspace");
     try {
+      if (!ctx.boundedTasks) assertProductionExecution();
       const result = tasks.submitReview(args);
       const current = tasks.status(args.task_id);
       const latest = current.revisions.at(-1);

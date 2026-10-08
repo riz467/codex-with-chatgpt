@@ -7,6 +7,7 @@ import { GatewayError, safePath } from "../mcp/local-gateway.js";
 import { currentApprovalCandidate, issueHumanDoneApproval, type ApprovalObservation } from "../mcp/autonomous-approval.js";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { startProductionBoundedTask, getProductionBoundedCampaigns, runProductionBoundedCampaigns } from "../mcp/server.js";
+import { deployment } from "../config/deployment.js";
 
 const publicDir = fileURLToPath(new URL("./public/", import.meta.url));
 // Approval is disabled in the production entrypoint until an independent
@@ -114,6 +115,9 @@ export function createDashboard(collector = new Collector(), fixtureApprovalEnab
         (req.headers.origin === undefined || req.headers.origin === origin));
   };
   app.get("/api/bounded/start-session", (req, res) => {
+    if (startBoundedTask === startProductionBoundedTask && !deployment.localExecutionEnabled) {
+      res.status(503).json({ error: "EXECUTOR_NOT_CONNECTED" }); return;
+    }
     if (!boundedBrowser(req, false)) { res.status(403).json({ error: "LOCAL_BROWSER_REQUIRED" }); return; }
     const session = randomBytes(32).toString("hex"), csrf = randomBytes(32).toString("hex");
     const current = now();
@@ -123,6 +127,9 @@ export function createDashboard(collector = new Collector(), fixtureApprovalEnab
     res.set("X-Bounded-Start-CSRF", csrf).status(204).end();
   });
   app.post("/api/bounded/start", express.json({ limit: "16kb", type: "application/json", strict: true }), (req, res) => {
+    if (startBoundedTask === startProductionBoundedTask && !deployment.localExecutionEnabled) {
+      res.status(503).json({ error: "EXECUTOR_NOT_CONNECTED" }); return;
+    }
     if (!boundedBrowser(req, true)) { res.status(403).json({ error: "LOCAL_BROWSER_REQUIRED" }); return; }
     const cookie = req.headers.cookie?.match(/(?:^|;\s*)bounded_start_session=([a-f0-9]{64})(?:;|$)/)?.[1];
     const session = cookie ? boundedSessions.get(cookie) : undefined;

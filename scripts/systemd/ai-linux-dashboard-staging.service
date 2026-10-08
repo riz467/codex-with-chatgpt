@@ -1,0 +1,41 @@
+[Unit]
+Description=AI Linux Dashboard staging (Executor disconnected)
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ai-control-staging
+Group=ai-control-staging
+WorkingDirectory=/srv/ai-orchestration/codex-with-chatgpt
+ExecStart=/usr/bin/node /srv/ai-orchestration/codex-with-chatgpt/scripts/run-linux-dashboard.mjs
+Restart=on-failure
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=30
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+StateDirectory=ai-control-staging
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/ai-control-staging
+UMask=0077
+MemoryMax=384M
+TasksMax=48
+CPUQuota=50%
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

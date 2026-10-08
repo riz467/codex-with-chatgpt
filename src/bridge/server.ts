@@ -35,6 +35,8 @@ function tunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider
 
 export interface BridgeOptions {
   workspaceRoot: string;
+  /** Trusted service composition only: Linux staging exposes health, never management/auth/MCP. */
+  controlPlaneStaging?: boolean;
   port?: number;
   host?: string;
   logger?: Logger;
@@ -68,7 +70,7 @@ export interface Bridge {
 /**
  * Listen on the preferred port; on EADDRINUSE fall back to an ephemeral port.
  */
-function listen(app: express.Express, host: string, preferredPort: number): Promise<{ server: Server; port: number }> {
+function listen(app: express.Express, host: string, preferredPort: number, allowPortFallback = true): Promise<{ server: Server; port: number }> {
   return new Promise((resolve, reject) => {
     const tryListen = (port: number, allowFallback: boolean): void => {
       const server = app.listen(port, host);
@@ -85,13 +87,16 @@ function listen(app: express.Express, host: string, preferredPort: number): Prom
         }
       });
     };
-    tryListen(preferredPort, preferredPort !== 0);
+    tryListen(preferredPort, allowPortFallback && preferredPort !== 0);
   });
 }
 
 // The second parameter is trusted in-process composition, not serializable BridgeOptions/config.
 export async function startBridge(opts: BridgeOptions, orchestrationReads?: OrchestrationReadDependencies,
   repoResearchRoots?: RepoResearchRoots): Promise<Bridge> {
+  if (opts.controlPlaneStaging && (process.platform !== "linux" || opts.persistRuntime !== false)) {
+    throw new Error("CONTROL_PLANE_STAGING_REJECTED");
+  }
   const logger = opts.logger ?? nullLogger;
   const workspace = new Workspace(opts.workspaceRoot);
   const host = opts.host ?? DEFAULT_HOST;
@@ -109,6 +114,11 @@ export async function startBridge(opts: BridgeOptions, orchestrationReads?: Orch
   const app = express();
   app.set("trust proxy", true);
   app.disable("x-powered-by");
+  // Fail closed before OAuth, pairing, tunnel and MCP handlers, including GET-based flows.
+  if (opts.controlPlaneStaging) app.use((req, res, next) => {
+    if ((req.method === "GET" || req.method === "HEAD") && req.path === "/health") { next(); return; }
+    res.status(503).json({ error: "CONTROL_PLANE_STAGING_ONLY" });
+  });
 
   const getBaseUrl = (req: Request): string => {
     if (publicBaseUrl) return publicBaseUrl;
@@ -224,7 +234,7 @@ export async function startBridge(opts: BridgeOptions, orchestrationReads?: Orch
     }, 100);
   });
 
-  const { server, port } = await listen(app, host, opts.port ?? DEFAULT_PORT);
+  const { server, port } = await listen(app, host, opts.port ?? DEFAULT_PORT, !opts.controlPlaneStaging);
   const startedAt = new Date().toISOString();
   logger.info(`Bridge listening on ${host}:${port} for workspace ${workspace.name} (${workspace.id})`);
 
