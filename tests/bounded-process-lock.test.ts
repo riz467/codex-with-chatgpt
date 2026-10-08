@@ -19,7 +19,7 @@ it("does not steal a live process lock; reclaims it only after that process exit
     expect(acquireProcessLock(lock)).toBeNull();
     release!(); expect(fs.existsSync(lock)).toBe(false);
     fs.mkdirSync(lock);
-    expect(acquireProcessLock(lock)).toBeNull();
+    expect(() => acquireProcessLock(lock)).toThrow("PROCESS_LOCK_OWNER_REQUIRES_INSPECTION");
     expect(fs.existsSync(lock)).toBe(true);
   } finally { if (child.exitCode === null) child.kill(); }
 });

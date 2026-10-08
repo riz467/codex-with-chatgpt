@@ -156,3 +156,19 @@ it("does not create or stage a commit while reconciling an expired accepted task
   expect(f.git("diff", "--cached")).toBe("");
   expect(f.git("diff")).not.toBe("");
 }, 30000);
+it.each([["lifecycle", "unknown"], ["lifecycle", "live"], ["controller", "unknown"], ["controller", "live"]])(
+  "bounds accepted-task reconciliation with a %s lock and %s owner", async (kind, owner) => {
+  const f = fixture(0), started = f.campaigns.start(f.contract);
+  const completed = await complete(f.campaigns, started.task_id);
+  fs.writeFileSync(path.join(f.root, "campaigns", `${started.task_id}.json`), JSON.stringify({ ...completed, state: "RUNNING" }));
+  const lock = kind === "lifecycle" ? path.join(f.root, "tasks", started.task_id, "lifecycle.lock")
+    : path.join(f.root, "campaigns", `${started.task_id}.controller.lock`);
+  fs.mkdirSync(lock);
+  if (owner === "live") fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: process.pid, nonce: "fixture" }));
+  vi.spyOn(Date, "now").mockReturnValue(completed.deadline + 1);
+  f.campaigns.tick(started.task_id);
+  expect(f.campaigns.status(started.task_id)).toMatchObject({ state: "STOPPED",
+    stop_reason: owner === "unknown" ? "PROCESS_LOCK_OWNER_REQUIRES_INSPECTION" : "CAMPAIGN_TIME_BUDGET_EXHAUSTED" });
+  expect(fs.existsSync(lock)).toBe(true);
+  expect(f.counts()).toEqual({ proposals: 1, reviews: 1, finalizations: 1 });
+}, 30000);

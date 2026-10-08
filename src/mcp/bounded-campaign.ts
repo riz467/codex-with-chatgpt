@@ -73,14 +73,20 @@ export class BoundedCampaigns {
       c = this.status(id);
       if (c.state === "COMMITTED" || c.state === "STOPPED") return;
       release = acquireProcessLock(safePath(this.root, `${id}.controller.lock`));
-      if (!release) return;
+      if (!release) {
+        if (Date.now() >= c.deadline) this.stop(c, "CAMPAIGN_TIME_BUDGET_EXHAUSTED");
+        return;
+      }
       c = this.status(id);
       if (c.state === "COMMITTED" || c.state === "STOPPED") return;
       // Project an existing verified receipt even after downtime outlasts the
       // execution budget. This path never starts work or creates a new commit.
       if (!c.pending_task && this.tasks.status(c.current_task).state === "REVIEW_ACCEPTED") {
         const unlock = this.tasks.lifecycleLock(c.current_task);
-        if (!unlock) return;
+        if (!unlock) {
+          if (Date.now() >= c.deadline) this.stop(c, "CAMPAIGN_TIME_BUDGET_EXHAUSTED");
+          return;
+        }
         try {
           if (this.committed(c.current_task)) { c.state = "COMMITTED"; this.save(c); return; }
         } finally { unlock(); }

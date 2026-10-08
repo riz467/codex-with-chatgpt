@@ -3,7 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 export class ProcessLockInspectionRequired extends Error {
-  constructor() { super("PROCESS_LOCK_GATE_REQUIRES_INSPECTION"); }
+  constructor(reason = "PROCESS_LOCK_GATE_REQUIRES_INSPECTION") { super(reason); }
 }
 
 // PID reuse and access-denied are conservatively treated as alive. Legacy/partial
@@ -23,8 +23,10 @@ export function acquireProcessLock(lock: string): (() => void) | null {
   try {
     if (fs.existsSync(lock)) {
       let prior: { pid: number };
-      try { prior = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")); } catch { return null; }
-      if (!Number.isSafeInteger(prior.pid) || prior.pid < 1) return null;
+      try { prior = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")); }
+      catch { throw new ProcessLockInspectionRequired("PROCESS_LOCK_OWNER_REQUIRES_INSPECTION"); }
+      if (!prior || !Number.isSafeInteger(prior.pid) || prior.pid < 1)
+        throw new ProcessLockInspectionRequired("PROCESS_LOCK_OWNER_REQUIRES_INSPECTION");
       try { process.kill(prior.pid, 0); return null; } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ESRCH") return null;
       }
