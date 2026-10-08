@@ -1,22 +1,10 @@
 // Explicit opt-in local fixture probe. Never points task execution at the main repo.
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { startFixtureDashboard } from "./autonomy-dashboard-process.mjs";
 
-if (process.argv.includes("--execute-task")) {
-  const id = process.argv[process.argv.indexOf("--execute-task") + 1];
-  const fixture = process.env.C2C_LIVE_FIXTURE!;
-  if (!fixture || !path.basename(fixture).startsWith("autonomy-live-") || !/^bounded-[a-f0-9]{32}$/.test(id)) throw new Error("INVALID_FIXTURE_CHILD");
-  process.env.C2C_STATE_DIR = path.join(fixture, "state");
-  const { BoundedTasks } = await import("../../src/mcp/bounded-task.js");
-  const tasks = new BoundedTasks({ "codex-with-chatgpt": fs.realpathSync.native(path.join(fixture, "repo")) }, undefined, undefined,
-    { "codex-with-chatgpt": "tracked_typescript_dashboard" });
-  await tasks.execute(id);
-  console.log("DURABLE_REVIEW_PENDING");
-  setInterval(() => {}, 1000);
-  await new Promise(() => {});
-}
 if (!process.argv.includes("--run")) throw new Error("Explicit --run required");
 const scenario = process.argv[process.argv.indexOf("--scenario") + 1] ?? "B";
 if (!["A", "B", "C", "D"].includes(scenario)) throw new Error("Explicit --scenario A|B|C|D required");
@@ -45,7 +33,7 @@ const baseline = git("rev-parse", "HEAD");
 const { BoundedTasks, opencodeWorker } = await import("../../src/mcp/bounded-task.js");
 const { BoundedCampaigns } = await import("../../src/mcp/bounded-campaign.js");
 const { createBoundedLifecycleController, recoverFailedBoundedWorkspace } = await import("../../src/mcp/server.js");
-const { prepareBoundedCommit, commitBoundedPatch, getBoundedCommitStatus } = await import("../../src/mcp/typed-actions.js");
+const { prepareBoundedCommit, commitBoundedPatch, getBoundedCommitStatus, reconcileBoundedCommit } = await import("../../src/mcp/typed-actions.js");
 const { semanticSession } = await import("../../src/mcp/semantic-session.js");
 const { Collector } = await import("../../src/dashboard/collector.js");
 const { createDashboard } = await import("../../src/dashboard/server.js");
@@ -75,57 +63,71 @@ const controller = createBoundedLifecycleController(tasks, repo, id => {
   prepareBoundedCommit(tasks, id, state); commitBoundedPatch(tasks, id, state, repo);
 }, semanticSession);
 let crashEvidence: unknown = null;
-if (scenario === "D") {
-  const normalRun = controller.runBoundedLifecycle;
-  let interrupted = false;
-  controller.runBoundedLifecycle = id => {
-    if (interrupted) return normalRun(id);
-    interrupted = true; controller.lifecycleRunning.add(id);
-    const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(import.meta.url), "--execute-task", id],
-      { cwd: source, env: { ...process.env, C2C_LIVE_FIXTURE: root }, stdio: ["ignore", "pipe", "pipe"] });
-    child.stdout.on("data", chunk => {
-      if (chunk.toString().includes("DURABLE_REVIEW_PENDING")) {
-        crashEvidence = { old_controller_pid: child.pid, new_controller_pid: process.pid, state_at_kill: tasks.status(id).state };
-        child.kill();
-      }
-    });
-    child.on("close", () => { controller.lifecycleRunning.delete(id); });
-    return true;
-  };
-}
 const campaigns = new BoundedCampaigns(path.join(state, "bounded-campaigns"), tasks, controller, id => {
   tasks.withRecoveryLock(id, task => { recoverFailedBoundedWorkspace(tasks, new Workspace(repo), task, repo); });
-}, id => getBoundedCommitStatus(tasks, id, state).state === "COMMITTED");
-const stop = campaigns.run();
+}, id => reconcileBoundedCommit(tasks, id, state, repo));
+const stop = scenario === "D" ? () => {} : campaigns.run();
 const collector = new Collector({ fixture: repo }, path.join(root, "review"), path.join(root, "queue"), undefined, {},
   id => getBoundedCommitStatus(tasks, id, state));
 const app = createDashboard(collector, false, undefined, contract => campaigns.start(contract), Date.now, () => campaigns.list());
-const server = app.listen(0, "127.0.0.1");
-await new Promise<void>(resolve => server.once("listening", resolve));
-const address = server.address(); if (!address || typeof address === "string") throw new Error("FIXTURE_LISTENER_FAILED");
-const base = `http://127.0.0.1:${address.port}`;
+const server = scenario === "D" ? undefined : app.listen(0, "127.0.0.1");
+if (server) await new Promise<void>(resolve => server.once("listening", resolve));
+const address = server?.address();
+let base = address && typeof address !== "string" ? `http://127.0.0.1:${address.port}` : "";
+let dashboardChild: Awaited<ReturnType<typeof startFixtureDashboard>> | undefined;
+let restart: Promise<void> | undefined;
+let restartError: unknown;
+if (scenario === "D") {
+  dashboardChild = await startFixtureDashboard(root, true, () => {
+    restart = (async () => {
+      const old = dashboardChild!;
+      const task = campaigns.list()[0];
+      const stateAtKill = tasks.status(task.current_task).state;
+      await old.stop();
+      dashboardChild = await startFixtureDashboard(root, false, () => {});
+      base = dashboardChild.base;
+      crashEvidence = { old_dashboard_pid: old.pid, new_dashboard_pid: dashboardChild.pid,
+        state_at_kill: stateAtKill, restarted_components: ["Dashboard", "campaign scheduler", "lifecycle controller"] };
+    })().catch(error => { restartError = error; });
+  });
+  base = dashboardChild.base;
+}
 console.log(JSON.stringify({ scenario, fixture: root, dashboard: base, baseline }));
 let id = "";
+let browser: Awaited<ReturnType<typeof import("./autonomy-browser.mjs").openFixtureBrowser>> | undefined;
 try {
+  const contract = { repo: "codex-with-chatgpt", goal: 'Set the exported dashboard banner constant to exactly "READY".',
+    edit_paths: ["src/dashboard/banner.ts", "tests/dashboard-banner.test.ts"],
+    acceptance_criteria: ['banner is exactly "READY"', "Preserve existing test assertions; adding a focused READY assertion is allowed. Typecheck and Vitest pass."] };
+  if (process.argv.includes("--browser")) {
+    browser = await (await import("./autonomy-browser.mjs")).openFixtureBrowser(base, root);
+    id = await browser.submit(contract);
+  } else {
   const session = await fetch(`${base}/api/bounded/start-session`, { headers: { "sec-fetch-site": "same-origin" } });
   const csrf = session.headers.get("x-bounded-start-csrf"), cookie = session.headers.get("set-cookie")?.split(";")[0];
   if (!csrf || !cookie) throw new Error("FIXTURE_SESSION_FAILED");
   const response = await fetch(`${base}/api/bounded/start`, { method: "POST", headers: {
     "content-type": "application/json", origin: base, "sec-fetch-site": "same-origin", cookie, "x-bounded-start-csrf": csrf,
-  }, body: JSON.stringify({ repo: "codex-with-chatgpt", goal: 'Set the exported dashboard banner constant to exactly "READY".',
-    edit_paths: ["src/dashboard/banner.ts", "tests/dashboard-banner.test.ts"],
-    acceptance_criteria: ['banner is exactly "READY"', "Preserve existing test assertions; adding a focused READY assertion is allowed. Typecheck and Vitest pass."] }) });
+  }, body: JSON.stringify(contract) });
   const started = await response.json() as { task_id?: string };
   if (response.status !== 201 || !started.task_id) throw new Error("FIXTURE_START_FAILED");
   id = started.task_id;
+  }
   const deadline = Date.now() + 20 * 60_000;
   while (Date.now() < deadline) {
+    if (restartError) throw restartError;
     const campaign = campaigns.status(id);
     if (["COMMITTED", "STOPPED"].includes(campaign.state)) {
+      await restart;
+      if (restartError) throw restartError;
       const dashboard = await (await fetch(`${base}/api/status`)).json();
-      const evidence = { scenario, fixture: root, baseline, head: git("rev-parse", "HEAD"), campaign, dashboard, crashEvidence,
-        task: tasks.status(campaign.current_task), authoritative_done: false };
+      const restartProof = scenario === "D" ? { worker_calls: fs.readFileSync(path.join(root, "dashboard-worker-calls.jsonl"), "utf8").trim().split("\n").length,
+        commit_count: Number(git("rev-list", "--count", `${baseline}..HEAD`)), full_process_restart: !!crashEvidence } : null;
+      if (campaign.state === "COMMITTED" && browser) await browser.capture(git("rev-parse", "HEAD"));
+      const evidence = { scenario, fixture: root, baseline, head: git("rev-parse", "HEAD"), campaign, dashboard, crashEvidence, restartProof,
+        task: tasks.status(campaign.current_task), browser_verified: !!browser && campaign.state === "COMMITTED", authoritative_done: false };
       fs.writeFileSync(path.join(root, "result.json"), JSON.stringify(evidence, null, 2));
+      if (restartProof && (!restartProof.full_process_restart || restartProof.worker_calls !== 1 || restartProof.commit_count !== 1)) throw new Error("DASHBOARD_RESTART_PROOF_FAILED");
       console.log(JSON.stringify({ state: campaign.state, stop_reason: campaign.stop_reason, evidence: path.join(root, "result.json") }));
       if (campaign.state !== "COMMITTED") process.exitCode = 1;
       break;
@@ -134,5 +136,5 @@ try {
   }
   if (!["COMMITTED", "STOPPED"].includes(campaigns.status(id).state)) throw new Error("LIVE_FIXTURE_DEADLINE");
 } finally {
-  stop(); server.close();
+  await browser?.close(); stop(); server?.close(); await restart; await dashboardChild?.stop();
 }
