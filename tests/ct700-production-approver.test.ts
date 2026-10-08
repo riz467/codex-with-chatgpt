@@ -1,12 +1,14 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { createServer, request, type Server } from 'node:http';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import https from 'node:https';
+import { TLSSocket } from 'node:tls';
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, X509Certificate } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { ApproverStore } from '../src/approver-service/storage.js';
-import { compileCt700PeerMtlsOptions, createProductionApprover, validateCt701InboundPeerIdentity } from '../src/approver-service/production.js';
+import { compileCt700PeerMtlsOptions, createCt700PeerMtlsServer, createProductionApprover, validateCt701InboundPeerIdentity } from '../src/approver-service/production.js';
 import { presentationHash, type TrustedTypedActionPresentation, type TrustedTypedActionPresentationVerifier } from '../src/approver-service/presentation.js';
 import { actionBindingFields, type TypedActionApprovalRequest } from '../src/typed-action-approval/contract.js';
 import { verifyTypedActionApproval } from '../src/typed-action-approval/verifier.js';
@@ -530,5 +532,41 @@ describe('CT700 offline peer mTLS options compiler', () => {
     expect(options.key).not.toBe(key);
     expect(options.ca).not.toBe(ca);
     expect(Object.isFrozen(options.cert)).toBe(false);
+  });
+});
+
+// Offline listener inspection only: no socket is bound and no TLS handshake is simulated.
+describe('CT700 offline peer mTLS server admission', () => {
+  it('passes compiled options unchanged and rejects missing, unauthorized or malformed peer identity', () => {
+    const host = { serverCertificate: 'dummy cert', serverPrivateKey: 'dummy key',
+      trustedClientCa: 'dummy CA', expectedClientSpkiSha256: 'a'.repeat(64), expectedUriSanRole: 'urn:ct701:client' };
+    const gateway = vi.fn();
+    const fake = { listen: vi.fn() } as unknown as https.Server;
+    const create = vi.spyOn(https, 'createServer').mockImplementation(() => fake);
+    try {
+      expect(createCt700PeerMtlsServer(gateway, host)).toBe(fake);
+      expect(create).toHaveBeenCalledTimes(1);
+      expect(fake.listen).not.toHaveBeenCalled();
+      expect(create.mock.calls[0][0]).toEqual(compileCt700PeerMtlsOptions(host));
+      expect(Object.isFrozen(create.mock.calls[0][0])).toBe(true);
+      const listener = create.mock.calls[0][1] as (req: IncomingMessage, res: ServerResponse) => void;
+      expect(listener).toBeTypeOf('function');
+      const tlsSocket = (values: Record<string, unknown>) => Object.assign(Object.create(TLSSocket.prototype), values);
+      const cases = [undefined, {}, tlsSocket({ authorized: false, getPeerCertificate: () => ({ raw: Buffer.from('bad DER') }) }),
+        tlsSocket({ authorized: true, authorizationError: Error('rejected'), getPeerCertificate: () => ({ raw: Buffer.from('bad DER') }) }),
+        tlsSocket({ authorized: true, getPeerCertificate: () => { throw Error('missing certificate'); } }),
+        tlsSocket({ authorized: true, getPeerCertificate: () => ({}) }),
+        tlsSocket({ authorized: true, getPeerCertificate: () => ({ raw: 'not DER' }) }),
+        tlsSocket({ authorized: true, getPeerCertificate: () => ({ raw: Buffer.from('not DER') }) })];
+      for (const socket of cases) {
+        const res = { writeHead: vi.fn(), end: vi.fn() };
+        const req = { socket, headers: { host: 'attacker.test', origin: 'https://attacker.test',
+          'x-forwarded-host': 'attacker.test', 'x-ct700-local-principal': 'a'.repeat(64) } };
+        listener(req as unknown as IncomingMessage, res as unknown as ServerResponse);
+        expect(res.writeHead).toHaveBeenCalledWith(403, { 'Cache-Control': 'no-store' });
+        expect(res.end).toHaveBeenCalledTimes(1);
+        expect(gateway).not.toHaveBeenCalled();
+      }
+    } finally { create.mockRestore(); }
   });
 });

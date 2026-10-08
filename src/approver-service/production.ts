@@ -1,6 +1,7 @@
 import express from 'express';
 import { request as httpRequest } from 'node:http';
-import type * as https from 'node:https';
+import https from 'node:https';
+import { TLSSocket } from 'node:tls';
 import { createHash, randomBytes, timingSafeEqual, X509Certificate, type KeyObject } from 'node:crypto';
 import { createApproverService, type ApproverConfig } from './server.js';
 import { ApproverStore } from './storage.js';
@@ -70,6 +71,31 @@ export function validateCt701InboundPeerIdentity(
   } catch {
     return false;
   }
+}
+
+/** Construct an unbound, host-configured peer gateway; TLS identity is an admission gate only. */
+export function createCt700PeerMtlsServer(gateway: express.Application, hostConfig: unknown): https.Server {
+  const options = compileCt700PeerMtlsOptions(hostConfig);
+  const identity = {
+    expectedClientSpkiSha256: Object.getOwnPropertyDescriptor(hostConfig, 'expectedClientSpkiSha256')!.value as string,
+    expectedUriSanRole: Object.getOwnPropertyDescriptor(hostConfig, 'expectedUriSanRole')!.value as string,
+  };
+  return https.createServer(options, (req, res) => {
+    let admitted = false;
+    try {
+      const socket = req.socket;
+      if (socket instanceof TLSSocket && socket.authorized === true && !socket.authorizationError) {
+        const raw: unknown = socket.getPeerCertificate().raw;
+        admitted = Buffer.isBuffer(raw) && validateCt701InboundPeerIdentity(raw, identity);
+      }
+    } catch { /* Missing or throwing peer identity fails closed. */ }
+    if (!admitted) {
+      res.writeHead(403, { 'Cache-Control': 'no-store' });
+      res.end();
+      return;
+    }
+    gateway(req, res);
+  });
 }
 
 /** No config switch/module loader enables peer authority. Reviewed host composition only. */
