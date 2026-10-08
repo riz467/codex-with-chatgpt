@@ -1,0 +1,13 @@
+{
+  "version": "2.0.22",
+  "win32": {
+    "proposer": "C:\\Program Files\\AI-Orchestration\\opencode\\2.0.22\\proposer\\opencode.exe",
+    "reviewer": "C:\\Program Files\\AI-Orchestration\\opencode\\2.0.22\\reviewer\\opencode.exe",
+    "sha256": "036a92f886fb4b738921ba29b21e490148c3f01ec73d772a920ba951b76cf0b4"
+  },
+  "linux": {
+    "proposer": "/opt/ai-orchestration/opencode/2.0.22/proposer/opencode",
+    "reviewer": "/opt/ai-orchestration/opencode/2.0.22/reviewer/opencode",
+    "sha256": "32cf5aa0a69a650e36277e3315d189835ddc79fb9aa1d0aef5025be5af5ad122"
+  }
+}

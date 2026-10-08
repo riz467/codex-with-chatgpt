@@ -30,7 +30,7 @@ function main() {
   for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "C2C_STATE_DIR"]) fs.mkdirSync(env[key]);
   const tests = ["linux-portability", "linux-process-lifecycle", "owned-process", "bounded-process-lock",
     "bounded-worker-termination", "proposer-powershell", "bounded-task", "bounded-campaign", "bounded-reference-evidence",
-    "semantic-session-transport", "review-workspace-info", "mcp-integration"].map(name => `tests/${name}.test.ts`);
+    "semantic-session-transport", "review-workspace-info", "mcp-integration", "opencode-binary"].map(name => `tests/${name}.test.ts`);
   const result = spawnSync(process.execPath, [path.join(root, "node_modules/vitest/vitest.mjs"), "run", "--maxWorkers=2",
     "--reporter=json", `--outputFile=${path.join(output, "vitest.json")}`, ...tests],
   { cwd: root, env, encoding: "utf8", timeout: 900000, maxBuffer: 8 * 1024 * 1024, shell: false });
@@ -41,7 +41,8 @@ function main() {
   const pass = !result.error && result.status === 0 && validFixtureReport(report, root, tests);
   const receipt = { phase: "linux-portability-offline-fixture", pass, platform: process.platform, node: process.version,
     tests, source_sha256: Object.fromEntries(["src/config/deployment.ts", "src/mcp/bounded-task.ts", "src/mcp/owned-process.ts",
-      "src/mcp/bounded-process-lock.ts", "src/mcp/proposer/opencode-session.ps1", "src/mcp/proposer/bounded-opencode-proposal.ps1"]
+      "src/mcp/bounded-process-lock.ts", "src/mcp/proposer/opencode-session.ps1", "src/mcp/proposer/bounded-opencode-proposal.ps1",
+      "src/mcp/opencode-binary.ts", "src/mcp/proposer/opencode-release.json"]
       .map(file => [file, createHash("sha256").update(fs.readFileSync(path.join(root, file))).digest("hex")])),
     provider_qualification: "NOT_RUN", production_dispatch: "DISABLED", error: result.error?.code ?? null };
   fs.writeFileSync(path.join(output, "receipt.json"), JSON.stringify(receipt, null, 2));

@@ -4,7 +4,9 @@
 $AutoUtf8 = [Text.UTF8Encoding]::new($false, $true)
 $AutoAgentName = 'c2c-bounded-proposer'
 $AutoServerUrl = 'http://127.0.0.1:41739'
-$AutoOpenCodeExecutable = if ($IsWindows) { 'C:\Program Files\nodejs\node_modules\@opencode\cli\bin\opencode.exe' } else { '/opt/opencode/bin/opencode' }
+$AutoRelease = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'opencode-release.json') -Raw | ConvertFrom-Json
+$AutoPlatform = if ($IsWindows) { 'win32' } elseif ($IsLinux) { 'linux' } else { 'unsupported' }
+$AutoOpenCodeExecutable = $AutoRelease.$AutoPlatform.proposer
 $AutoGit = if ($IsWindows) { 'C:\Program Files\Git\cmd\git.exe' } else { '/usr/bin/git' }
 
 function Auto-SafePath([string]$Value) {
@@ -23,6 +25,19 @@ function Auto-SamePath([string]$Left, [string]$Right) {
         $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
         return [string]::Equals((Auto-SafePath $Left), (Auto-SafePath $Right), $comparison)
     } catch { return $false }
+}
+function Auto-AssertBinary {
+    if ($AutoPlatform -ceq 'unsupported' -or [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') {
+        throw 'OPENCODE_BINARY_PLATFORM_UNSUPPORTED'
+    }
+    try {
+        $null = Auto-SafePath $AutoOpenCodeExecutable
+        $item = Get-Item -LiteralPath $AutoOpenCodeExecutable -Force
+        if ($item.PSIsContainer -or $item.LinkType -or
+            (Get-FileHash -LiteralPath $AutoOpenCodeExecutable -Algorithm SHA256).Hash.ToLowerInvariant() -cne $AutoRelease.$AutoPlatform.sha256) {
+            throw 'identity'
+        }
+    } catch { throw 'OPENCODE_BINARY_IDENTITY_MISMATCH' }
 }
 function Auto-AssertSchema($Version, $Schema) {
     $create = $Schema.paths.PSObject.Properties['/api/session'].Value.post.requestBody.content.PSObject.Properties['application/json'].Value.schema
@@ -65,8 +80,7 @@ function Auto-Api($Client, [string]$Method, [string]$Path, $Body = $null, [strin
     finally { $request.Dispose() }
 }
 function Auto-ServerStart([string]$Repo) {
-    $null = Auto-SafePath $AutoOpenCodeExecutable
-    if (!(Test-Path -LiteralPath $AutoOpenCodeExecutable -PathType Leaf)) { throw 'OPENCODE_SERVER_UNAVAILABLE' }
+    Auto-AssertBinary
     $handler = [Net.Http.HttpClientHandler]::new(); $handler.UseProxy = $false; $handler.AllowAutoRedirect = $false
     $client = [Net.Http.HttpClient]::new($handler); $client.Timeout = [timespan]::FromSeconds(8)
     $socket = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 41739)
@@ -80,19 +94,23 @@ function Auto-ServerStart([string]$Repo) {
     $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
     try { $process = [Diagnostics.Process]::Start($psi) } catch { $client.Dispose(); throw 'OPENCODE_SERVER_UNAVAILABLE' }
     $server = @{ client = $client; process = $process; stdout = $process.StandardOutput.ReadToEndAsync(); stderr = $process.StandardError.ReadToEndAsync() }
+    return (Auto-ServerWait $server)
+}
+function Auto-ServerWait($Server) {
+    $process = $Server.process; $client = $Server.client
     try {
         $deadline = [datetime]::UtcNow.AddSeconds(25)
         do {
             if ($process.HasExited) { throw 'OPENCODE_SERVER_UNAVAILABLE' }
             try {
                 $info = Auto-Api $client 'GET' '/api/info'
-                $version = ((& $AutoOpenCodeExecutable --version | Select-Object -First 1) -replace '^opencode v','').Trim()
-                if ($LASTEXITCODE -eq 0 -and $info.pid -eq $process.Id -and $info.version -ceq $version -and
-                    $version -match '^2\.' -and !@($info.urls | Where-Object { $_ -match '0\.0\.0\.0|\[::\]' }).Count) {
-                    $server.version = $version
+                if ($info.pid -eq $process.Id -and $info.version -cne $AutoRelease.version) { throw 'OPENCODE_BINARY_VERSION_MISMATCH' }
+                if ($info.pid -eq $process.Id -and $info.version -ceq $AutoRelease.version -and
+                    !@($info.urls | Where-Object { $_ -match '0\.0\.0\.0|\[::\]' }).Count) {
+                    $server.version = $info.version
                     return $server
                 }
-            } catch { }
+            } catch { if ($_.Exception.Message -ceq 'OPENCODE_BINARY_VERSION_MISMATCH') { throw } }
             Start-Sleep -Milliseconds 250
         } while ([datetime]::UtcNow -lt $deadline)
         throw 'OPENCODE_SERVER_UNAVAILABLE'

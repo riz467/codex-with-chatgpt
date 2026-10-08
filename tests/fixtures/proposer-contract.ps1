@@ -14,6 +14,23 @@ function Reject([scriptblock]$Action, [string]$Expected) {
     throw "EXPECTED_REJECTION_$Expected"
 }
 try {
+    $savedRelease = $AutoRelease; $savedExecutable = $AutoOpenCodeExecutable
+    $AutoOpenCodeExecutable = Join-Path $root 'pinned-fixture'
+    [IO.File]::WriteAllText($AutoOpenCodeExecutable, 'fixture-release')
+    $AutoRelease = @{ version = '2.0.22' }
+    $AutoRelease[$AutoPlatform] = @{ sha256 = (Get-FileHash -LiteralPath $AutoOpenCodeExecutable).Hash.ToLowerInvariant() }
+    Auto-AssertBinary; $script:checks++
+    [IO.File]::WriteAllText((Join-Path $root 'human-cli'), 'unrelated-2.0.24')
+    Auto-AssertBinary; $script:checks++
+    [IO.File]::WriteAllText($AutoOpenCodeExecutable, 'wrong-version-bytes')
+    Reject { Auto-AssertBinary } 'OPENCODE_BINARY_IDENTITY_MISMATCH'
+    Remove-Item -LiteralPath $AutoOpenCodeExecutable
+    Reject { Auto-AssertBinary } 'OPENCODE_BINARY_IDENTITY_MISMATCH'
+    $null = New-Item -ItemType HardLink -Path $AutoOpenCodeExecutable -Target (Join-Path $root 'human-cli')
+    $AutoRelease[$AutoPlatform].sha256 = (Get-FileHash -LiteralPath $AutoOpenCodeExecutable).Hash.ToLowerInvariant()
+    Reject { Auto-AssertBinary } 'OPENCODE_BINARY_IDENTITY_MISMATCH'
+    Remove-Item -LiteralPath $AutoOpenCodeExecutable
+    $AutoRelease = $savedRelease; $AutoOpenCodeExecutable = $savedExecutable
     $schema = @'
 {"paths":{"/api/session":{"post":{"requestBody":{"content":{"application/json":{"schema":{"properties":{"model":{"anyOf":[{"$ref":"#/components/schemas/Model.Ref"}]},"permissions":{"anyOf":[{"$ref":"#/components/schemas/Permission.Ruleset"}]}}}}}}}}},"components":{"schemas":{"Model.Ref":{"required":["id","providerID"],"properties":{"variant":{"type":"string"}}}}}}
 '@ | ConvertFrom-Json -Depth 30
@@ -84,6 +101,31 @@ try {
         foreach ($stream in @($stdout,$stderr)) { $stream | Add-Member ScriptMethod Wait { param($timeout) return $this.completed } }
         Reject { Auto-ServerStop @{ process = $process; client = $client; stdout = $stdout; stderr = $stderr } } 'PROCESS_TERMINATION_REQUIRES_INSPECTION'
         Check ($client.disposed -and $process.disposed)
+    }
+    foreach ($apiVersion in @('2.0.22','2.0.24')) {
+        $process = [pscustomobject]@{ Id = 12345; HasExited = $false; disposed = $false; killed = $false }
+        $process | Add-Member ScriptMethod Kill { param($tree) $this.killed = $tree }
+        $process | Add-Member ScriptMethod WaitForExit { param($timeout) return $true }
+        $process | Add-Member ScriptMethod Dispose { $this.disposed = $true }
+        $client = [pscustomobject]@{ disposed = $false }
+        $client | Add-Member ScriptMethod Dispose { $this.disposed = $true }
+        $stream = [pscustomobject]@{}
+        $stream | Add-Member ScriptMethod Wait { param($timeout) return $true }
+        $server = @{ process = $process; client = $client; stdout = $stream; stderr = $stream }
+        $script:routes = @()
+        function Auto-Api($Client, $Method, $Path, $Body, $Failure) {
+            $script:routes += $Path
+            return @{ pid = 12345; version = $apiVersion; urls = @('http://127.0.0.1:41739') }
+        }
+        if ($apiVersion -ceq '2.0.24') {
+            Reject { Auto-ServerWait $server } 'OPENCODE_BINARY_VERSION_MISMATCH'
+            Check ($process.killed -and $process.disposed -and $client.disposed)
+        } else {
+            Check ((Auto-ServerWait $server).version -ceq '2.0.22')
+            Check (!$process.killed)
+            Auto-ServerStop $server
+        }
+        Check ($script:routes.Count -eq 1 -and $script:routes[0] -ceq '/api/info')
     }
     [Console]::Out.Write((@{ checks = $script:checks; platform = $(if ($IsWindows) { 'win32' } else { 'linux' }); powershell = $PSVersionTable.PSVersion.ToString(); provider_calls = 0 } | ConvertTo-Json -Compress))
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }

@@ -12,7 +12,6 @@ export function deploymentFor(platform: NodeJS.Platform) {
     configRoot: paths.join(root, "ai-orchestration-config"),
     pveDocsRoot: paths.join(root, "pve-doc"),
     fixtureRoot: paths.join(root, "bounded-review-live-fixture"),
-    opencode: windows ? "C:\\Program Files\\nodejs\\node_modules\\@opencode\\cli\\bin\\opencode.exe" : "/opt/opencode/bin/opencode",
     pwsh: windows ? "C:\\Program Files\\PowerShell\\7\\pwsh.exe" : "/usr/bin/pwsh",
     // ponytail: Linux dispatch stays closed until credential-free Executor verification is connected.
     localExecutionEnabled: windows,

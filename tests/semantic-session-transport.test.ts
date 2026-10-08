@@ -5,15 +5,17 @@ import { EventEmitter } from "node:events";
 import { semanticSession } from "../src/mcp/semantic-session.js";
 import { REVIEW_ROOT } from "../src/mcp/local-gateway.js";
 
-const mocks = vi.hoisted(() => ({ spawn: vi.fn(), stop: vi.fn() }));
+const mocks = vi.hoisted(() => ({ spawn: vi.fn(), stop: vi.fn(), binary: vi.fn() }));
 vi.mock("node:child_process", async importOriginal => ({ ...await importOriginal<object>(), spawn: mocks.spawn }));
 vi.mock("../src/mcp/owned-process.js", () => ({ terminateOwnedProcessAndWait: mocks.stop }));
+vi.mock("../src/mcp/opencode-binary.js", () => ({ assertOpencodeBinary: mocks.binary, opencodeVersion: "2.0.22" }));
 
 const selected = { providerID: "openai", id: "gpt-6-sol", variant: "default" };
 const permissions = [{ action: "*", resource: "*", effect: "deny" }];
 let version: string, responseModel: typeof selected, authMethod: string;
 let calls: { url: string; body: any }[];
 beforeEach(() => {
+  mocks.binary.mockReturnValue("fixed-reviewer-executable");
   vi.stubEnv("OPENAI_API_KEY", ""); vi.stubEnv("OPENAI_BASE_URL", "");
   calls = []; version = "2.0.22"; responseModel = { ...selected }; authMethod = "oauth";
   const agent = "---\nmode: primary\n---\nReview fixture instructions";
@@ -64,6 +66,13 @@ it("creates only the fixed reviewer/model with explicit deny-all and cleans up",
     agent: "c2c-semantic-reviewer", model: selected, permissions,
   });
   expect(mocks.stop).toHaveBeenCalledOnce();
+  expect(mocks.binary).toHaveBeenCalledWith("reviewer");
+  expect(mocks.spawn.mock.calls[0][0]).toBe("fixed-reviewer-executable");
+});
+it("rejects an invalid binary before opening a port or starting a server", async () => {
+  mocks.binary.mockImplementationOnce(() => { throw new Error("OPENCODE_BINARY_IDENTITY_MISMATCH"); });
+  await expect(semanticSession("fixture", "ses_execution", [1])).rejects.toThrow("OPENCODE_BINARY_IDENTITY_MISMATCH");
+  expect(net.createServer).not.toHaveBeenCalled(); expect(mocks.spawn).not.toHaveBeenCalled(); expect(calls).toEqual([]);
 });
 it.each(["providerID", "id", "variant"] as const)("rejects a response with the wrong %s", async key => {
   responseModel[key] = "wrong";
@@ -72,7 +81,7 @@ it.each(["providerID", "id", "variant"] as const)("rejects a response with the w
 });
 it.each(["version", "auth"])("rejects %s mismatch before session creation or prompt", async field => {
   if (field === "version") version = "2.0.24"; else authMethod = "key";
-  await expect(semanticSession("sealed fixture", "ses_execution", [1])).rejects.toThrow(/SEMANTIC_(MODEL_SCHEMA_MISMATCH|OAUTH_NOT_CONFIRMED)/);
+  await expect(semanticSession("sealed fixture", "ses_execution", [1])).rejects.toThrow(/OPENCODE_BINARY_VERSION_MISMATCH|SEMANTIC_OAUTH_NOT_CONFIRMED/);
   expect(calls.some(call => call.url === "/api/session" || call.url.endsWith("/prompt"))).toBe(false);
   expect(mocks.stop).toHaveBeenCalledOnce();
 });

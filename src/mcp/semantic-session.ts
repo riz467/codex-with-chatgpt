@@ -7,9 +7,9 @@ import { spawn } from "node:child_process";
 import { REVIEW_ROOT } from "./local-gateway.js";
 import { deployment, sameDeploymentPath } from "../config/deployment.js";
 import { terminateOwnedProcessAndWait } from "./owned-process.js";
+import { assertOpencodeBinary, opencodeVersion } from "./opencode-binary.js";
 
 const agentID = "c2c-semantic-reviewer";
-const exe = deployment.opencode;
 const port = 41740;
 const base = `http://127.0.0.1:${port}`;
 const sourceAgent = path.join(deployment.configRoot, "agents", "c2c-semantic-reviewer.md");
@@ -44,7 +44,7 @@ export function validateSemantic(text: string, validRefs: readonly number[]): Se
 }
 
 function assertAgent() {
-  if (!fs.existsSync(exe) || !fs.existsSync(sourceAgent) || !fs.existsSync(runtimeAgent) ||
+  if (!fs.existsSync(sourceAgent) || !fs.existsSync(runtimeAgent) ||
       fs.lstatSync(runtimeAgent).isSymbolicLink() || hash(fs.readFileSync(sourceAgent)) !== hash(fs.readFileSync(runtimeAgent))) {
     throw new Error("SEMANTIC_AGENT_UNAVAILABLE");
   }
@@ -83,6 +83,7 @@ async function ensureFreePort() {
   finally { server.close(); }
 }
 export async function semanticSession(prompt: string, executionSessionId: string, validRefs: readonly number[]) {
+  const exe = assertOpencodeBinary("reviewer");
   const agentHash = assertAgent();
   const source = fs.readFileSync(sourceAgent, "utf8");
   const expectedSystem = /^---\r?\n[\s\S]*?\r?\n---\r?\n([\s\S]+)$/.exec(source)?.[1].trim();
@@ -117,6 +118,7 @@ export async function semanticSession(prompt: string, executionSessionId: string
       await new Promise((r) => setTimeout(r, 250));
     }
     if (!ready) throw new Error("SEMANTIC_SERVER_UNAVAILABLE");
+    if (version !== opencodeVersion) throw new Error("OPENCODE_BINARY_VERSION_MISMATCH");
     assertSemanticTransport(version, await api("GET", "/openapi.json"),
       await api("GET", "/api/integration"), await api("GET", "/api/agent"), expectedSystem);
     const created = await api("POST", "/api/session", { agent: agentID, model: { providerID: "openai", id: "gpt-6-sol", variant: "default" },
