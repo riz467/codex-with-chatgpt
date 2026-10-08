@@ -6,8 +6,8 @@ export const root = '/srv/ai-orchestration/codex-with-chatgpt';
 export const home = '/var/lib/ai-control-staging';
 export const node = '/usr/bin/node';
 export const roles = Object.freeze({
-  gateway: Object.freeze({ launcher: `${root}/scripts/run-linux-gateway.mjs`, entry: `${root}/dist/cli/index.js`, port: 48767 }),
-  dashboard: Object.freeze({ launcher: `${root}/scripts/run-linux-dashboard.mjs`, entry: `${root}/dist/dashboard/server.js`, port: 48768 }),
+  gateway: Object.freeze({ launcher: `${root}/scripts/run-linux-gateway.mjs`, entry: `${root}/dist/bridge/control-plane-staging.js`, port: 48767 }),
+  dashboard: Object.freeze({ launcher: `${root}/scripts/run-linux-dashboard.mjs`, entry: `${root}/dist/bridge/control-plane-staging.js`, port: 48768 }),
 });
 
 export function launchPlan(role, identity) {
@@ -18,7 +18,7 @@ export function launchPlan(role, identity) {
     throw new Error('LINUX_SERVICE_IDENTITY_REJECTED');
   }
   return Object.freeze({ ...config, command: node,
-    args: role === 'gateway' ? Object.freeze([config.entry, 'serve', '--workspace', root, '--port', String(config.port), '--control-plane-staging']) : Object.freeze([]),
+    args: Object.freeze([]),
     env: Object.freeze({ PATH: '/usr/bin:/bin', HOME: home, LANG: 'C.UTF-8', C2C_STATE_DIR: `${home}/state` }),
     dispatch: 'CLOSED', authority: 'NONE' });
 }

@@ -6,15 +6,33 @@ import { launchPlan, roles, root, home } from '../scripts/linux-control-plane-po
 const identity = role => ({ platform: 'linux', uid: 1001, execPath: '/usr/bin/node', launcher: roles[role].launcher,
   argv: ['/usr/bin/node', roles[role].launcher], version: 'v24.16.0' });
 
-test('fixed Gateway reuses existing CLI without auth, tunnel or execution worker', () => {
+test('fixed Gateway loads only health staging without auth, tunnel or execution worker', () => {
   const plan = launchPlan('gateway', identity('gateway'));
-  assert.deepEqual(plan.args, [`${root}/dist/cli/index.js`, 'serve', '--workspace', root, '--port', '48767', '--control-plane-staging']);
+  assert.equal(plan.entry, `${root}/dist/bridge/control-plane-staging.js`);
+  assert.deepEqual(plan.args, []);
   assert.equal(plan.env.HOME, home); assert.equal(plan.dispatch, 'CLOSED'); assert.equal(plan.authority, 'NONE');
   assert.deepEqual(Object.keys(plan.env).sort(), ['C2C_STATE_DIR', 'HOME', 'LANG', 'PATH']);
 });
-test('fixed Dashboard reuses existing factory and separate port', () => {
+test('fixed Dashboard loads only health staging on a separate port', () => {
   const plan = launchPlan('dashboard', identity('dashboard'));
   assert.equal(plan.port, 48768); assert.deepEqual(plan.args, []);
+  assert.equal(plan.entry, `${root}/dist/bridge/control-plane-staging.js`);
+});
+test('Linux launchers never import the production factories', () => {
+  for (const role of ['gateway', 'dashboard']) {
+    const text = readFileSync(new URL(`../scripts/run-linux-${role}.mjs`, import.meta.url), 'utf8');
+    assert.ok(text.includes(`createControlPlaneStaging('${role}')`));
+    assert.ok(!text.includes('createDashboard'));
+    assert.ok(!text.includes('spawn('));
+    assert.deepEqual(text.match(/^import .*$/gm), [
+      "import { fileURLToPath, pathToFileURL } from 'node:url';",
+      "import { launchPlan, verifyFixedPaths, root } from './linux-control-plane-policy.mjs';",
+    ]);
+    assert.deepEqual(text.match(/\bimport\s*\([^;]+/g), ['import(pathToFileURL(plan.entry).href)']);
+  }
+  const text = readFileSync(new URL('../src/bridge/control-plane-staging.ts', import.meta.url), 'utf8');
+  assert.deepEqual(text.match(/^import .*$/gm), ['import express from "express";']);
+  assert.ok(!/\bimport\s*\(/.test(text));
 });
 for (const [name, change] of [
   ['Windows', { platform: 'win32' }], ['root', { uid: 0 }], ['unknown uid', { uid: undefined }],
