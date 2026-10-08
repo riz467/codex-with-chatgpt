@@ -612,6 +612,11 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
       leafExtensions('2b06010505070301', tlv(0x87, Buffer.from([127, 0, 0, 1]))));
     const clientCert = issue(3, 'CT701 test client', 'CT700 test root', clientKey.publicKey, root.privateKey,
       leafExtensions('2b06010505070302', tlv(0x86, text(role))));
+    const otherClientKey = generateKeyPairSync('ed25519');
+    const wrongSpkiCert = issue(5, 'CT701 other test client', 'CT700 test root', otherClientKey.publicKey, root.privateKey,
+      leafExtensions('2b06010505070302', tlv(0x86, text(role))));
+    const wrongRoleCert = issue(6, 'CT701 other role test client', 'CT700 test root', clientKey.publicKey, root.privateKey,
+      leafExtensions('2b06010505070302', tlv(0x86, text('urn:ct701:other'))));
     for (const [cert, issuerKey] of [[ca, root.publicKey], [serverCert, root.publicKey],
       [clientCert, root.publicKey]] as const) {
       expect(Date.parse(cert.validFrom)).toBeLessThan(Date.now());
@@ -625,6 +630,13 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
       leafExtensions('2b06010505070302', tlv(0x86, text(role))), new Date(now - 2 * 86_400_000), from);
     expect(expiredClientCert.verify(root.publicKey)).toBe(true);
     expect(Date.parse(expiredClientCert.validTo)).toBeLessThan(Date.now());
+    for (const cert of [wrongSpkiCert, wrongRoleCert]) {
+      expect(cert.verify(root.publicKey)).toBe(true);
+      expect(Date.parse(cert.validFrom)).toBeLessThan(Date.now());
+      expect(Date.parse(cert.validTo)).toBeGreaterThan(Date.now());
+    }
+    expect(wrongSpkiCert.subjectAltName).toBe(`URI:${role}`);
+    expect(wrongRoleCert.subjectAltName).toBe('URI:urn:ct701:other');
     const caPem = pem(ca.raw), serverPem = pem(serverCert.raw), clientPem = pem(clientCert.raw);
     const serverPrivateKey = serverKey.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString();
     const clientPrivateKey = clientKey.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString();
@@ -660,6 +672,13 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
           req.end();
         });
       expect(await send({ cert: clientPem, key: clientPrivateKey })).toEqual({ status: 200, protocol: 'TLSv1.3', body: 'ok' });
+      expect(calls).toBe(1);
+      expect(await send({ cert: pem(wrongSpkiCert.raw),
+        key: otherClientKey.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString() }))
+        .toEqual({ status: 403, protocol: 'TLSv1.3', body: '' });
+      expect(calls).toBe(1);
+      expect(await send({ cert: pem(wrongRoleCert.raw), key: clientPrivateKey }))
+        .toEqual({ status: 403, protocol: 'TLSv1.3', body: '' });
       expect(calls).toBe(1);
       await expect(send({})).rejects.toThrow();
       expect(calls).toBe(1);
