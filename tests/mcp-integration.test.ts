@@ -771,7 +771,7 @@ describe("failed bounded workspace recovery", () => {
     expect(JSON.stringify(task)).toBe(evidence);
   });
 
-  it.each(["active", "head", "staged", "untracked", "outside"])(
+  it.each(["active", "head", "staged", "untracked", "outside", "baseline"])(
     "rejects %s without restoring the in-scope change or mutating evidence", (hazard) => {
       write(fixtureRoot, "recovery.txt", "failed verification\n");
       if (hazard === "active") executing.mockReturnValue(true);
@@ -782,6 +782,7 @@ describe("failed bounded workspace recovery", () => {
       }
       if (hazard === "untracked") write(fixtureRoot, "untracked.txt", "untracked\n");
       if (hazard === "outside") write(fixtureRoot, "outside.txt", "out-of-scope change\n");
+      if (hazard === "baseline") task.baseline["recovery.txt"] = "0".repeat(64);
       const evidence = JSON.stringify(task);
       reject();
       expect(fs.readFileSync(path.join(fixtureRoot, "recovery.txt"), "utf8")).toBe("failed verification\n");

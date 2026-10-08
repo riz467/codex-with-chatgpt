@@ -20,7 +20,7 @@ import { listExecutionOutputs, readExecutionOutput } from "../execution/output.j
 import type { Logger } from "../logger/index.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 import { workspaceOverview } from "./workspace-info.js";
-import { GatewayError, verifyBundleIntegrity, startTestJob, startOrchestration, getOrchestrationStatus, getOrchestrationResult, getOrchestrationApproval, getOrchestrationRetryPlan, retryOrchestration, completeOrchestration, completeIntegratedOrchestration, REVIEW_ROOT } from "./local-gateway.js";
+import { GatewayError, safePath, verifyBundleIntegrity, startTestJob, startOrchestration, getOrchestrationStatus, getOrchestrationResult, getOrchestrationApproval, getOrchestrationRetryPlan, retryOrchestration, completeOrchestration, completeIntegratedOrchestration, REVIEW_ROOT } from "./local-gateway.js";
 import { completeCurrentAutonomous } from "./autonomous-approval.js";
 import { searchRepo, readRepoFile } from "./repo-research.js";
 import type { RepoResearchRoots } from "./repo-research.js";
@@ -575,9 +575,19 @@ export function recoverFailedBoundedWorkspace(
       observed.some((rel) => !scope.has(rel))) {
     throw new GatewayError("RECOVERY_NOT_ALLOWED", "Unstaged changes exceed the task scope");
   }
+  // Validate every baseline before the first destructive operation. A corrupt ledger
+  // must never be discovered only after restoring user bytes.
+  for (const rel of task.contract.edit_paths) {
+    const file = safePath(root, rel);
+    const blob = runGit(root, ["cat-file", "blob", `${task.baseline_head}:${rel}`]);
+    if (!fs.lstatSync(file).isFile() || !blob.ok || sha256Evidence(Buffer.from(blob.stdout)) !== task.baseline[rel]) {
+      throw new GatewayError("RECOVERY_NOT_ALLOWED", "Baseline evidence does not match HEAD");
+    }
+  }
   try {
     if (observed.length) {
-      if (tasks.executing(task.task_id) || head() !== task.baseline_head) {
+      if (tasks.executing(task.task_id) || head() !== task.baseline_head ||
+          (budgetProof && !tasks.verifiedExhaustedWorkspaceDiff(task.task_id))) {
         throw new Error("Recovery baseline changed before restore");
       }
       const restore = runGit(root, ["restore", "--source", task.baseline_head, "--worktree", "--", ...observed]);
@@ -670,7 +680,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
         if (!root || path.resolve(root).toLowerCase() !== path.resolve(workspace.root).toLowerCase()) {
           throw new GatewayError("RECOVERY_NOT_ALLOWED", "This task is not eligible for workspace recovery");
         }
-        return okStructured(recoverFailedBoundedWorkspace(tasks, workspace, task, root));
+        return okStructured(tasks.withRecoveryLock(task.task_id,
+          locked => recoverFailedBoundedWorkspace(tasks, workspace, locked, root)));
       } catch (error) { return mapError(error); }
     });
   }

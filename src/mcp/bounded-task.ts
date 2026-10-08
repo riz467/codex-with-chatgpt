@@ -498,6 +498,16 @@ export class BoundedTasks {
     }
   }
   status(id: string) { return this.load(id); }
+  withRecoveryLock<T>(id: string, operation: (task: Ledger) => T): T {
+    const task = this.load(id), lock = this.repoLock(this.repos[task.contract.repo]);
+    fs.mkdirSync(this.repoLocks, { recursive: true });
+    try { fs.mkdirSync(lock); } catch { return fail("REPO_BUSY"); }
+    try {
+      fs.writeFileSync(safePath(lock, "owner.txt"), id, { flag: "wx" });
+      if (this.executing(id) || fs.existsSync(safePath(this.dir(id), "review.lock"))) fail("RECOVERY_NOT_ALLOWED");
+      return operation(this.load(id));
+    } finally { this.releaseRepo(task); }
+  }
   executing(id: string) { return fs.existsSync(safePath(this.dir(id), "execution.lock")); }
   async execute(id: string) {
     const lock = safePath(this.dir(id), "execution.lock");
@@ -653,7 +663,15 @@ export class BoundedTasks {
       const sealed = fs.readFileSync(safePath(dir, patches[0].name));
       const repo = this.repos[task.contract.repo];
       if (git(repo, "rev-parse", "HEAD") !== task.baseline_head ||
+          git(repo, "diff", "--cached", "--name-only") ||
+          git(repo, "diff", "HEAD", "--name-only").split("\n").filter(Boolean).some(p => !task.contract.edit_paths.includes(p)) ||
           git(repo, "ls-files", "--others", "--exclude-standard").split("\n").filter(Boolean).length) return false;
+      for (const name of task.contract.edit_paths) {
+        pathCheck(repo, name);
+        const blob = execFileSync("git", ["-C", repo, "cat-file", "blob", `${task.baseline_head}:${name}`],
+          { timeout: 10000, maxBuffer: 1024 * 1024 });
+        if (sha(blob) !== task.baseline[name]) return false;
+      }
       const current = gitPatch(repo);
       return current.length === 0 || current.equals(sealed);
     } catch { return false; }

@@ -35,6 +35,23 @@ function review(task_id: string, revision: number, contract_sha256: string, mani
     reviewer: "chatgpt" as const, verdict, findings: verdict === "NEEDS_WORK" ? ["Improve draft within scope"] : [] };
 }
 describe("bounded OpenCode contract and review", () => {
+  it("serializes recovery with other tasks and releases the reservation after failure", async () => {
+    const f = fixture(), store = path.join(f.root, "store");
+    const tasks = new BoundedTasks({ fixture: f.repo }, store, mock);
+    const started = tasks.start({ ...f.contract, max_revisions: 1 });
+    expect(() => tasks.withRecoveryLock(started.task_id, () => undefined)).toThrow("REPO_BUSY");
+    const revision = await tasks.execute(started.task_id);
+    tasks.submitReview(review(started.task_id, 1, started.contract_sha256, revision.manifest_sha256, "NEEDS_WORK"));
+    expect(() => tasks.withRecoveryLock(started.task_id, () => {
+      expect(() => tasks.start(f.contract)).toThrow("REPO_BUSY");
+      throw new Error("injected recovery failure");
+    })).toThrow("injected recovery failure");
+    expect(tasks.withRecoveryLock(started.task_id, task => task.task_id)).toBe(started.task_id);
+    execFileSync("git", ["-C", f.repo, "restore", "README.md"]);
+    const next = tasks.start(f.contract);
+    expect(() => tasks.withRecoveryLock(started.task_id, () => undefined)).toThrow("REPO_BUSY");
+    expect(tasks.status(next.task_id).state).toBe("RUNNING");
+  });
   it("hashes a canonical contract regardless of property insertion order and reloads it from durable state", () => {
     const f = fixture(), store = path.join(f.root, "store");
     const reordered = { ...Object.fromEntries(Object.entries(f.contract).reverse()), codex: { max_calls: 0, allowed: false } } as Contract;
