@@ -1,6 +1,6 @@
-# CT700 production-oriented Typed Action Approver — IR-02 and IR-05 Stage 2B-1 offline core
+# CT700 production-oriented Typed Action Approver — IR-02 and IR-05 Stage 2B-2 offline core
 
-Offline implementation, not a live deployment or Passkey cutover. Production composition is `production-cli.js` → `createProductionApprover`. Its peer verifier is **deny-all**, with no config/environment/plugin override. Historical `cli.js`, `createApproverService` default profile, `approver:pack` and `deploy/ai-approver` retain compatibility only; they are not production CT700 entrypoints. The new package excludes the historical CLI and browser script. Shared server/storage code includes compatibility modules, but production route registration and store gates disable that protocol. The IR-05 Stage 2B-1 local-principal and gateway core described below is offline only; it does not change the CLI's deny-all verifier.
+Offline implementation, not a live deployment or Passkey cutover. Production composition is `production-cli.js` → `createProductionApprover`. Its peer verifier is **deny-all**, with no config/environment/plugin override. Historical `cli.js`, `createApproverService` default profile, `approver:pack` and `deploy/ai-approver` retain compatibility only; they are not production CT700 entrypoints. The new package excludes the historical CLI and browser script. Shared server/storage code includes compatibility modules, but production route registration and store gates disable that protocol. The IR-05 Stage 2B-1 local-principal/gateway core and Stage 2B-2 inbound mTLS core described below are offline only; neither changes the CLI's deny-all verifier.
 
 ## Surface matrix
 
@@ -23,11 +23,19 @@ The three surfaces are Human on loopback `127.0.0.1:48768`; Peer on loopback `12
 
 Each composition generates an unpredictable 32-byte credential. Peer performs route-specific local-principal checks before invoking `TrustedTypedActionPresentationVerifier` or the store. Gateway forwarding isolates caller-supplied headers from its injected credential; callers cannot supply Peer authority through forwarded headers. Request handling bounds JSON and timeouts and fails closed with generic responses. The credential authenticates neither a CT701 remote transport identity nor a human approval: the verifier remains independently authoritative, and the production CLI still uses its deny-all verifier.
 
-This is offline code only. It supplies no live `:7443` inbound mTLS listener, client-chain/SPKI/URI role verification, production certificates or key generation, ingress/Tailscale/firewall/network policy, deployment, external negative end-to-end test, push, authoritative DONE or Passkey cutover.
+## IR-05 Stage 2B-2 offline inbound TLS1.3/mTLS core
+
+The inbound predicate checks the client's raw X509 DER certificate for validity dates, clientAuth EKU, a sole URI SAN carrying the required role, and the host-pinned SHA-256 digest of its SPKI. Strict host TLS options require explicit server cert, key and CA and enforce TLS1.3 only, `requestCert` and `rejectUnauthorized`. Composition returns an unbound HTTPS server; before the restricted Gateway handles a request, it checks both `socket.authorized` and the client certificate. Returning a server does not start a listener.
+
+Trust is layered: CA-verified mTLS client → host-pinned SPKI and role → narrow Gateway → local-principal credential → `TrustedTypedActionPresentationVerifier` and store → Human Passkey. Client role, token and HTTP headers do not authorize approval; the verifier and human ceremony retain their separate authority.
+
+An in-memory signed software Ed25519 certificate fixture uses ephemeral loopback port 0 to exercise a real positive TLS1.3 handshake and fail-closed missing-cert, TLS1.2, wrong-SPKI, wrong-role, duplicate-SAN, wrong-EKU, invalid-date and untrusted-CA cases. The earlier inert public DER test is not chain evidence; the actual test handshake supplies chain evidence for the software fixture. TypeScript and fixed regressions PASS.
+
+This remains offline code, not production ingress. Production CLI still exposes only loopback Human `:48768` and Peer `:48769`, with a deny-all verifier: no `:7443` listener, issued production certificates or keys, Tailscale/firewall/Serve/network changes, external E2E, push or authoritative DONE.
 
 ## Trusted presentation contract and lifecycle
 
-`TrustedTypedActionPresentationVerifier` is a narrow synchronous host dependency: `verifyRegistration(candidate)` returns an independently authenticated/verified record, or null; `authorizeLookup` authorizes a bounded operation and request UUID. HTTP has no authority by itself. Tests inject a host-owned pinned fixture, not caller PASS/current. IR-04/05 must implement the authenticated channel and serialized currentness protocol in reviewed composition, not a JSON switch or module loader.
+`TrustedTypedActionPresentationVerifier` is a narrow synchronous host dependency: `verifyRegistration(candidate)` returns an independently authenticated/verified record, or null; `authorizeLookup` authorizes a bounded operation and request UUID. HTTP has no authority by itself. Tests inject a host-owned pinned fixture, not caller PASS/current. The offline inbound mTLS core does not implement IR-04/05's authenticated publication and serialized currentness protocol in production composition; that protocol cannot be a JSON switch or module loader.
 
 The strict immutable presentation contains a UUID, source identity, full canonical approval request, independently verified context, and domain-separated SHA-256. Context binds all action/target/request/attempt/sequence/review/policy/generation/window fields; it requires PASS and request/review/policy current. Request includes approvalRequestId, issue/expiry and JTI. All binding fields must match exactly; submitted bytes must equal the verifier's attested record. Unknown fields, arbitrary display text/HTML, source strings outside the bounded identity grammar and bad hashes are rejected.
 
@@ -60,5 +68,5 @@ Package includes production runtime + required Typed Action/MCP enum/legacy cont
 ## Remaining campaign dependencies
 
 - IR-04: CT701 coordinator, authenticated publication/invalidation, currentness barriers/fencing and partition/restart protocol.
-- IR-05: beyond the offline Stage 2B-1 core, service-only authenticated gateway/mTLS 7443, remote transport identity and role verification, Tailscale/physical ingress policies and external negative tests remain dependencies.
+- IR-05: beyond the offline Stage 2B-1 and 2B-2 cores, production service wiring for authenticated mTLS gateway ingress on `:7443`, issued production identity material, Tailscale/physical ingress policies and external negative E2E tests remain dependencies.
 - Other campaign steps: approved Linux runtime/release, key helpers and domain identity, local enrollment administration, independent anchors, real Human enrollment/UV and full isolated campaign acceptance. None is implied by IR-02 fixture PASS.
