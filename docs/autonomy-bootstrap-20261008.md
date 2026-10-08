@@ -1,6 +1,7 @@
 # Autonomy bootstrap execution record — 2026-10-08
 
-This is a development record, not authoritative DONE. No runtime promotion yet.
+This is a development record, not authoritative DONE. Local runtime promotion is complete;
+see the final section for receipts, rollback and remaining Human-inspection boundaries.
 
 ## Preflight
 
@@ -269,3 +270,44 @@ This is a development record, not authoritative DONE. No runtime promotion yet.
   by their preserved real-worker/independent-review fixture receipts.
 - Runtime promotion is the next gated local step. This PASS certifies the reviewed local
   development behavior, not external deployment, Human approval, or authoritative DONE.
+
+## Local runtime promotion completed — 2026-10-08 12:24 JST
+
+- Evidence/probe/documentation commit: `5f54d68e478d299e13385ff4dd38911b5e9c2938`.
+  Executable source is the independently reviewed `72c0ce8` tree; subsequent commit changes
+  only fixtures, the review probe and documentation. No source changes followed the PASS.
+- Fresh preflight confirmed a clean main worktree, expected Scheduled Task identities,
+  no RUNNING/REVIEW_PENDING tasks, no task/repository locks and no autonomous activity.
+- Promoted the 286-file hash-verified candidate into root `dist` and
+  `.tooling/ai-workspace-execution-runtime/dist` after stopping only the verified local tasks.
+  Previous runtimes and bounded-state snapshots were preserved; authentication storage was excluded.
+- Promotion/rollback backup: `.tooling/autonomy-promotion-20261008-122345/`.
+  `result.json` binds the promoted commit and independent PASS receipt; `post-validation.json`
+  records health/identity/authentication/task-state observations. Previous runtime directories:
+  `root-dist/` and `execution-dist/`. The prepared procedure is `.tooling/promote-autonomy-runtime.ps1`.
+- Health PASS: Gateway 48765 (workspace `f2f8a725a712`), Dashboard 48766,
+  Review Bridge 54108 (workspace `3ca00af72a83`). New PIDs: supervisor 10792,
+  execution 3728, review 5508, Dashboard 9648; exact executable/command lines checked.
+- Campaign API responds with an empty list; current task null, autonomous runs zero.
+  Unauthenticated Gateway MCP remains **401**. Historical bounded states unchanged:
+  216 ESCALATE / 88 REVIEW_ACCEPTED, with no active tasks. Main repository still has one worktree.
+- Existing config-repository changes remain only the two pre-existing PowerShell scripts.
+  No push or external infrastructure deployment was performed.
+
+### Final verified scope and remaining boundaries
+
+- A: actual browser form → real worker → checks → independent PASS → local commit/rendered result.
+- B: real NEEDS_WORK → automatic next revision → PASS → local commit.
+- C: three rejected real worker revisions → evidence-bound restore → successor → reviewed local commit.
+- D: recorded quiescent REVIEW_PENDING checkpoint → whole Dashboard/controller process kill/restart
+  → one worker invocation / one commit, with fresh sealed reference acquisition.
+- Independent implementation review **PASS**; full regression 2619 PASS / 4 skipped and all
+  subsequent affected-suite reruns PASS. Final source browser A and whole-process D PASS.
+- Runtime rollback: fresh idle/identity check, stop verified Dashboard/Gateway tasks, preserve
+  current runtime directories, restore the backup's `root-dist` and `execution-dist` to their
+  recorded destinations, restart both tasks, then verify all health endpoints and MCP 401.
+  Do not restore old task-state backups over later work.
+- Human inspection is still required for unknown/partial locks, partial task initialization,
+  corrupt ledgers, unprovable workspace changes or exhausted budgets. These are explicit safe stops.
+- Local COMMITTED is **not authoritative DONE**. External independent authority, signed Human
+  approval and Finalizer/DONE integration remain outside this authorized local scope.
