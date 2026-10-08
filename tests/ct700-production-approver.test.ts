@@ -2,7 +2,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import https from 'node:https';
 import { TLSSocket } from 'node:tls';
-import { createHash, generateKeyPairSync, randomBytes, randomUUID, X509Certificate } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign, X509Certificate } from 'node:crypto';
+import express from 'express';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -568,5 +569,100 @@ describe('CT700 offline peer mTLS server admission', () => {
         expect(gateway).not.toHaveBeenCalled();
       }
     } finally { create.mockRestore(); }
+  });
+});
+
+// Test-only, in-memory identities for a real loopback TLS handshake; not deployed credentials.
+describe('CT700 offline TLS 1.3 mutual handshake', () => {
+  const role = 'urn:trust-plane:domain:ct701-finalizer:transport:e0001';
+  const tlv = (tag: number, bytes: Buffer) => {
+    const length = bytes.length < 128 ? [bytes.length] : bytes.length < 256
+      ? [0x81, bytes.length] : [0x82, bytes.length >> 8, bytes.length & 255];
+    return Buffer.concat([Buffer.from([tag, ...length]), bytes]);
+  };
+  const seq = (...parts: Buffer[]) => tlv(0x30, Buffer.concat(parts));
+  const oid = (hex: string) => tlv(0x06, Buffer.from(hex, 'hex'));
+  const text = (value: string) => Buffer.from(value, 'ascii');
+  const ed25519 = seq(oid('2b6570'));
+  const name = (value: string) => seq(tlv(0x31, seq(oid('550403'), tlv(0x0c, Buffer.from(value)))));
+  const generalizedTime = (value: Date) => tlv(0x18, text(value.toISOString().replace(/[-:.T]/g, '').slice(0, 14) + 'Z'));
+  const extension = (id: string, value: Buffer, critical = false) => seq(oid(id),
+    ...(critical ? [tlv(0x01, Buffer.from([0xff]))] : []), tlv(0x04, value));
+  const pem = (der: Buffer) => `-----BEGIN CERTIFICATE-----\n${der.toString('base64').match(/.{1,64}/g)!.join('\n')}\n-----END CERTIFICATE-----\n`;
+
+  it('admits only a signed CT701 client over TLS 1.3 before dispatch', async () => {
+    const root = generateKeyPairSync('ed25519');
+    const serverKey = generateKeyPairSync('ed25519');
+    const clientKey = generateKeyPairSync('ed25519');
+    const now = Date.now(), from = new Date(now - 86_400_000), to = new Date(now + 86_400_000);
+    const issue = (serial: number, subject: string, issuer: string, publicKey: typeof root.publicKey,
+      issuerKey: typeof root.privateKey, extensions: Buffer[]) => {
+      const tbs = seq(tlv(0xa0, tlv(0x02, Buffer.from([2]))), tlv(0x02, Buffer.from([serial])),
+        ed25519, name(issuer), seq(generalizedTime(from), generalizedTime(to)), name(subject),
+        publicKey.export({ format: 'der', type: 'spki' }) as Buffer, tlv(0xa3, seq(...extensions)));
+      return new X509Certificate(seq(tbs, ed25519, tlv(0x03, Buffer.concat([Buffer.from([0]), sign(null, tbs, issuerKey)]))));
+    };
+    const caExtensions = [extension('551d13', seq(tlv(0x01, Buffer.from([0xff]))), true),
+      extension('551d0f', tlv(0x03, Buffer.from([2, 0x04])), true)];
+    const leafExtensions = (eku: string, san: Buffer) => [extension('551d13', seq(), true),
+      extension('551d0f', tlv(0x03, Buffer.from([7, 0x80])), true),
+      extension('551d25', seq(oid(eku))), extension('551d11', seq(san))];
+    const ca = issue(1, 'CT700 test root', 'CT700 test root', root.publicKey, root.privateKey, caExtensions);
+    const serverCert = issue(2, 'CT700 loopback', 'CT700 test root', serverKey.publicKey, root.privateKey,
+      leafExtensions('2b06010505070301', tlv(0x87, Buffer.from([127, 0, 0, 1]))));
+    const clientCert = issue(3, 'CT701 test client', 'CT700 test root', clientKey.publicKey, root.privateKey,
+      leafExtensions('2b06010505070302', tlv(0x86, text(role))));
+    for (const [cert, issuerKey] of [[ca, root.publicKey], [serverCert, root.publicKey],
+      [clientCert, root.publicKey]] as const) {
+      expect(Date.parse(cert.validFrom)).toBeLessThan(Date.now());
+      expect(Date.parse(cert.validTo)).toBeGreaterThan(Date.now());
+      expect(cert.verify(issuerKey)).toBe(true);
+    }
+    expect(ca.ca).toBe(true);
+    expect(serverCert.subjectAltName).toBe('IP Address:127.0.0.1');
+    expect(clientCert.subjectAltName).toBe(`URI:${role}`);
+    const caPem = pem(ca.raw), serverPem = pem(serverCert.raw), clientPem = pem(clientCert.raw);
+    const serverPrivateKey = serverKey.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString();
+    const clientPrivateKey = clientKey.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString();
+    let calls = 0;
+    const gateway = express();
+    gateway.get('/probe', (_req, res) => { calls++; res.status(200).end('ok'); });
+    const listener = createCt700PeerMtlsServer(gateway, {
+      serverCertificate: serverPem, serverPrivateKey, trustedClientCa: caPem,
+      expectedClientSpkiSha256: createHash('sha256').update(clientKey.publicKey.export({ format: 'der', type: 'spki' })).digest('hex'),
+      expectedUriSanRole: role,
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        listener.once('error', reject);
+        listener.listen(0, '127.0.0.1', () => { listener.off('error', reject); resolve(); });
+      });
+      const address = listener.address();
+      if (!address || typeof address === 'string') throw Error('missing loopback listener');
+      const send = (options: { cert?: string; key?: string; minVersion?: 'TLSv1.2' | 'TLSv1.3'; maxVersion?: 'TLSv1.2' | 'TLSv1.3' }) =>
+        new Promise<{ status: number; protocol: string | null; body: string }>((resolve, reject) => {
+          const req = https.request({ hostname: '127.0.0.1', port: address.port, path: '/probe', method: 'GET',
+            ca: caPem, rejectUnauthorized: true, agent: false, minVersion: options.minVersion ?? 'TLSv1.3',
+            maxVersion: options.maxVersion ?? 'TLSv1.3', cert: options.cert, key: options.key }, res => {
+            const protocol = (res.socket as TLSSocket).getProtocol();
+            const chunks: Buffer[] = [];
+            res.on('data', (chunk: Buffer) => chunks.push(chunk));
+            res.on('error', reject);
+            res.on('end', () => resolve({ status: res.statusCode!, protocol,
+              body: Buffer.concat(chunks).toString() }));
+          });
+          req.setTimeout(1500, () => req.destroy(Error('TLS request timed out')));
+          req.on('error', reject);
+          req.end();
+        });
+      expect(await send({ cert: clientPem, key: clientPrivateKey })).toEqual({ status: 200, protocol: 'TLSv1.3', body: 'ok' });
+      expect(calls).toBe(1);
+      await expect(send({})).rejects.toThrow();
+      expect(calls).toBe(1);
+      await expect(send({ cert: clientPem, key: clientPrivateKey, minVersion: 'TLSv1.2', maxVersion: 'TLSv1.2' })).rejects.toThrow();
+      expect(calls).toBe(1);
+    } finally {
+      if (listener.listening) await new Promise<void>(resolve => listener.close(() => resolve()));
+    }
   });
 });
