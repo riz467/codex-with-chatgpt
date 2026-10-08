@@ -184,7 +184,7 @@ export class Collector {
         enumValue(commit.state, ["NOT_PREPARED", "PREPARED", "COMMITTED"]) : null;
       const local_commit = state === "COMMITTED" && typeof commit?.commit === "string" && /^[a-f0-9]{40}$/.test(commit.commit) ? commit.commit : null;
       const commit_state = state === "COMMITTED" && local_commit === null ? null : state;
-      return { ...projection, commit_state, local_commit, authoritative_done: commit_state !== null };
+      return { ...projection, commit_state, local_commit, authoritative_done: false };
     } catch { return null; }
   }
   boundedTasks(limit = 20) {

@@ -759,7 +759,10 @@ function gitPaths(root: string, args: string[]): string[] {
   return boundedGit(root, args).toString("utf8").split("\0").filter(Boolean).sort();
 }
 function assertPaths(actual: string[], expected: readonly string[]): void {
-  if (canonicalJson(actual) !== canonicalJson([...expected].sort())) throw new Error("Bounded diff path set mismatch");
+  // edit_paths is the permitted scope, not a requirement to modify every file.
+  // Exact patch bytes/hash are checked separately at every transition.
+  if (!actual.length || new Set(actual).size !== actual.length || actual.some(p => !expected.includes(p)))
+    throw new Error("Bounded diff path set mismatch");
 }
 function assertClean(root: string): void {
   if (boundedGit(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all",
@@ -806,7 +809,12 @@ export function commitBoundedPatch(tasks: BoundedTasks, taskId: string, stateDir
   } else {
     const status = boundedGit(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all",
       "--ignore-submodules=none", "--no-renames"]).toString("utf8").split("\0").filter(Boolean);
-    if (!status.length || status.some(entry => entry.slice(0, 2) !== " M"))
+    const stagedResume = status.length > 0 && status.every(entry => entry.slice(0, 2) === "M ");
+    const intentFile = path.join(stateDir, "bounded-staging-v1", `${taskId}.json`);
+    const intent = JSON.stringify({ task_id: taskId, prepared_digest: preparedHash(prepared) });
+    if (stagedResume && (!fs.existsSync(intentFile) || fs.readFileSync(intentFile, "utf8") !== intent))
+      throw new Error("Staged changes have no controller staging intent");
+    if (!status.length || (!stagedResume && status.some(entry => entry.slice(0, 2) !== " M")))
       throw new Error("Bounded Git requires only unstaged tracked changes");
     assertPaths(status.map(entry => entry.slice(3)).sort(), prepared.edit_paths);
     assertPaths(gitPaths(root, ["diff", "--name-only", "-z", "--no-renames", "HEAD"]), prepared.edit_paths);
@@ -814,12 +822,18 @@ export function commitBoundedPatch(tasks: BoundedTasks, taskId: string, stateDir
     if (patch.length !== prepared.artifact.size ||
         createHash("sha256").update(patch).digest("hex") !== prepared.diff_sha256)
       throw new Error("Live patch differs from PREPARED artifact");
+    if (stagedResume && !boundedGit(root, ["diff", "--cached", "--binary", "HEAD"]).equals(patch))
+      throw new Error("Interrupted staging differs from PREPARED artifact");
     const hooks = path.join(stateDir, "bounded-empty-hooks-v1");
     fs.mkdirSync(hooks, { recursive: true });
     if (!fs.lstatSync(hooks).isDirectory() || fs.readdirSync(hooks).length)
       throw new Error("Commit hooks directory is not empty");
     // Only the reviewed paths enter the index; verify its bytes before creating a commit.
     if (gitText(root, ["rev-parse", "HEAD"]) !== prepared.baseline_head) throw new Error("Baseline changed");
+    fs.mkdirSync(path.dirname(intentFile), { recursive: true });
+    if (fs.existsSync(intentFile)) {
+      if (fs.readFileSync(intentFile, "utf8") !== intent) throw new Error("Staging intent binding mismatch");
+    } else fs.writeFileSync(intentFile, intent, { flag: "wx" });
     boundedGit(root, ["add", "--", ...prepared.edit_paths]);
     if (gitText(root, ["rev-parse", "HEAD"]) !== prepared.baseline_head) throw new Error("Baseline changed");
     assertPaths(gitPaths(root, ["diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD"]), prepared.edit_paths);

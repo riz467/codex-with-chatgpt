@@ -1,13 +1,19 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import * as childProcess from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { BoundedTasks, type Contract, type Verifier, type Worker } from "../src/mcp/bounded-task.js";
 import { prepareBoundedCommit, commitBoundedPatch } from "../src/mcp/typed-actions.js";
 import { getStateDir } from "../src/config/paths.js";
 import { GatewayError } from "../src/mcp/local-gateway.js";
+
+vi.mock("node:child_process", async importOriginal => {
+  const original = await importOriginal<typeof import("node:child_process")>();
+  return { ...original, spawnSync: vi.fn(original.spawnSync) };
+});
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
@@ -35,6 +41,39 @@ function review(task_id: string, revision: number, contract_sha256: string, mani
     reviewer: "chatgpt" as const, verdict, findings: verdict === "NEEDS_WORK" ? ["Improve draft within scope"] : [] };
 }
 describe("bounded OpenCode contract and review", () => {
+  it("commits a reviewed subset of the edit scope and resumes exact staged evidence once", async () => {
+    const f = fixture(true), tasks = new BoundedTasks({ fixture: f.repo }, path.join(f.root, "store"), mock);
+    const started = tasks.start({ ...f.contract, edit_paths: ["README.md", "SECOND.md"] });
+    const revision = await tasks.execute(started.task_id);
+    tasks.submitReview(review(started.task_id, 1, started.contract_sha256, revision.manifest_sha256, "PASS"));
+    const state = path.join(f.root, "commit-state"); fs.mkdirSync(state);
+    prepareBoundedCommit(tasks, started.task_id, state);
+    const original = (await vi.importActual<typeof import("node:child_process")>("node:child_process")).spawnSync;
+    const interrupted = vi.spyOn(childProcess, "spawnSync").mockImplementation(((command: string, args: string[], options: any) => {
+      if (command === "git" && args.includes("commit")) return { status: 1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      return original(command, args, options);
+    }) as typeof childProcess.spawnSync);
+    try { expect(() => commitBoundedPatch(tasks, started.task_id, state, f.repo)).toThrow("Bounded local Git failed"); }
+    finally { interrupted.mockRestore(); }
+    const first = commitBoundedPatch(tasks, started.task_id, state, f.repo);
+    expect(commitBoundedPatch(tasks, started.task_id, state, f.repo)).toEqual(first);
+    expect(fs.readFileSync(path.join(f.repo, "SECOND.md"), "utf8")).toContain("Keep this unchanged.");
+    expect(execFileSync("git", ["-C", f.repo, "rev-list", "--count", "HEAD"], { encoding: "utf8" }).trim()).toBe("2");
+  });
+  it("seals failed verification bytes and refuses later in-scope edits as recovery evidence", async () => {
+    const f = fixture(), store = path.join(f.root, "store");
+    const tasks = new BoundedTasks({ fixture: f.repo }, store, mock, {}, () => { throw new GatewayError("VERIFY_FAILED", "Fixture failure"); });
+    const started = tasks.start(f.contract);
+    await expect(tasks.execute(started.task_id)).rejects.toThrow("Fixture failure");
+    expect(tasks.verifiedFailedWorkspaceDiff(started.task_id)).toBe(true);
+    const file = path.join(f.repo, "README.md"), applied = fs.readFileSync(file);
+    fs.appendFileSync(file, "human work\n");
+    expect(tasks.verifiedFailedWorkspaceDiff(started.task_id)).toBe(false);
+    fs.writeFileSync(file, applied);
+    expect(tasks.verifiedFailedWorkspaceDiff(started.task_id)).toBe(true);
+    fs.appendFileSync(path.join(store, started.task_id, "revision-1-applied.patch"), "tamper");
+    expect(tasks.verifiedFailedWorkspaceDiff(started.task_id)).toBe(false);
+  });
   it("serializes recovery with other tasks and releases the reservation after failure", async () => {
     const f = fixture(), store = path.join(f.root, "store");
     const tasks = new BoundedTasks({ fixture: f.repo }, store, mock);

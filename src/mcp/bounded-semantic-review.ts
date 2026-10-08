@@ -1,6 +1,6 @@
 import type { BoundedTasks } from "./bounded-task.js";
 import { referencePrompt } from "./bounded-reference-evidence.js";
-import type { semanticSession } from "./semantic-session.js";
+import { validateSemantic, type semanticSession } from "./semantic-session.js";
 
 export async function reviewWithReferences(tasks: BoundedTasks, taskId: string, revision: number,
   prompt: string, executionSessionId: string, reviewer: typeof semanticSession) {
@@ -8,6 +8,14 @@ export async function reviewWithReferences(tasks: BoundedTasks, taskId: string, 
   // Evidence acquisition has its own finite budget; it does not burn edit revisions.
   // Durable attempt claims prevent restart from resetting this budget.
   for (let attempt = 1; attempt <= 2; attempt++) {
+    const saved = tasks.semanticAttemptResult(taskId, revision, attempt) as Awaited<ReturnType<typeof semanticSession>> | null;
+    if (saved) {
+      validateSemantic(JSON.stringify(saved.decision), [1, 2, 3, 4]);
+      if (!saved.session_id || saved.session_id === executionSessionId) throw new Error("SEMANTIC_RESULT_INVALID");
+      if (saved.decision.reason_category !== "EVIDENCE_INSUFFICIENT" &&
+          saved.decision.reason_category !== "SEMANTIC_REVIEW_INTERNAL_ERROR") return saved;
+      continue;
+    }
     if (!tasks.claimSemanticAttempt(taskId, revision, attempt)) continue;
     const result = await reviewer([
       prompt,

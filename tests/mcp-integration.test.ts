@@ -544,6 +544,7 @@ describe("bounded semantic lifecycle over MCP", () => {
       recordSemanticReviewDiagnostic: diagnostic,
       referenceEvidence: vi.fn(() => ({ version: 1, baseline_head: hash, references: [], unavailable: [] })),
       claimSemanticAttempt: vi.fn(() => true), recordSemanticAttempt: vi.fn(),
+      semanticAttemptResult: vi.fn(() => null),
       submitReview };
     server = createMcpServer({ workspace: { root: "C:\\work\\bounded-review-live-fixture" } as Workspace,
       logger: {} as Logger, boundedTasks: tasks as unknown as BoundedTasks,
@@ -710,7 +711,7 @@ describe("failed bounded workspace recovery", () => {
   let workspace: Workspace;
   let task: ReturnType<BoundedTasks["status"]>;
   let executing: ReturnType<typeof vi.fn>;
-  const recover = () => recoverFailedBoundedWorkspace({ executing } as unknown as BoundedTasks,
+  const recover = () => recoverFailedBoundedWorkspace({ executing, verifiedFailedWorkspaceDiff: () => true, recordRecoverySnapshot: () => {} } as unknown as BoundedTasks,
     workspace, task, fixtureRoot);
   const reject = () => {
     try {

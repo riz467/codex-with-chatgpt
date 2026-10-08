@@ -26,7 +26,8 @@ it("wires the bounded start form and displays normalized lifecycle fields", () =
     expect(source).toContain(`['${field}',`);
     expect(source).toContain(`safe.${field}`);
   }
-  expect(source).not.toContain("/api/bounded");
+  expect(source).not.toContain("/api/bounded/start");
+  expect(source).toContain("/api/bounded/campaigns");
   expect(source).not.toContain("X-Bounded-Start-CSRF");
   expect(source).toContain("const approvalFields = ['task_id', 'run_id', 'authoritative_review_id', 'goal', 'review_evidence_hash', 'bundle_manifest_sha256', 'canonical_goal_hash'];");
 });

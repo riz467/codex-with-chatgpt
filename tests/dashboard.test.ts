@@ -254,13 +254,13 @@ describe("dashboard read-only evidence", () => {
     const probe = vi.fn(() => status);
     const collector = new Collector(f.roots, f.review, f.queue, undefined, undefined, probe);
     const projected = () => collector.boundedTask(taskId);
-    expect(projected()).toMatchObject({ commit_state: "NOT_PREPARED", local_commit: null, authoritative_done: true,
+    expect(projected()).toMatchObject({ commit_state: "NOT_PREPARED", local_commit: null, authoritative_done: false,
       review_reviewer: "opencode-semantic", review_verdict: "NEEDS_WORK", latest_semantic_review_diagnostic_code: null });
     status = { task_id: taskId, state: "PREPARED", commit: "a".repeat(40), authoritative_done: false };
-    expect(projected()).toMatchObject({ commit_state: "PREPARED", local_commit: null, authoritative_done: true });
+    expect(projected()).toMatchObject({ commit_state: "PREPARED", local_commit: null, authoritative_done: false });
     status = { task_id: taskId, state: "COMMITTED", commit: "a".repeat(40), authoritative_done: false,
       receipt: { secret: "receipt secret" }, commit_state: "private legacy state", local_commit: "private legacy hash" };
-    expect(projected()).toMatchObject({ commit_state: "COMMITTED", local_commit: "a".repeat(40), authoritative_done: true });
+    expect(projected()).toMatchObject({ commit_state: "COMMITTED", local_commit: "a".repeat(40), authoritative_done: false });
     expect(JSON.stringify(projected())).not.toMatch(/secret|session_id|execution_id|receipt|acceptance_criteria|provider|model|usage|findings|private legacy/);
     for (const commit of [undefined, "A".repeat(40), "g".repeat(40), "a".repeat(39), 42]) {
       status = { task_id: taskId, state: "COMMITTED", commit, authoritative_done: false };

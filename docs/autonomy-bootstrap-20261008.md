@@ -41,3 +41,31 @@ This is a development record, not authoritative DONE. No runtime promotion yet.
 - Fixed an outdated manual-continue test: authenticated NEEDS_WORK already starts continuation automatically.
 - Review: developer inspection; independent review still pending. Runtime not promoted.
 - Remaining: durable campaign scheduling/finite handoff, interrupted execution, live A–D scenarios.
+
+## Durable campaigns and recovery/commit completion
+
+- Previous evidence commit: `4bf0cf7`. Commit for this stage: the commit containing this section.
+- Files: new `bounded-campaign.ts`, `bounded-workspace-recovery.ts`; task/server/semantic review/
+  typed-actions; Dashboard server/collector/app; corresponding regression tests and opt-in live/review scripts.
+- Campaigns persist creation/handoff intents, retain the original contract and review feedback,
+  use at most 3 tasks × 3 revisions / 45 minutes, and stop on a second identical failure.
+- Applied-but-unverified diffs are sealed before verification. Later edits invalidate recovery proof.
+  Recovery stores before-bytes and undoes partial restores only where baseline bytes still match.
+- Extracted recovery out of server.ts to preserve the 64 KiB bound.
+- Fixed two live discoveries: allowed scope does not require changing every file; local commit
+  is never authoritative DONE in Dashboard. Exact staged commit recovery requires a prior controller intent.
+- Added process-wide lifecycle fencing and durable semantic-result reuse. Unknown execution locks
+  are preserved and reported for inspection, not stolen or blindly replayed.
+- Checks: typecheck PASS; targeted six-suite rerun 185 PASS; reference/process suites 4 PASS;
+  partial restore and subset/staging crash regressions PASS.
+- Full regression (ran during development): 2612 PASS / 4 skipped / 3 failures. All three failed
+  suites passed the focused rerun. The legacy read-only test was isolated from a differently owned
+  live config repository; the Dashboard static test now permits the campaign GET route.
+- Live isolated receipts under `.tooling/`: A `autonomy-live-1791424039486`,
+  B `autonomy-live-1791424790122`, C `autonomy-live-1791424161100`, D `autonomy-live-1791424441447`.
+  All COMMITTED. C injects three wrong goals into real worker prompts (recorded in fault-injection.json),
+  keeping actual independent semantic review. D kills PID 15672 at REVIEW_PENDING and continues in PID 2136.
+- Initial A exposed the subset commit bug; preserved failed receipt `autonomy-live-1791423827545`.
+- Independent code review `.tooling/autonomy-code-review-1791424663852`: NEEDS_WORK.
+  Addressed review-result crash recovery; clarified fixture acceptance about adding assertions;
+  resolved/reran reported test failures. Re-review pending. Runtime not promoted yet.

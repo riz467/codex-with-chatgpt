@@ -383,7 +383,13 @@ describe("bounded actions", () => {
     fs.mkdirSync(dir, { recursive: true });
     expect(() => runReadOnlyJob("../outside" as "pve-doc", id, task, root)).toThrow();
     expect(() => runReadOnlyJob("ai-orchestration-config", "../outside", task, root)).toThrow();
-    runReadOnlyJob("ai-orchestration-config", id, task, root);
+    // This is an output/command-boundary fixture, not a read of a differently
+    // owned live configuration repository. Real Git mutation/inspection is
+    // covered in the isolated repository suites.
+    vi.mocked(spawnSync).withImplementation(((_exe: string, args: string[]) => ({
+      status: 0, error: undefined, stderr: "", stdout: args.includes("--abbrev-ref") ? "fixture\n" :
+        args.includes("rev-parse") ? `${"a".repeat(40)}\n` : "",
+    })) as typeof spawnSync, () => runReadOnlyJob("ai-orchestration-config", id, task, root));
     expect(vi.mocked(spawnSync).mock.calls.every(([exe, args, opts]) =>
       exe === "C:\\Program Files\\Git\\cmd\\git.exe" && opts?.shell === false &&
       !args?.some((arg) => /^(commit|push|add|reset|checkout|clean)$/.test(arg)))).toBe(true);

@@ -6,14 +6,17 @@ import { Collector } from "./collector.js";
 import { GatewayError, safePath } from "../mcp/local-gateway.js";
 import { currentApprovalCandidate, issueHumanDoneApproval, type ApprovalObservation } from "../mcp/autonomous-approval.js";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { startProductionBoundedTask } from "../mcp/server.js";
+import { startProductionBoundedTask, getProductionBoundedCampaigns, runProductionBoundedCampaigns } from "../mcp/server.js";
 
 const publicDir = fileURLToPath(new URL("./public/", import.meta.url));
 // Approval is disabled in the production entrypoint until an independent
 // human/AI OS trust boundary is deployed. Loopback and CSRF are not identity.
 export function createDashboard(collector = new Collector(), fixtureApprovalEnabled = false, approvalObservation?: ApprovalObservation,
-  startBoundedTask: typeof startProductionBoundedTask = startProductionBoundedTask, now: () => number = Date.now) {
+  startBoundedTask: typeof startProductionBoundedTask = startProductionBoundedTask, now: () => number = Date.now,
+  campaigns = getProductionBoundedCampaigns) {
   const app = express();
+  if (startBoundedTask === startProductionBoundedTask) runProductionBoundedCampaigns();
+  app.get("/api/bounded/campaigns", (_req, res) => res.json(campaigns()));
   app.disable("x-powered-by");
   const approvalSessions = new Map<string, { csrf: string; expires: number }>();
   const localRequest = (req: express.Request) => {

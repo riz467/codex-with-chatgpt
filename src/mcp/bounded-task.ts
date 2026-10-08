@@ -49,6 +49,8 @@ type Ledger = { version: 2; task_id: string; contract: Contract; contract_sha256
   baseline: Record<string, string>; state: "RUNNING" | "REVIEW_PENDING" | "REVIEW_ACCEPTED" | "ESCALATE";
   revisions: Revision[]; feedback: string[]; started_at: string; stop_reason: string | null;
   worker_diagnostic?: WorkerDiagnostic | null;
+  controller_diagnostic?: { phase: "LOCAL_COMMIT"; error_code: string };
+  recovery_evidence?: { revision: number; diff_sha256: string; paths: Record<string, string> };
   codex_calls: 0; codex_usage: null; elapsed_ms: number | null; worker_time_ms: number };
 const git = (repo: string, ...args: string[]) => execFileSync("git", ["-C", repo, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", ...args],
   { encoding: "utf8", env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }, timeout: 10000 }).trim();
@@ -93,6 +95,9 @@ const profilePathAllowed = (profile: ExecutionProfile, name: string) => {
       name === "docs/ct700-production-approver.md";
   }
   if (profile === "tracked_typescript_control_plane") {
+    if (["src/mcp/bounded-campaign.ts", "src/mcp/bounded-process-lock.ts", "src/mcp/bounded-reference-evidence.ts",
+      "src/mcp/bounded-semantic-review.ts", "src/mcp/bounded-workspace-recovery.ts", "tests/bounded-campaign.test.ts",
+      "tests/bounded-process-lock.test.ts", "tests/bounded-reference-evidence.test.ts", "tests/bounded-workspace-recovery.test.ts"].includes(name)) return true;
     return name === "src/mcp/server.ts" || name === "src/mcp/typed-actions.ts" || name === "src/mcp/bounded-task.ts" || name === "src/mcp/semantic-session.ts" || name === "tests/typed-actions.test.ts" || name === "tests/mcp-integration.test.ts" || name === "tests/bounded-task.test.ts" || name === "tests/bounded-control-plane-profile.test.ts";
   }
   if (name === "src/dashboard/passkey-fixture.ts" || name.startsWith("src/dashboard/public/passkey-fixture.")) return false;
@@ -263,7 +268,9 @@ const fixedVerifier: Verifier = (repo, profile, paths, timeout) => {
     ? [
         run("typecheck", "node_modules/typescript/bin/tsc", ["--noEmit"], 120000),
         run("control_plane_regression", "node_modules/vitest/vitest.mjs",
-          ["run", "tests/typed-actions.test.ts", "tests/bounded-control-plane-profile.test.ts", "tests/mcp-integration.test.ts", "--maxWorkers=2"], 180000),
+          ["run", "tests/typed-actions.test.ts", "tests/bounded-control-plane-profile.test.ts", "tests/mcp-integration.test.ts",
+            "tests/bounded-campaign.test.ts", "tests/bounded-process-lock.test.ts", "tests/bounded-reference-evidence.test.ts",
+            "tests/bounded-workspace-recovery.test.ts", "--maxWorkers=2"], 180000),
       ]
     : profile === "tracked_typescript_ct700_peer_gateway"
     ? [
@@ -456,7 +463,7 @@ export class BoundedTasks {
         sha(json(task.contract)) !== task.contract_sha256 || this.repos[task.contract.repo] === undefined ||
         task.contract.execution_profile !== this.profileFor(task.contract.repo) ||
         task.contract.edit_paths.some(p => !profilePathAllowed(task.contract.execution_profile, p))) fail("CONTRACT_MISMATCH"); return task; }
-  start(contract: Contract, reservedId?: string) {
+  start(contract: Contract, reservedId?: string, previousTaskId?: string) {
     if (!contract || contract.worker !== "opencode" || contract.task_kind !== "text_change" ||
         !["tracked_utf8_text", "tracked_typescript_dashboard", "tracked_typescript_control_plane", "tracked_typescript_authority_transport", "tracked_typescript_ct700_peer_gateway"].includes(contract.execution_profile) ||
         contract.execution_profile !== this.profileFor(contract.repo) ||
@@ -490,8 +497,12 @@ export class BoundedTasks {
       fs.mkdirSync(this.root, { recursive: true });
       fs.mkdirSync(this.dir(id));
       const savedContract = canonicalContract(contract);
+      const previous = previousTaskId ? this.load(previousTaskId) : null;
+      if (previous && (previous.state !== "ESCALATE" ||
+          json(previous.contract) !== json(savedContract))) fail("HANDOFF_NOT_ALLOWED");
       const task: Ledger = { version: 2, task_id: id, contract: savedContract, contract_sha256: sha(json(savedContract)),
-        baseline_head: git(repo, "rev-parse", "HEAD"), baseline, state: "RUNNING", revisions: [], feedback: [],
+        baseline_head: git(repo, "rev-parse", "HEAD"), baseline, state: "RUNNING", revisions: [],
+        feedback: previous ? [`Prior task ${previous.task_id} stopped: ${previous.stop_reason}. Replan from the restored baseline; diagnose this failure and address independent review findings without repeating the failed approach.`, ...previous.feedback] : [],
         started_at: new Date().toISOString(), stop_reason: null, worker_diagnostic: null,
         codex_calls: 0, codex_usage: null, elapsed_ms: null, worker_time_ms: 0 };
       record(this.dir(id), task); return { task_id: id, contract_sha256: task.contract_sha256 };
@@ -501,7 +512,23 @@ export class BoundedTasks {
     }
   }
   status(id: string) { return this.load(id); }
+  recordCommitFailure(id: string, error: unknown) {
+    const task = this.load(id);
+    if (task.state !== "REVIEW_ACCEPTED") return;
+    const message = error instanceof Error ? error.message : "";
+    task.controller_diagnostic = { phase: "LOCAL_COMMIT", error_code:
+      message === "Bounded diff path set mismatch" ? "COMMIT_SCOPE_MISMATCH" :
+      /differs from PREPARED artifact|does not match PREPARED artifact/.test(message) ? "COMMIT_EVIDENCE_CHANGED" : "LOCAL_COMMIT_FAILED" };
+    record(this.dir(id), task);
+  }
   lifecycleLock(id: string) { return acquireProcessLock(safePath(this.dir(id), "lifecycle.lock")); }
+  recordRecoverySnapshot(id: string, files: { path: string; sha256: string; content_base64: string }[]) {
+    const task = this.load(id);
+    if (task.state !== "ESCALATE" || files.some(f => !task.contract.edit_paths.includes(f.path) ||
+        sha(Buffer.from(f.content_base64, "base64")) !== f.sha256)) fail("RECOVERY_NOT_ALLOWED");
+    return store(this.dir(id), `recovery-before-${randomUUID()}.json`, json({ task_id: id,
+      baseline_head: task.baseline_head, contract_sha256: task.contract_sha256, files }));
+  }
   withRecoveryLock<T>(id: string, operation: (task: Ledger) => T): T {
     const task = this.load(id), lock = this.repoLock(this.repos[task.contract.repo]);
     fs.mkdirSync(this.repoLocks, { recursive: true });
@@ -599,6 +626,10 @@ export class BoundedTasks {
       if (!changed.length || changed.some(p => !task.contract.edit_paths.includes(p)) ||
           updated.some(u => text(fs.readFileSync(u.file)) !== u.after) || git(repo, "rev-parse", "HEAD") !== task.baseline_head) fail("VERIFY_FAILED");
       const reviewedDiff = gitPatch(repo);
+      task.recovery_evidence = { revision, diff_sha256: sha(reviewedDiff), paths: Object.fromEntries(
+        task.contract.edit_paths.map(p => [p, sha(fs.readFileSync(pathCheck(repo, p)))])) };
+      store(dir, `${prefix}-applied.patch`, reviewedDiff);
+      record(dir, task);
       const verification = this.verifier(repo, task.contract.execution_profile, changed,
         Math.max(1000, task.contract.timeout_ms - task.worker_time_ms));
       if (verification.profile !== task.contract.execution_profile || verification.passed !== true ||
@@ -657,7 +688,18 @@ export class BoundedTasks {
     }
   }
   recordSemanticAttempt(id: string, revision: number, attempt: number, result: unknown) {
-    store(this.dir(id), `revision-${revision}-semantic-result-${attempt}.json`, json(result));
+    const task = this.load(id);
+    store(this.dir(id), `revision-${revision}-semantic-result-${attempt}.json`, json({ task_id: id, revision, attempt,
+      manifest_sha256: task.revisions[revision - 1].manifest_sha256, result_sha256: sha(json(result)), result }));
+  }
+  semanticAttemptResult(id: string, revision: number, attempt: number): unknown | null {
+    const bundle = this.artifacts(id, revision);
+    const file = safePath(this.dir(id), `revision-${revision}-semantic-result-${attempt}.json`);
+    if (!fs.existsSync(file)) return null;
+    const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (saved.task_id !== id || saved.revision !== revision || saved.attempt !== attempt ||
+        saved.manifest_sha256 !== bundle.manifest_sha256 || saved.result_sha256 !== sha(json(saved.result))) fail("REVIEW_BINDING_INVALID");
+    return saved.result;
   }
   verifiedExhaustedWorkspaceDiff(id: string): boolean {
     try {
@@ -700,6 +742,22 @@ export class BoundedTasks {
       }
       const current = gitPatch(repo);
       return current.length === 0 || current.equals(sealed);
+    } catch { return false; }
+  }
+  verifiedFailedWorkspaceDiff(id: string): boolean {
+    try {
+      const task = this.load(id), proof = task.recovery_evidence, repo = this.repos[task.contract.repo];
+      if (task.state !== "ESCALATE" || !["VERIFY_FAILED", "VERIFY_TIMEOUT", "EXECUTION_UNKNOWN", "WORKER_FAILED", "WORKER_TIMEOUT", "INVALID_PROPOSAL"].includes(task.stop_reason ?? "") ||
+          this.executing(id) || git(repo, "rev-parse", "HEAD") !== task.baseline_head ||
+          git(repo, "diff", "--cached", "--name-only") || git(repo, "ls-files", "--others", "--exclude-standard")) return false;
+      const current = gitPatch(repo);
+      if (!proof) return !current.length && task.contract.edit_paths.every(p =>
+        headWorktreeBaselineSha(repo, p, pathCheck(repo, p)) === task.baseline[p]);
+      const sealed = fs.readFileSync(safePath(this.dir(id), `revision-${proof.revision}-applied.patch`));
+      if (sha(sealed) !== proof.diff_sha256) return false;
+      if (!current.length) return task.contract.edit_paths.every(p =>
+        headWorktreeBaselineSha(repo, p, pathCheck(repo, p)) === task.baseline[p]);
+      return current.equals(sealed) && task.contract.edit_paths.every(p => sha(fs.readFileSync(pathCheck(repo, p))) === proof.paths[p]);
     } catch { return false; }
   }
   acceptedSnapshot(id: string) {

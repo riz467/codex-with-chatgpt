@@ -57,3 +57,22 @@ it("reacquires expanded evidence without consuming a revision and durably bounds
   await expect(reviewWithReferences(f.tasks, f.id, 1, "contract", "ses_fixture", reviewer)).rejects.toThrow("SEMANTIC_EVIDENCE_EXHAUSTED");
   expect(prompts).toHaveLength(2);
 });
+it("recovers one crashed review claim and reuses its sealed result after a second restart", async () => {
+  const f = await fixture();
+  expect(f.tasks.claimSemanticAttempt(f.id, 1, 1)).toBe(true); // controller died before result
+  let calls = 0;
+  const reviewer: typeof semanticSession = async () => {
+    calls++;
+    return { decision: { review_result: "PASS", reason_category: "GOAL_SATISFIED", summary: "Fixture satisfies goal",
+      evidence_refs: [1, 2, 3, 4], unresolved_issues: [] }, session_id: "ses_independent", reviewer_profile: "fixture",
+      reviewer_agent_sha256: "0".repeat(64), model: null, provider: null, usage: null };
+  };
+  const result = await reviewWithReferences(f.tasks, f.id, 1, "contract", "ses_fixture", reviewer);
+  expect(result.decision.review_result).toBe("PASS");
+  expect(await reviewWithReferences(f.tasks, f.id, 1, "contract", "ses_fixture", reviewer)).toEqual(result);
+  expect(calls).toBe(1);
+  const file = path.join(f.root, "tasks", f.id, "revision-1-semantic-result-2.json");
+  const record = JSON.parse(fs.readFileSync(file, "utf8")); record.result.decision.summary = "changed";
+  fs.writeFileSync(file, JSON.stringify(record));
+  await expect(reviewWithReferences(f.tasks, f.id, 1, "contract", "ses_fixture", reviewer)).rejects.toThrow("REVIEW_BINDING_INVALID");
+});

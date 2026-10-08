@@ -3,6 +3,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { reviewWithReferences } from "./bounded-semantic-review.js";
+import { BoundedCampaigns } from "./bounded-campaign.js";
 import { getStateDir } from "../config/paths.js";
 import { canonicalJson, scopePathSchema } from "../task-contract/contract.js";
 import { runGit } from "../workspace/git.js";
@@ -21,11 +22,13 @@ import { listExecutionOutputs, readExecutionOutput } from "../execution/output.j
 import type { Logger } from "../logger/index.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 import { workspaceOverview } from "./workspace-info.js";
-import { GatewayError, safePath, verifyBundleIntegrity, startTestJob, startOrchestration, getOrchestrationStatus, getOrchestrationResult, getOrchestrationApproval, getOrchestrationRetryPlan, retryOrchestration, completeOrchestration, completeIntegratedOrchestration, REVIEW_ROOT } from "./local-gateway.js";
+import { GatewayError, verifyBundleIntegrity, startTestJob, startOrchestration, getOrchestrationStatus, getOrchestrationResult, getOrchestrationApproval, getOrchestrationRetryPlan, retryOrchestration, completeOrchestration, completeIntegratedOrchestration, REVIEW_ROOT } from "./local-gateway.js";
 import { completeCurrentAutonomous } from "./autonomous-approval.js";
 import { searchRepo, readRepoFile } from "./repo-research.js";
 import type { RepoResearchRoots } from "./repo-research.js";
-import { BoundedTasks, headWorktreeBaselineSha, type ExecutionProfile } from "./bounded-task.js";
+import { BoundedTasks, type ExecutionProfile } from "./bounded-task.js";
+import { recoverFailedBoundedWorkspace } from "./bounded-workspace-recovery.js";
+export { recoverFailedBoundedWorkspace } from "./bounded-workspace-recovery.js";
 import { prepareBoundedCommit, commitBoundedPatch, getBoundedCommitStatus } from "./typed-actions.js";
 import type { OrchestrationReadDependencies } from "./local-gateway.js";
 import { semanticSession } from "./semantic-session.js";
@@ -524,9 +527,10 @@ export function createBoundedLifecycleController(
           }
           if (verdict !== "NEEDS_WORK" || submitted.state !== "RUNNING") return;
         }
-      } catch {
+      } catch (error) {
         // Execution failures are persisted by the task engine. An unavailable or invalid
         // semantic review leaves REVIEW_PENDING untouched and cannot authorize finalization.
+        try { tasks.recordCommitFailure(taskId, error); } catch { /* Preserve the original failed state. */ }
       } finally {
         lifecycleRunning.delete(taskId);
         release();
@@ -542,81 +546,22 @@ const productionBoundedLifecycle = createBoundedLifecycleController(
 );
 
 export function startProductionBoundedTask(input: Parameters<BoundedTasks["start"]>[0]) {
-  const started = boundedTasks.start(input);
-  productionBoundedLifecycle.runBoundedLifecycle(started.task_id);
-  return started;
+  return productionBoundedCampaigns.start(input);
 }
+
+const productionBoundedCampaigns = new BoundedCampaigns(path.join(getStateDir(), "bounded-campaigns"),
+  boundedTasks, productionBoundedLifecycle, id => {
+    boundedTasks.withRecoveryLock(id, task => {
+      const root = boundedRepos[task.contract.repo];
+      if (!boundedTasks.verifiedExhaustedWorkspaceDiff(id) && !boundedTasks.verifiedFailedWorkspaceDiff(id)) throw new GatewayError("RECOVERY_NOT_ALLOWED", "Evidence mismatch");
+      recoverFailedBoundedWorkspace(boundedTasks, { root } as Workspace, task, root);
+    });
+  }, id => getProductionBoundedCommitStatus(id).state === "COMMITTED");
+export const getProductionBoundedCampaigns = () => productionBoundedCampaigns.list();
+export const runProductionBoundedCampaigns = () => productionBoundedCampaigns.run();
 
 export function getProductionBoundedCommitStatus(taskId: string) {
   return getBoundedCommitStatus(boundedTasks, taskId, getStateDir());
-}
-
-export function recoverFailedBoundedWorkspace(
-  tasks: Pick<BoundedTasks, 'executing' | 'verifiedExhaustedWorkspaceDiff'>,
-  workspace: Workspace,
-  task: ReturnType<BoundedTasks["status"]>,
-  root: string,
-) {
-  const budgetProof = task.state === 'ESCALATE' && task.stop_reason === 'REVISION_BUDGET_EXHAUSTED' && tasks.verifiedExhaustedWorkspaceDiff(task.task_id);
-  if (task.state !== "ESCALATE" ||
-      !(task.stop_reason === "VERIFY_FAILED" || task.stop_reason === "VERIFY_TIMEOUT" ||
-        task.stop_reason === "EXECUTION_UNKNOWN" || budgetProof) ||
-      tasks.executing(task.task_id) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(task.baseline_head)) {
-    throw new GatewayError("RECOVERY_NOT_ALLOWED", "This task is not eligible for workspace recovery");
-  }
-  const head = () => {
-    const result = runGit(root, ["rev-parse", "HEAD"]);
-    return result.ok ? result.stdout.trim() : null;
-  };
-  const status = gitStatus(workspace);
-  if (head() !== task.baseline_head || !status.isRepo || status.staged.length ||
-      status.untracked.length || status.conflicted.length || status.hidden.changes ||
-      status.hidden.conflicts) {
-    throw new GatewayError("RECOVERY_NOT_ALLOWED", "Workspace is not at a safe recovery baseline");
-  }
-  const scope = new Set(task.contract.edit_paths);
-  const observed = status.unstaged.map((change) => change.path);
-  if (new Set(observed.map((rel) => rel.toLowerCase())).size !== observed.length ||
-      observed.some((rel) => !scope.has(rel))) {
-    throw new GatewayError("RECOVERY_NOT_ALLOWED", "Unstaged changes exceed the task scope");
-  }
-  // Validate every baseline before the first destructive operation. A corrupt ledger
-  // must never be discovered only after restoring user bytes.
-  for (const rel of task.contract.edit_paths) {
-    const file = safePath(root, rel);
-    const blob = runGit(root, ["cat-file", "blob", `${task.baseline_head}:${rel}`]);
-    if (!fs.lstatSync(file).isFile() || !blob.ok || sha256Evidence(Buffer.from(blob.stdout)) !== task.baseline[rel]) {
-      throw new GatewayError("RECOVERY_NOT_ALLOWED", "Baseline evidence does not match HEAD");
-    }
-  }
-  try {
-    if (observed.length) {
-      if (tasks.executing(task.task_id) || head() !== task.baseline_head ||
-          (budgetProof && !tasks.verifiedExhaustedWorkspaceDiff(task.task_id))) {
-        throw new Error("Recovery baseline changed before restore");
-      }
-      const restore = runGit(root, ["restore", "--source", task.baseline_head, "--worktree", "--", ...observed]);
-      if (!restore.ok) throw new Error("Git restore failed");
-      runGit(root, ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
-        "update-index", "--really-refresh", "--", ...observed]);
-    }
-    const after = gitStatus(workspace);
-    if (head() !== task.baseline_head || !after.isRepo || after.staged.length ||
-        after.unstaged.length || after.untracked.length || after.conflicted.length ||
-        after.hidden.changes || after.hidden.conflicts) {
-      throw new Error("Workspace is not clean at the baseline after recovery");
-    }
-    for (const rel of task.contract.edit_paths) {
-      const file = path.join(root, rel);
-      if (!fs.lstatSync(file).isFile() ||
-          headWorktreeBaselineSha(root, rel, file) !== task.baseline[rel]) {
-        throw new Error("Recovered file does not match its baseline digest");
-      }
-    }
-  } catch {
-    throw new GatewayError("RECOVERY_FAILED", "Workspace recovery could not establish the clean task baseline");
-  }
-  return { task_id: task.task_id, result: observed.length ? "recovered" : "already_clean" };
 }
 
 export function createMcpServer(ctx: McpContext): McpServer {

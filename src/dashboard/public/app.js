@@ -267,6 +267,33 @@ function renderBoundedTasks(tasks) {
     list.append(card);
   }
 }
+let campaignFetchRunning = false;
+async function renderCampaigns() {
+  if (campaignFetchRunning) return;
+  campaignFetchRunning = true;
+  try {
+    const response = await fetch('/api/bounded/campaigns', { credentials: 'same-origin', cache: 'no-store' });
+    if (!response.ok) return;
+    const campaigns = await response.json();
+    if (!Array.isArray(campaigns)) return;
+    let section = $('bounded-campaigns');
+    if (!section) {
+      section = document.createElement('section'); section.id = 'bounded-campaigns';
+      $('bounded-opencode').insertAdjacentElement('afterend', section);
+    }
+    clear(section); section.append(cell('h2', 'Autonomous campaigns (local commits only)'));
+    for (const campaign of campaigns.slice(-20).reverse()) {
+      const card = document.createElement('div'); card.className = 'task-grid';
+      for (const key of ['campaign_id', 'state', 'current_task', 'task_ids', 'stop_reason', 'impact_paths', 'human_action']) {
+        const value = campaign[key];
+        pair(card, key, Array.isArray(value) ? value.join(', ') : value);
+      }
+      pair(card, 'Budget', '3 tasks × at most 3 revisions; 45 minutes; repeated failure limit 2');
+      section.append(card);
+    }
+  } catch { /* Existing task projection remains available. */ }
+  finally { campaignFetchRunning = false; }
+}
 const approvalFields = ['task_id', 'run_id', 'authoritative_review_id', 'goal', 'review_evidence_hash', 'bundle_manifest_sha256', 'canonical_goal_hash'];
 let approval = null, approvalCheckAt = 0, approving = false, approvalResult = null;
 const approvalButton = $('approve-done');
@@ -414,6 +441,7 @@ function render(snapshot) {
   renderLatestTask(snapshot.latest_task);
   renderAutonomous(snapshot.autonomous_runs);
   renderBoundedTasks(snapshot.bounded_tasks);
+  void renderCampaigns();
   void refreshApproval();
   const observed = snapshot.current_task || snapshot.latest_task;
   renderSource(observed, !!snapshot.current_task);
