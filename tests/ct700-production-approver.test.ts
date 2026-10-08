@@ -732,6 +732,69 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
       expect(calls).toBe(1);
       await expect(send({ cert: clientPem, key: clientPrivateKey, minVersion: 'TLSv1.2', maxVersion: 'TLSv1.2' })).rejects.toThrow();
       expect(calls).toBe(1);
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ct700-production-'));
+      try {
+        const store = new ApproverStore(path.join(dir, 'fixture.db'), 'production');
+        try {
+          const apps = createProductionApprover(config, store, generateKeyPairSync('ed25519').privateKey);
+          const peer = createServer(apps.peer);
+          try {
+            await new Promise<void>((resolve, reject) => {
+              peer.once('error', reject);
+              peer.listen(48769, '127.0.0.1', () => { peer.off('error', reject); resolve(); });
+            });
+            const integrated = createCt700PeerMtlsServer(apps.gateway, {
+              serverCertificate: serverPem, serverPrivateKey, trustedClientCa: caPem,
+              expectedClientSpkiSha256: createHash('sha256').update(clientKey.publicKey.export({ format: 'der', type: 'spki' })).digest('hex'),
+              expectedUriSanRole: role,
+            });
+            try {
+              await new Promise<void>((resolve, reject) => {
+                integrated.once('error', reject);
+                integrated.listen(0, '127.0.0.1', () => { integrated.off('error', reject); resolve(); });
+              });
+              const integratedAddress = integrated.address();
+              if (!integratedAddress || typeof integratedAddress === 'string') throw Error('missing integrated listener');
+              const get = (route: string) => new Promise<{ status: number; protocol: string | null }>((resolve, reject) => {
+                const req = https.request({ hostname: '127.0.0.1', port: integratedAddress.port, path: route, method: 'GET',
+                  minVersion: 'TLSv1.3', maxVersion: 'TLSv1.3', ca: caPem, cert: clientPem, key: clientPrivateKey,
+                  rejectUnauthorized: true, agent: false }, res => {
+                  const protocol = (res.socket as TLSSocket).getProtocol();
+                  res.on('error', reject);
+                  res.resume();
+                  res.on('end', () => resolve({ status: res.statusCode!, protocol }));
+                });
+                req.setTimeout(1500, () => req.destroy(Error('integrated TLS request timed out')));
+                req.on('error', reject);
+                req.end();
+              });
+              const id = randomUUID();
+              expect(await get(`/api/typed-action-status/${id}`)).toEqual({ status: 403, protocol: 'TLSv1.3' });
+              expect(await get('/health')).toEqual({ status: 404, protocol: 'TLSv1.3' });
+              expect(store.presentation(id)).toBeNull();
+              expect(store.typedEvidence(id)).toBeNull();
+              const directStatus = await new Promise<number>((resolve, reject) => {
+                const req = request({ hostname: '127.0.0.1', port: 48769, method: 'GET',
+                  path: `/api/typed-action-status/${id}`, agent: false }, res => {
+                  res.on('error', reject);
+                  res.resume();
+                  res.on('end', () => resolve(res.statusCode!));
+                });
+                req.setTimeout(1500, () => req.destroy(Error('direct peer request timed out')));
+                req.on('error', reject);
+                req.end();
+              });
+              expect(directStatus).toBe(403);
+              expect(store.presentation(id)).toBeNull();
+              expect(store.typedEvidence(id)).toBeNull();
+            } finally {
+              if (integrated.listening) await new Promise<void>(resolve => integrated.close(() => resolve()));
+            }
+          } finally {
+            if (peer.listening) await new Promise<void>(resolve => peer.close(() => resolve()));
+          }
+        } finally { store.close(); }
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
     } finally {
       if (listener.listening) await new Promise<void>(resolve => listener.close(() => resolve()));
     }
