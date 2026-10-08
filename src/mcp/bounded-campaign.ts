@@ -3,7 +3,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { BoundedTasks, Contract } from "./bounded-task.js";
 import { GatewayError, safePath } from "./local-gateway.js";
-import { acquireProcessLock } from "./bounded-process-lock.js";
+import { acquireProcessLock, ProcessLockInspectionRequired } from "./bounded-process-lock.js";
 
 const idPattern = /^bounded-[a-f0-9]{32}$/;
 const newId = () => `bounded-${randomUUID().replaceAll("-", "")}`;
@@ -17,6 +17,7 @@ export type Campaign = {
 };
 type Lifecycle = { lifecycleRunning: Set<string>; runBoundedLifecycle(id: string): boolean };
 export class BoundedCampaigns {
+  private stopTimer?: () => void;
   constructor(private readonly root: string, private readonly tasks: BoundedTasks,
     private readonly lifecycle: Lifecycle, private readonly recover: (id: string) => void,
     private readonly committed: (id: string) => boolean) {}
@@ -54,7 +55,7 @@ export class BoundedCampaigns {
     c.deadline = Date.parse(c.started_at) + 45 * 60_000;
     this.save(c);
     try {
-      const started = this.tasks.start(contract, id);
+      const started = this.tasks.start(contract, id, undefined, c.deadline);
       c.task_ids.push(id); c.pending_task = null; this.save(c);
       this.lifecycle.runBoundedLifecycle(id);
       return started;
@@ -66,12 +67,25 @@ export class BoundedCampaigns {
     this.save(c);
   }
   tick(id: string) {
-    const release = acquireProcessLock(safePath(this.root, `${id}.controller.lock`));
-    if (!release) return;
+    let release: (() => void) | null = null;
     let c: Campaign | undefined;
     try {
       c = this.status(id);
       if (c.state === "COMMITTED" || c.state === "STOPPED") return;
+      release = acquireProcessLock(safePath(this.root, `${id}.controller.lock`));
+      if (!release) return;
+      c = this.status(id);
+      if (c.state === "COMMITTED" || c.state === "STOPPED") return;
+      // Project an existing verified receipt even after downtime outlasts the
+      // execution budget. This path never starts work or creates a new commit.
+      if (!c.pending_task && this.tasks.status(c.current_task).state === "REVIEW_ACCEPTED") {
+        const unlock = this.tasks.lifecycleLock(c.current_task);
+        if (!unlock) return;
+        try {
+          if (this.committed(c.current_task)) { c.state = "COMMITTED"; this.save(c); return; }
+        } finally { unlock(); }
+      }
+      if (Date.now() >= c.deadline) { this.stop(c, "CAMPAIGN_TIME_BUDGET_EXHAUSTED"); return; }
       if (this.lifecycle.lifecycleRunning.has(c.current_task)) return;
       // Another Dashboard/Gateway process may own this task's full lifecycle.
       if (!c.pending_task) {
@@ -79,13 +93,12 @@ export class BoundedCampaigns {
         if (!probe) return;
         probe();
       }
-      if (Date.now() >= c.deadline) { this.stop(c, "CAMPAIGN_TIME_BUDGET_EXHAUSTED"); return; }
       if (c.pending_task) {
         let exists = false;
         try { this.tasks.status(c.pending_task); exists = true; } catch (error) {
           if (!(error instanceof GatewayError) || error.code !== "NOT_FOUND") throw error;
         }
-        if (!exists) this.tasks.start(c.contract, c.pending_task, c.task_ids.at(-1));
+        if (!exists) this.tasks.start(c.contract, c.pending_task, c.task_ids.at(-1), c.deadline);
         c.current_task = c.pending_task;
         if (!c.task_ids.includes(c.current_task)) c.task_ids.push(c.current_task);
         c.pending_task = null; c.state = "RUNNING"; c.finalize_attempts = 0; this.save(c);
@@ -116,12 +129,14 @@ export class BoundedCampaigns {
       c.pending_task = newId(); this.save(c);
       // A subsequent tick consumes the persisted handoff intent, including after restart.
     } catch (error) {
-      if (c) this.stop(c, error instanceof GatewayError ? error.code : "CAMPAIGN_RECONCILIATION_FAILED");
-    } finally { release(); }
+      if (c) this.stop(c, error instanceof GatewayError ? error.code : error instanceof ProcessLockInspectionRequired ? error.message : "CAMPAIGN_RECONCILIATION_FAILED");
+    } finally { release?.(); }
   }
   run() {
+    if (this.stopTimer) return this.stopTimer;
     const reconcile = () => { for (const c of this.list()) this.tick(c.campaign_id); };
     reconcile(); const timer = setInterval(reconcile, 1500); timer.unref();
-    return () => clearInterval(timer);
+    this.stopTimer = () => { clearInterval(timer); this.stopTimer = undefined; };
+    return this.stopTimer;
   }
 }

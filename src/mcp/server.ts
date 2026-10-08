@@ -29,7 +29,7 @@ import type { RepoResearchRoots } from "./repo-research.js";
 import { BoundedTasks, type ExecutionProfile } from "./bounded-task.js";
 import { recoverFailedBoundedWorkspace } from "./bounded-workspace-recovery.js";
 export { recoverFailedBoundedWorkspace } from "./bounded-workspace-recovery.js";
-import { prepareBoundedCommit, commitBoundedPatch, getBoundedCommitStatus } from "./typed-actions.js";
+import { prepareBoundedCommit, commitBoundedPatch, getBoundedCommitStatus, reconcileBoundedCommit } from "./typed-actions.js";
 import type { OrchestrationReadDependencies } from "./local-gateway.js";
 import { semanticSession } from "./semantic-session.js";
 
@@ -431,6 +431,7 @@ export function createBoundedLifecycleController(
 ) {
   const lifecycleRunning = new Set<string>();
   const finalizeBoundedPass = (taskId: string, repo: string) => {
+    tasks.assertWithinDeadline(taskId);
     const fixedRoot = boundedFinalizationRoot(workspaceRoot, repo);
     if (boundedFinalizer) {
       boundedFinalizer(taskId);
@@ -447,6 +448,7 @@ export function createBoundedLifecycleController(
     void (async () => {
       try {
         for (;;) {
+          tasks.assertWithinDeadline(taskId);
           const initial = tasks.status(taskId);
           if (initial.state === "REVIEW_ACCEPTED") { finalizeBoundedPass(taskId, initial.contract.repo); return; }
           if (initial.state === "RUNNING") await tasks.execute(taskId);
@@ -506,6 +508,7 @@ export function createBoundedLifecycleController(
             return;
           }
           const beforeReview = tasks.status(taskId);
+          tasks.assertWithinDeadline(taskId);
           const pending = beforeReview.revisions.at(-1);
           if (beforeReview.state !== "REVIEW_PENDING" || pending?.revision !== latest.revision ||
               pending.manifest_sha256 !== latest.manifest_sha256 ||
@@ -546,6 +549,7 @@ const productionBoundedLifecycle = createBoundedLifecycleController(
 );
 
 export function startProductionBoundedTask(input: Parameters<BoundedTasks["start"]>[0]) {
+  productionBoundedCampaigns.run();
   return productionBoundedCampaigns.start(input);
 }
 
@@ -556,7 +560,7 @@ const productionBoundedCampaigns = new BoundedCampaigns(path.join(getStateDir(),
       if (!boundedTasks.verifiedExhaustedWorkspaceDiff(id) && !boundedTasks.verifiedFailedWorkspaceDiff(id)) throw new GatewayError("RECOVERY_NOT_ALLOWED", "Evidence mismatch");
       recoverFailedBoundedWorkspace(boundedTasks, { root } as Workspace, task, root);
     });
-  }, id => getProductionBoundedCommitStatus(id).state === "COMMITTED");
+  }, id => reconcileBoundedCommit(boundedTasks, id, getStateDir(), boundedRepos[boundedTasks.status(id).contract.repo]));
 export const getProductionBoundedCampaigns = () => productionBoundedCampaigns.list();
 export const runProductionBoundedCampaigns = () => productionBoundedCampaigns.run();
 
@@ -588,7 +592,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
     annotations: { readOnlyHint: false, openWorldHint: false },
   }, async (args, extra) => {
     const denied = requireScope(extra.authInfo, "orchestration.start"); if (denied) return denied;
-    try { const started = tasks.start(args); runBoundedLifecycle(started.task_id);
+    try { const started = ctx.boundedTasks ? tasks.start(args) : startProductionBoundedTask(args);
+      if (ctx.boundedTasks) runBoundedLifecycle(started.task_id);
       return okStructured(started); } catch (error) { return mapError(error); }
   });
   server.registerTool("continue_bounded_opencode_task", {

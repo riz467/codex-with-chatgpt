@@ -487,7 +487,7 @@ describe("retry and empty execution surface", () => {
       "canonicalizeMaintenanceSnapshot", "executableMutationAdapters", "hashActionRequest", "hashMaintenancePlan",
       "hashMaintenanceSnapshot", "maintenanceActionKinds", "maintenanceCheckKinds", "maintenancePlanSchema",
       "maintenanceSnapshotSchema", "parseActionRequest", "parseMaintenancePlan", "parseMaintenanceSnapshot", "typedActionBootstrap",
-      "prepareBoundedCommit", "commitBoundedPatch", "getBoundedCommitStatus",
+      "prepareBoundedCommit", "commitBoundedPatch", "getBoundedCommitStatus", "reconcileBoundedCommit",
       "assessProductionKvmReadiness", "hashProductionKvmCandidate", "hashProductionKvmEvidence",
       "parseProductionKvmCandidate", "parseProductionKvmEvidence", "productionKvmCandidateSchema",
       "productionKvmEvidenceSchema", "productionKvmReadinessGateNames",
@@ -1009,6 +1009,17 @@ describe("bounded local commit", () => {
       fs.unlinkSync(path.join(f.stateDir, "bounded-committed-v1", `${f.taskId}.json`));
       expect(core.commitBoundedPatch(f.tasks, f.taskId, f.stateDir, f.repo)).toEqual(first);
       expect(f.git("rev-list", "--count", `${f.prepared.baseline_head}..HEAD`)).toBe("1");
+    } finally { fs.rmSync(f.dir, { recursive: true, force: true }); }
+  });
+  it("projects an existing sealed receipt after subsequent repository work", () => {
+    const f = fixture();
+    try {
+      core.commitBoundedPatch(f.tasks, f.taskId, f.stateDir, f.repo);
+      fs.writeFileSync(path.join(f.repo, "other.txt"), "later work\n");
+      f.git("add", "other.txt"); f.git("commit", "-qm", "later fixture work");
+      const head = f.git("rev-parse", "HEAD");
+      expect(core.reconcileBoundedCommit(f.tasks, f.taskId, f.stateDir, f.repo)).toBe(true);
+      expect(f.git("rev-parse", "HEAD")).toBe(head);
     } finally { fs.rmSync(f.dir, { recursive: true, force: true }); }
   });
   it("rejects reviewer drift before a local commit", () => {

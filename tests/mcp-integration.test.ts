@@ -545,6 +545,7 @@ describe("bounded semantic lifecycle over MCP", () => {
       referenceEvidence: vi.fn(() => ({ version: 1, baseline_head: hash, references: [], unavailable: [] })),
       claimSemanticAttempt: vi.fn(() => true), recordSemanticAttempt: vi.fn(),
       semanticAttemptResult: vi.fn(() => null),
+      assertWithinDeadline: vi.fn(),
       submitReview };
     server = createMcpServer({ workspace: { root: "C:\\work\\bounded-review-live-fixture" } as Workspace,
       logger: {} as Logger, boundedTasks: tasks as unknown as BoundedTasks,

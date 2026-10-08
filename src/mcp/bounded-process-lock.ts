@@ -2,12 +2,23 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
+export class ProcessLockInspectionRequired extends Error {
+  constructor() { super("PROCESS_LOCK_GATE_REQUIRES_INSPECTION"); }
+}
+
 // PID reuse and access-denied are conservatively treated as alive. Legacy/partial
 // locks without a parseable owner are never stolen.
 export function acquireProcessLock(lock: string): (() => void) | null {
   fs.mkdirSync(path.dirname(lock), { recursive: true });
   const gate = `${lock}.gate`;
-  try { fs.mkdirSync(gate); } catch { return null; }
+  try { fs.mkdirSync(gate); } catch {
+    // An unowned gate cannot safely be stolen. Bound contention waiting and
+    // surface inspection instead of silently retrying an interrupted gate forever.
+    try {
+      if (Date.now() - fs.statSync(gate).mtimeMs >= 30_000) throw new ProcessLockInspectionRequired();
+    } catch (error) { if (error instanceof ProcessLockInspectionRequired) throw error; }
+    return null;
+  }
   const owner = { pid: process.pid, nonce: randomUUID() };
   try {
     if (fs.existsSync(lock)) {

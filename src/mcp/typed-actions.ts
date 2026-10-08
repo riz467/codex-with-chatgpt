@@ -793,7 +793,7 @@ function checkCommittedBinding(receipt: CommittedReceipt, prepared: PreparedRece
       receipt.prepared_receipt_digest !== preparedHash(prepared) ||
       receipt.commit === prepared.baseline_head) throw new Error("COMMITTED receipt binding mismatch");
 }
-export function commitBoundedPatch(tasks: BoundedTasks, taskId: string, stateDir: string, repoRoot: string): CommittedReceipt {
+export function commitBoundedPatch(tasks: BoundedTasks, taskId: string, stateDir: string, repoRoot: string, allowNewCommit = true): CommittedReceipt {
   const prepared = preparedForCommit(tasks, taskId, stateDir);
   const existing = readCommitted(stateDir, taskId);
   const root = path.resolve(repoRoot);
@@ -807,6 +807,9 @@ export function commitBoundedPatch(tasks: BoundedTasks, taskId: string, stateDir
     // Only the exact, clean, single-child commit can be reconciled after a receipt-write crash.
     verifyCommittedTree(root, prepared, head);
   } else {
+    if (!allowNewCommit) throw new Error("NO_EXISTING_COMMIT_TO_RECONCILE");
+    const deadline = tasks.status(taskId).campaign_deadline;
+    if (deadline !== undefined && (!Number.isFinite(deadline) || Date.now() >= deadline)) throw new Error("CAMPAIGN_TIME_BUDGET_EXHAUSTED");
     const status = boundedGit(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all",
       "--ignore-submodules=none", "--no-renames"]).toString("utf8").split("\0").filter(Boolean);
     const stagedResume = status.length > 0 && status.every(entry => entry.slice(0, 2) === "M ");
@@ -850,6 +853,8 @@ export function commitBoundedPatch(tasks: BoundedTasks, taskId: string, stateDir
     assertPaths(stagedStatus.map(entry => entry.slice(3)).sort(), prepared.edit_paths);
     const env = { ...process.env, GIT_AUTHOR_NAME: "Bounded Commit", GIT_AUTHOR_EMAIL: "bounded@localhost",
       GIT_COMMITTER_NAME: "Bounded Commit", GIT_COMMITTER_EMAIL: "bounded@localhost" };
+    const commitDeadline = tasks.status(taskId).campaign_deadline;
+    if (commitDeadline !== undefined && (!Number.isFinite(commitDeadline) || Date.now() >= commitDeadline)) throw new Error("CAMPAIGN_TIME_BUDGET_EXHAUSTED");
     boundedGit(root, ["-c", `core.hooksPath=${hooks}`, "-c", "commit.gpgsign=false",
       "-c", "user.name=Bounded Commit", "-c", "user.email=bounded@localhost",
       "commit", "-m", `Bounded patch ${taskId}`], { env });
@@ -861,6 +866,20 @@ export function commitBoundedPatch(tasks: BoundedTasks, taskId: string, stateDir
   return writeCommitted(stateDir, committedReceiptSchema.parse({ task_id: taskId,
     prepared_receipt_digest: preparedHash(prepared), commit: head,
     state: "COMMITTED", authoritative_done: false }));
+}
+
+// Rebuild only the receipt for an already-existing exact reviewed commit. This
+// path is safe after the execution deadline and can never stage or commit files.
+export function reconcileBoundedCommit(tasks: BoundedTasks, taskId: string, stateDir: string, repoRoot: string): boolean {
+  const status = getBoundedCommitStatus(tasks, taskId, stateDir);
+  // A sealed existing receipt remains historical evidence if later tasks have
+  // advanced this repository. Only missing-receipt reconstruction inspects HEAD.
+  if (status.state === "COMMITTED") return true;
+  if (status.state === "NOT_PREPARED") return false;
+  const prepared = preparedForCommit(tasks, taskId, stateDir);
+  if (gitText(path.resolve(repoRoot), ["rev-parse", "HEAD"]) === prepared.baseline_head) return false;
+  commitBoundedPatch(tasks, taskId, stateDir, repoRoot, false);
+  return true;
 }
 
 export function getBoundedCommitStatus(tasks: BoundedTasks, taskId: string, stateDir: string):
