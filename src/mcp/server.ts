@@ -547,14 +547,15 @@ export function getProductionBoundedCommitStatus(taskId: string) {
 }
 
 export function recoverFailedBoundedWorkspace(
-  tasks: Pick<BoundedTasks, "executing">,
+  tasks: Pick<BoundedTasks, 'executing' | 'verifiedExhaustedWorkspaceDiff'>,
   workspace: Workspace,
   task: ReturnType<BoundedTasks["status"]>,
   root: string,
 ) {
+  const budgetProof = task.state === 'ESCALATE' && task.stop_reason === 'REVISION_BUDGET_EXHAUSTED' && tasks.verifiedExhaustedWorkspaceDiff(task.task_id);
   if (task.state !== "ESCALATE" ||
-      (task.stop_reason !== "VERIFY_FAILED" && task.stop_reason !== "VERIFY_TIMEOUT" &&
-       task.stop_reason !== "EXECUTION_UNKNOWN") ||
+      !(task.stop_reason === "VERIFY_FAILED" || task.stop_reason === "VERIFY_TIMEOUT" ||
+        task.stop_reason === "EXECUTION_UNKNOWN" || budgetProof) ||
       tasks.executing(task.task_id) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(task.baseline_head)) {
     throw new GatewayError("RECOVERY_NOT_ALLOWED", "This task is not eligible for workspace recovery");
   }
