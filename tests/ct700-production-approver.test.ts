@@ -596,9 +596,9 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
     const clientKey = generateKeyPairSync('ed25519');
     const now = Date.now(), from = new Date(now - 86_400_000), to = new Date(now + 86_400_000);
     const issue = (serial: number, subject: string, issuer: string, publicKey: typeof root.publicKey,
-      issuerKey: typeof root.privateKey, extensions: Buffer[]) => {
+      issuerKey: typeof root.privateKey, extensions: Buffer[], validFrom = from, validTo = to) => {
       const tbs = seq(tlv(0xa0, tlv(0x02, Buffer.from([2]))), tlv(0x02, Buffer.from([serial])),
-        ed25519, name(issuer), seq(generalizedTime(from), generalizedTime(to)), name(subject),
+        ed25519, name(issuer), seq(generalizedTime(validFrom), generalizedTime(validTo)), name(subject),
         publicKey.export({ format: 'der', type: 'spki' }) as Buffer, tlv(0xa3, seq(...extensions)));
       return new X509Certificate(seq(tbs, ed25519, tlv(0x03, Buffer.concat([Buffer.from([0]), sign(null, tbs, issuerKey)]))));
     };
@@ -621,6 +621,10 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
     expect(ca.ca).toBe(true);
     expect(serverCert.subjectAltName).toBe('IP Address:127.0.0.1');
     expect(clientCert.subjectAltName).toBe(`URI:${role}`);
+    const expiredClientCert = issue(4, 'CT701 expired test client', 'CT700 test root', clientKey.publicKey, root.privateKey,
+      leafExtensions('2b06010505070302', tlv(0x86, text(role))), new Date(now - 2 * 86_400_000), from);
+    expect(expiredClientCert.verify(root.publicKey)).toBe(true);
+    expect(Date.parse(expiredClientCert.validTo)).toBeLessThan(Date.now());
     const caPem = pem(ca.raw), serverPem = pem(serverCert.raw), clientPem = pem(clientCert.raw);
     const serverPrivateKey = serverKey.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString();
     const clientPrivateKey = clientKey.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString();
