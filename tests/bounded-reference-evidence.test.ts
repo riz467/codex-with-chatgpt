@@ -76,3 +76,22 @@ it("recovers one crashed review claim and reuses its sealed result after a secon
   fs.writeFileSync(file, JSON.stringify(record));
   await expect(reviewWithReferences(f.tasks, f.id, 1, "contract", "ses_fixture", reviewer)).rejects.toThrow("REVIEW_BINDING_INVALID");
 });
+it.each([false, true])("durably consumes both review claims after a timeout (both fail=%s)", async bothFail => {
+  const f = await fixture(); let calls = 0;
+  const reviewer: typeof semanticSession = async () => {
+    calls++;
+    if (calls === 1 || bothFail) throw new Error("SEMANTIC_TIMEOUT");
+    return { decision: { review_result: "PASS", reason_category: "GOAL_SATISFIED", summary: "Goal satisfied",
+      evidence_refs: [1, 2, 3, 4], unresolved_issues: [] }, session_id: "ses_independent", reviewer_profile: "fixture",
+      reviewer_agent_sha256: "0".repeat(64), model: null, provider: null, usage: null };
+  };
+  const review = () => reviewWithReferences(f.tasks, f.id, 1, "contract", "ses_fixture", reviewer);
+  if (bothFail) await expect(review()).rejects.toThrow("SEMANTIC_TIMEOUT");
+  else expect((await review()).decision.review_result).toBe("PASS");
+  expect(calls).toBe(2);
+  expect(fs.existsSync(path.join(f.root, "tasks", f.id, "revision-1-semantic-failure-1.json"))).toBe(true);
+  if (bothFail) await expect(review()).rejects.toThrow("SEMANTIC_EVIDENCE_EXHAUSTED");
+  else expect((await review()).decision.review_result).toBe("PASS");
+  expect(calls).toBe(2);
+  expect(f.tasks.status(f.id).revisions).toHaveLength(1);
+});

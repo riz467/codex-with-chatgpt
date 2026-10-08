@@ -509,6 +509,7 @@ describe("bounded semantic lifecycle over MCP", () => {
   let diagnostic: ReturnType<typeof vi.fn>;
   let submitReview: ReturnType<typeof vi.fn>;
   let release: (() => void) | undefined;
+  let artifactSize: number;
   const call = (name: string, arguments_: Record<string, unknown>) =>
     localClient.callTool({ name, arguments: arguments_ });
   const settled = async (condition: () => boolean) => {
@@ -516,6 +517,7 @@ describe("bounded semantic lifecycle over MCP", () => {
     expect(condition()).toBe(true);
   };
   beforeEach(async () => {
+    artifactSize = diff.length;
     task = { task_id: taskId, state: "RUNNING", contract_sha256: hash, contract: input,
       revisions: [] as any[] };
     execute = vi.fn(async () => {
@@ -537,13 +539,14 @@ describe("bounded semantic lifecycle over MCP", () => {
     const tasks = { start: vi.fn(() => ({ task_id: taskId, state: "RUNNING" })),
       executing: vi.fn(() => false), lifecycleLock: vi.fn(() => () => {}), execute, status: vi.fn(() => task),
       artifacts: vi.fn((_id: string, revision: number) => ({ files: [{ name: `revision-${revision}-diff.patch`,
-        size: diff.length, sha256: diffHash }] })),
+        size: artifactSize, sha256: diffHash }] })),
       readArtifact: vi.fn((_id: string, _revision: number, _name: string, offset: number) => ({
         offset, manifest_sha256: hash, file_sha256: diffHash, next_offset: null,
         content_base64: diff.toString("base64") })),
       recordSemanticReviewDiagnostic: diagnostic,
       referenceEvidence: vi.fn(() => ({ version: 1, baseline_head: hash, references: [], unavailable: [] })),
       claimSemanticAttempt: vi.fn(() => true), recordSemanticAttempt: vi.fn(),
+      recordSemanticAttemptFailure: vi.fn(),
       semanticAttemptResult: vi.fn(() => null),
       assertWithinDeadline: vi.fn(),
       submitReview };
@@ -617,11 +620,12 @@ describe("bounded semantic lifecycle over MCP", () => {
     { name: "Error", code: "REVIEWER_UNAVAILABLE", message: "Reviewer unavailable", expected: "SEMANTIC_REVIEW_FAILED" },
   ])("records reviewer failure $message without submitting a review", async ({ name, code, message, expected }) => {
     const failure = Object.assign(new Error(message), { name, code });
-    reviewer.mockRejectedValueOnce(failure);
+    reviewer.mockRejectedValue(failure);
     await call("start_bounded_opencode_task", input);
     await settled(() => !!release);
     release!();
     await settled(() => diagnostic.mock.calls.length === 1);
+    expect(reviewer).toHaveBeenCalledTimes(2);
     expect(diagnostic).toHaveBeenCalledWith({ task_id: taskId, revision: 1,
       manifest_sha256: hash, phase: "SEMANTIC_REVIEW", error_code: expected });
     expect(task.state).toBe("REVIEW_PENDING");
@@ -641,6 +645,17 @@ describe("bounded semantic lifecycle over MCP", () => {
     }
     expect((await call("continue_bounded_opencode_task", { task_id: taskId, command: "deploy" })).isError).toBe(true);
     expect(execute).not.toHaveBeenCalled();
+    expect(finalizer).not.toHaveBeenCalled();
+  });
+  it("surfaces an oversized verified diff without invoking the reviewer or finalizer", async () => {
+    artifactSize = 65537;
+    await call("start_bounded_opencode_task", input);
+    await settled(() => !!release); release!();
+    await settled(() => diagnostic.mock.calls.length === 1);
+    expect(diagnostic).toHaveBeenCalledWith({ task_id: taskId, revision: 1,
+      manifest_sha256: hash, phase: "SEMANTIC_REVIEW", error_code: "SEMANTIC_REVIEW_INVALID" });
+    expect(reviewer).not.toHaveBeenCalled();
+    expect(submitReview).not.toHaveBeenCalled();
     expect(finalizer).not.toHaveBeenCalled();
   });
 });

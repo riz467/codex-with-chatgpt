@@ -42,8 +42,12 @@ export class BoundedCampaigns {
   list() {
     if (!fs.existsSync(this.root)) return [];
     return fs.readdirSync(this.root).filter(n => /^bounded-[a-f0-9]{32}\.json$/.test(n)).map(n => {
-      try { return this.status(n.slice(0, -5)); } catch { return null; }
-    }).filter((c): c is Campaign => c !== null);
+      try { return this.status(n.slice(0, -5)); } catch {
+        return { campaign_id: n.slice(0, -5), state: "STOPPED" as const, current_task: null,
+          task_ids: [], impact_paths: [], stop_reason: "CAMPAIGN_LEDGER_INVALID",
+          human_action: "Inspect the invalid campaign ledger; its bytes were preserved and no task was resumed." };
+      }
+    });
   }
   start(contract: Contract) {
     const id = newId();
@@ -140,7 +144,7 @@ export class BoundedCampaigns {
   }
   run() {
     if (this.stopTimer) return this.stopTimer;
-    const reconcile = () => { for (const c of this.list()) this.tick(c.campaign_id); };
+    const reconcile = () => { for (const c of this.list()) if ("contract" in c) this.tick(c.campaign_id); };
     reconcile(); const timer = setInterval(reconcile, 1500); timer.unref();
     this.stopTimer = () => { clearInterval(timer); this.stopTimer = undefined; };
     return this.stopTimer;

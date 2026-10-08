@@ -704,6 +704,12 @@ export class BoundedTasks {
     store(this.dir(id), `revision-${revision}-semantic-result-${attempt}.json`, json({ task_id: id, revision, attempt,
       manifest_sha256: task.revisions[revision - 1].manifest_sha256, result_sha256: sha(json(result)), result }));
   }
+  recordSemanticAttemptFailure(id: string, revision: number, attempt: number) {
+    const task = this.load(id);
+    store(this.dir(id), `revision-${revision}-semantic-failure-${attempt}.json`, json({ task_id: id,
+      revision, attempt, manifest_sha256: task.revisions[revision - 1].manifest_sha256,
+      error_code: "SEMANTIC_ATTEMPT_FAILED" }));
+  }
   semanticAttemptResult(id: string, revision: number, attempt: number): unknown | null {
     const bundle = this.artifacts(id, revision);
     const file = safePath(this.dir(id), `revision-${revision}-semantic-result-${attempt}.json`);

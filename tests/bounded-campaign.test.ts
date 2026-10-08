@@ -172,3 +172,14 @@ it.each([["lifecycle", "unknown"], ["lifecycle", "live"], ["controller", "unknow
   expect(fs.existsSync(lock)).toBe(true);
   expect(f.counts()).toEqual({ proposals: 1, reviews: 1, finalizations: 1 });
 }, 30000);
+it("projects invalid campaign ledgers for inspection without rewriting or resuming them", () => {
+  const f = fixture(0);
+  const root = path.join(f.root, "campaigns"); fs.mkdirSync(root);
+  const id = `bounded-${"a".repeat(32)}`, file = path.join(root, `${id}.json`);
+  const invalid = '{"version":1,"contract_digest":"broken"'; fs.writeFileSync(file, invalid);
+  expect(f.campaigns.list()).toEqual([expect.objectContaining({ campaign_id: id,
+    state: "STOPPED", stop_reason: "CAMPAIGN_LEDGER_INVALID", human_action: expect.any(String) })]);
+  const stop = f.campaigns.run(); stop();
+  expect(fs.readFileSync(file, "utf8")).toBe(invalid);
+  expect(f.counts()).toEqual({ proposals: 0, reviews: 0, finalizations: 0 });
+}, 30000);
