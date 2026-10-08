@@ -736,7 +736,13 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
       try {
         const store = new ApproverStore(path.join(dir, 'fixture.db'), 'production');
         try {
-          const apps = createProductionApprover(config, store, generateKeyPairSync('ed25519').privateKey);
+          const pinned = fixture();
+          let registrationEnabled = false, lookupEnabled = false;
+          const verifier: TrustedTypedActionPresentationVerifier = {
+            verifyRegistration: () => registrationEnabled ? pinned : null,
+            authorizeLookup: ({ approvalRequestId }) => lookupEnabled && approvalRequestId === pinned.request.approvalRequestId,
+          };
+          const apps = createProductionApprover(config, store, generateKeyPairSync('ed25519').privateKey, verifier, () => base);
           const peer = createServer(apps.peer);
           try {
             await new Promise<void>((resolve, reject) => {
@@ -768,11 +774,36 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
                 req.on('error', reject);
                 req.end();
               });
-              const id = randomUUID();
+              const post = () => new Promise<{ status: number; protocol: string | null }>((resolve, reject) => {
+                const body = JSON.stringify(pinned);
+                const req = https.request({ hostname: '127.0.0.1', port: integratedAddress.port,
+                  path: '/api/typed-action-presentations', method: 'POST',
+                  minVersion: 'TLSv1.3', maxVersion: 'TLSv1.3', ca: caPem, cert: clientPem, key: clientPrivateKey,
+                  rejectUnauthorized: true, agent: false,
+                  headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, res => {
+                  const protocol = (res.socket as TLSSocket).getProtocol();
+                  res.on('error', reject);
+                  res.resume();
+                  res.on('end', () => resolve({ status: res.statusCode!, protocol }));
+                });
+                req.setTimeout(1500, () => req.destroy(Error('integrated TLS request timed out')));
+                req.on('error', reject);
+                req.end(body);
+              });
+              const id = pinned.request.approvalRequestId;
               expect(await get(`/api/typed-action-status/${id}`)).toEqual({ status: 403, protocol: 'TLSv1.3' });
               expect(await get('/health')).toEqual({ status: 404, protocol: 'TLSv1.3' });
+              expect(await post()).toEqual({ status: 403, protocol: 'TLSv1.3' });
               expect(store.presentation(id)).toBeNull();
               expect(store.typedEvidence(id)).toBeNull();
+              registrationEnabled = true;
+              expect(await post()).toEqual({ status: 201, protocol: 'TLSv1.3' });
+              expect(store.presentation(id)?.presentation).toEqual(pinned);
+              expect(await get(`/api/typed-action-status/${id}`)).toEqual({ status: 403, protocol: 'TLSv1.3' });
+              expect(await get(`/api/typed-action-evidence/${id}`)).toEqual({ status: 403, protocol: 'TLSv1.3' });
+              lookupEnabled = true;
+              expect(await get(`/api/typed-action-status/${id}`)).toEqual({ status: 200, protocol: 'TLSv1.3' });
+              expect(await get(`/api/typed-action-evidence/${id}`)).toEqual({ status: 404, protocol: 'TLSv1.3' });
               const directStatus = await new Promise<number>((resolve, reject) => {
                 const req = request({ hostname: '127.0.0.1', port: 48769, method: 'GET',
                   path: `/api/typed-action-status/${id}`, agent: false }, res => {
@@ -785,7 +816,7 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
                 req.end();
               });
               expect(directStatus).toBe(403);
-              expect(store.presentation(id)).toBeNull();
+              expect(store.presentation(id)?.presentation).toEqual(pinned);
               expect(store.typedEvidence(id)).toBeNull();
             } finally {
               if (integrated.listening) await new Promise<void>(resolve => integrated.close(() => resolve()));
