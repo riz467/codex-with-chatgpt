@@ -761,9 +761,10 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
               });
               const integratedAddress = integrated.address();
               if (!integratedAddress || typeof integratedAddress === 'string') throw Error('missing integrated listener');
-              const get = (route: string) => new Promise<{ status: number; protocol: string | null }>((resolve, reject) => {
+              const get = (route: string, clientCert = clientPem, clientKey = clientPrivateKey) =>
+                new Promise<{ status: number; protocol: string | null }>((resolve, reject) => {
                 const req = https.request({ hostname: '127.0.0.1', port: integratedAddress.port, path: route, method: 'GET',
-                  minVersion: 'TLSv1.3', maxVersion: 'TLSv1.3', ca: caPem, cert: clientPem, key: clientPrivateKey,
+                  minVersion: 'TLSv1.3', maxVersion: 'TLSv1.3', ca: caPem, cert: clientCert, key: clientKey,
                   rejectUnauthorized: true, agent: false }, res => {
                   const protocol = (res.socket as TLSSocket).getProtocol();
                   res.on('error', reject);
@@ -803,6 +804,11 @@ describe('CT700 offline TLS 1.3 mutual handshake', () => {
               expect(await get(`/api/typed-action-evidence/${id}`)).toEqual({ status: 403, protocol: 'TLSv1.3' });
               lookupEnabled = true;
               expect(await get(`/api/typed-action-status/${id}`)).toEqual({ status: 200, protocol: 'TLSv1.3' });
+              expect(await get(`/api/typed-action-status/${id}`, pem(wrongSpkiCert.raw),
+                otherClientKey.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString()))
+                .toEqual({ status: 403, protocol: 'TLSv1.3' });
+              expect(await get(`/api/typed-action-status/${id}`, pem(wrongRoleCert.raw), clientPrivateKey))
+                .toEqual({ status: 403, protocol: 'TLSv1.3' });
               expect(await get(`/api/typed-action-evidence/${id}`)).toEqual({ status: 404, protocol: 'TLSv1.3' });
               const directStatus = await new Promise<number>((resolve, reject) => {
                 const req = request({ hostname: '127.0.0.1', port: 48769, method: 'GET',
