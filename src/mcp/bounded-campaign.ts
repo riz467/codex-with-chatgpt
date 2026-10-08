@@ -128,6 +128,9 @@ export class BoundedCampaigns {
         c.finalize_attempts++; this.save(c); this.lifecycle.runBoundedLifecycle(c.current_task); return;
       }
       const latest = task.revisions.at(-1);
+      if (task.state === "REVIEW_PENDING" && (!latest || !latest.worker?.session_id || !latest.worker?.execution_id || !latest.verify?.passed)) {
+        this.stop(c, "REVIEW_EVIDENCE_MISSING"); return;
+      }
       if (latest?.semantic_review_diagnostic) { this.stop(c, latest.semantic_review_diagnostic.error_code); return; }
       if (task.state !== "ESCALATE") { this.lifecycle.runBoundedLifecycle(c.current_task); return; }
       if (!["REVISION_BUDGET_EXHAUSTED", "VERIFY_FAILED", "VERIFY_TIMEOUT", "EXECUTION_UNKNOWN", "WORKER_FAILED", "WORKER_TIMEOUT", "INVALID_PROPOSAL"].includes(task.stop_reason ?? "")) {

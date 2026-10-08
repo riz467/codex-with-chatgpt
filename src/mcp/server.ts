@@ -454,21 +454,22 @@ export function createBoundedLifecycleController(
           if (initial.state === "RUNNING") await tasks.execute(taskId);
           const current = tasks.status(taskId);
           const latest = current.revisions.at(-1);
-          if (current.state !== "REVIEW_PENDING" || !latest || !latest.worker?.session_id ||
-              !latest.worker?.execution_id || !latest.verify?.passed) return;
+          if (current.state !== "REVIEW_PENDING") return;
+          if (!latest || !latest.worker?.session_id || !latest.worker?.execution_id || !latest.verify?.passed)
+            throw new Error("REVIEW_EVIDENCE_MISSING");
           const listing = tasks.artifacts(taskId, latest.revision);
           const rejectEvidence = () => tasks.recordSemanticReviewDiagnostic({ task_id: taskId,
             revision: latest.revision, manifest_sha256: latest.manifest_sha256,
             phase: "SEMANTIC_REVIEW", error_code: "SEMANTIC_REVIEW_INVALID" });
           const diffName = `revision-${latest.revision}-diff.patch`;
           const artifact = listing.files.find((file) => file.name === diffName);
-          if (!artifact || artifact.size > 65536 || artifact.size < 1) { rejectEvidence(); return; }
+          if (!artifact || !Number.isSafeInteger(artifact.size) || artifact.size > 65536 || artifact.size < 1) { rejectEvidence(); return; }
           const chunks: Buffer[] = [];
           let offset = 0;
           while (offset < artifact.size) {
             const page = tasks.readArtifact(taskId, latest.revision, diffName, offset);
             if (page.offset !== offset || page.manifest_sha256 !== latest.manifest_sha256 ||
-                page.file_sha256 !== artifact.sha256 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(page.content_base64)) return;
+                page.file_sha256 !== artifact.sha256 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(page.content_base64)) { rejectEvidence(); return; }
             const bytes = Buffer.from(page.content_base64, "base64");
             if (!bytes.length || offset + bytes.length > artifact.size ||
                 page.next_offset !== (offset + bytes.length === artifact.size ? null : offset + bytes.length)) { rejectEvidence(); return; }

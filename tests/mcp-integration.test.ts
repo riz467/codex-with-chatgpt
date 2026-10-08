@@ -510,6 +510,7 @@ describe("bounded semantic lifecycle over MCP", () => {
   let submitReview: ReturnType<typeof vi.fn>;
   let release: (() => void) | undefined;
   let artifactSize: number;
+  let pageOverride: Record<string, unknown>;
   const call = (name: string, arguments_: Record<string, unknown>) =>
     localClient.callTool({ name, arguments: arguments_ });
   const settled = async (condition: () => boolean) => {
@@ -518,6 +519,7 @@ describe("bounded semantic lifecycle over MCP", () => {
   };
   beforeEach(async () => {
     artifactSize = diff.length;
+    pageOverride = {};
     task = { task_id: taskId, state: "RUNNING", contract_sha256: hash, contract: input,
       revisions: [] as any[] };
     execute = vi.fn(async () => {
@@ -542,7 +544,7 @@ describe("bounded semantic lifecycle over MCP", () => {
         size: artifactSize, sha256: diffHash }] })),
       readArtifact: vi.fn((_id: string, _revision: number, _name: string, offset: number) => ({
         offset, manifest_sha256: hash, file_sha256: diffHash, next_offset: null,
-        content_base64: diff.toString("base64") })),
+        content_base64: diff.toString("base64"), ...pageOverride })),
       recordSemanticReviewDiagnostic: diagnostic,
       referenceEvidence: vi.fn(() => ({ version: 1, baseline_head: hash, references: [{ path: "demo.txt",
         commit_sha: hash, file_sha256: hash, content_sha256: hash, start_line: 1, end_line: 1,
@@ -660,6 +662,18 @@ describe("bounded semantic lifecycle over MCP", () => {
     expect(submitReview).not.toHaveBeenCalled();
     expect(finalizer).not.toHaveBeenCalled();
   });
+  it.each([{ offset: 5 }, { manifest_sha256: "wrong" }, { file_sha256: "wrong" }, { content_base64: "!" }])(
+    "diagnoses malformed diff pages before any reviewer call: %j", async invalid => {
+      pageOverride = invalid;
+      await call("start_bounded_opencode_task", input);
+      await settled(() => !!release); release!();
+      await settled(() => diagnostic.mock.calls.length === 1);
+      expect(diagnostic).toHaveBeenCalledWith({ task_id: taskId, revision: 1,
+        manifest_sha256: hash, phase: "SEMANTIC_REVIEW", error_code: "SEMANTIC_REVIEW_INVALID" });
+      expect(reviewer).not.toHaveBeenCalled();
+      expect(submitReview).not.toHaveBeenCalled();
+      expect(finalizer).not.toHaveBeenCalled();
+    });
 });
 
 describe("bounded EOL baseline regression", () => {

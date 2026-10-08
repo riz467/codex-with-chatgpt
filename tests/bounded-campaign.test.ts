@@ -189,3 +189,14 @@ it("projects invalid campaign ledgers for inspection without rewriting or resumi
   expect(fs.readFileSync(file, "utf8")).toBe(invalid);
   expect(f.counts()).toEqual({ proposals: 0, reviews: 0, finalizations: 0 });
 }, 30000);
+it("stops a pending review whose revision evidence is missing", () => {
+  const f = fixture(0);
+  const idle = new BoundedCampaigns(path.join(f.root, "campaigns"), f.tasks,
+    { lifecycleRunning: new Set(), runBoundedLifecycle: () => false }, f.recover, f.committed);
+  const started = idle.start(f.contract);
+  const file = path.join(f.root, "tasks", started.task_id, "task.json");
+  fs.writeFileSync(file, JSON.stringify({ ...f.tasks.status(started.task_id), state: "REVIEW_PENDING" }));
+  idle.tick(started.task_id);
+  expect(idle.status(started.task_id)).toMatchObject({ state: "STOPPED", stop_reason: "REVIEW_EVIDENCE_MISSING" });
+  expect(f.counts()).toEqual({ proposals: 0, reviews: 0, finalizations: 0 });
+}, 30000);
