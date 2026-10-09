@@ -11,6 +11,8 @@ import socket
 import subprocess
 import sys
 import tarfile
+import stat
+import re
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from capsule import canonical, inventory, require, sha, file_sha, verify_archive
@@ -24,6 +26,137 @@ ROLES={
    'state':Path('/var/lib/ai-linux-qualification-controller'),'secrets':Path('/etc/ai-linux-qualification-controller'),
    'unit':'ai-linux-qualification-controller.service','unitFile':'controller.service'}}
 KEEP=['ai-linux-gateway-staging.service','ai-linux-dashboard-staging.service','ai-control-bridge.service','ai-control-cloudflared.service']
+CAMPAIGN_UNITS={'ai-linux-qualification-broker.service','ai-linux-qualification-controller.service'}
+CAMPAIGN_ACCOUNTS={'ai-qualification-executor','ai-qualification-controller','ai-qualification-evidence'}
+def campaign_unit(name):return name in CAMPAIGN_UNITS or name.startswith('ai-linux-qualification-executor@')
+def tree_digest(root):
+    """Bounded existing-state digest. Return metadata/hash only; never secret bodies or symlink target bytes."""
+    rows=[];total=0;active=set()
+    def visit(p):
+        nonlocal total
+        s=p.lstat();require(len(rows)<100000,'BASELINE_FILE_COUNT')
+        row={'path':str(p),'uid':s.st_uid,'gid':s.st_gid,'mode':stat.S_IMODE(s.st_mode)}
+        if p.is_symlink():
+            row['linkSha256']=sha(os.readlink(p).encode())
+            require(p.exists(),'BASELINE_DANGLING_LINK')
+            target=p.resolve(strict=True);t=target.stat()
+            require(not str(target).startswith(('/proc/','/sys/','/dev/')),'BASELINE_UNSAFE_LINK_TARGET')
+            row['targetMetadata']={'uid':t.st_uid,'gid':t.st_gid,'mode':stat.S_IMODE(t.st_mode)}
+            if p.is_file():
+                require(t.st_size<=256*1024**2,'BASELINE_LINK_FILE_SIZE');total+=t.st_size;require(total<=4*1024**3,'BASELINE_TREE_SIZE');row['targetSha256']=file_sha(p)
+            elif p.is_dir():
+                rows.append(row);visit(target);return
+            else:raise ValueError('BASELINE_SPECIAL_LINK_TARGET')
+        elif p.is_dir():
+            real=str(p.resolve(strict=True));require(real not in active,'BASELINE_LINK_CYCLE');active.add(real)
+            row['kind']='directory';rows.append(row)
+            for child in sorted(p.iterdir()):
+                if str(p) in ['/etc/systemd/system','/run/systemd/system'] and campaign_unit(child.name):continue
+                visit(child)
+            active.remove(real)
+            return
+        elif p.is_file():
+            require(s.st_size<=256*1024**2,'BASELINE_FILE_SIZE');total+=s.st_size;require(total<=4*1024**3,'BASELINE_TREE_SIZE')
+            row.update(kind='file',bytes=s.st_size,sha256=file_sha(p))
+        else:raise ValueError('BASELINE_SPECIAL_FILE')
+        rows.append(row)
+    if not root.exists() and not root.is_symlink():return {'present':False}
+    visit(root);return {'present':True,'entries':len(rows),'sha256':sha(canonical(rows).encode())}
+def stable_network(value):
+    if isinstance(value,list):return sorted((stable_network(v) for v in value),key=canonical)
+    if isinstance(value,dict):return {k:stable_network(v) for k,v in value.items() if k not in ['valid_life_time','preferred_life_time','expires']}
+    return value
+def effective_config_paths(service,profile):
+    paths=set(profile)
+    # Main config precedence and drop-in search paths include volatile/local-vendor roots.
+    for family in ['journald','logind','networkd','resolved','timesyncd']:
+        if service=='systemd-'+family+'.service':
+            for prefix in ['/etc','/run','/usr/local/lib','/usr/lib']:
+                paths.update([prefix+'/systemd/'+family+'.conf',prefix+'/systemd/'+family+'.conf.d'])
+    if service=='systemd-networkd.service':paths.update(prefix+'/systemd/network' for prefix in ['/etc','/run','/usr/local/lib','/usr/lib'])
+    if service=='systemd-udevd.service':paths.update(prefix+'/udev/rules.d' for prefix in ['/etc','/run','/usr/local/lib','/usr/lib'])
+    if service=='dbus.service':paths.add('/usr/local/share/dbus-1/system.d')
+    if service=='ssh.service' or service.startswith(('getty@','serial-getty@')) or service=='systemd-logind.service':
+        # Preserve every included common-* module and security policy rather than just entry files.
+        paths.update(['/etc/pam.d','/etc/security'])
+    for prefix in ['/etc','/run','/usr/local/lib','/usr/lib']:
+        paths.update([prefix+'/systemd/system.conf',prefix+'/systemd/system.conf.d'])
+    return paths
+def executor_baseline():
+    names=[line.split()[0] for line in run(['systemctl','list-units','--type=service','--state=running','--no-legend','--no-pager']).splitlines()]
+    names=sorted((set(names)|{'ssh.service','qemu-guest-agent.service'})-CAMPAIGN_UNITS)
+    names=[n for n in names if not campaign_unit(n)]
+    services={};files={};service_configs=set()
+    config_profiles={
+      'ssh.service':['/etc/ssh','/etc/default/ssh'],
+      'qemu-guest-agent.service':['/etc/qemu','/etc/qemu-ga','/etc/default/qemu-guest-agent'],
+      'dbus.service':['/etc/dbus-1','/usr/share/dbus-1/system.conf','/usr/share/dbus-1/system.d','/usr/share/dbus-1/system-services'],
+      'systemd-journald.service':['/etc/systemd/journald.conf','/etc/systemd/journald.conf.d','/usr/lib/systemd/journald.conf.d'],
+      'systemd-logind.service':['/etc/systemd/logind.conf','/etc/systemd/logind.conf.d','/usr/lib/systemd/logind.conf.d','/etc/pam.d/systemd-user'],
+      'systemd-networkd.service':['/etc/systemd/networkd.conf','/etc/systemd/networkd.conf.d','/usr/lib/systemd/networkd.conf.d','/usr/lib/systemd/network','/etc/systemd/network'],
+      'systemd-resolved.service':['/etc/systemd/resolved.conf','/etc/systemd/resolved.conf.d','/usr/lib/systemd/resolved.conf.d'],
+      'systemd-timesyncd.service':['/etc/systemd/timesyncd.conf','/etc/systemd/timesyncd.conf.d','/usr/lib/systemd/timesyncd.conf.d'],
+      'systemd-udevd.service':['/etc/udev','/usr/lib/udev/rules.d'],
+      'unattended-upgrades.service':['/etc/apt/apt.conf','/etc/apt/apt.conf.d','/etc/apt/sources.list','/etc/apt/sources.list.d'],
+      'getty@':['/etc/login.defs','/etc/issue','/etc/issue.net','/etc/default/locale','/etc/pam.d/login'],
+      'serial-getty@':['/etc/login.defs','/etc/issue','/etc/issue.net','/etc/default/locale','/etc/pam.d/login']}
+    for name in names:
+        profile=next((paths for key,paths in config_profiles.items() if name==key or key.endswith('@') and name.startswith(key)),None)
+        require(profile is not None,'BASELINE_SERVICE_PROFILE_UNKNOWN');service_configs.update(effective_config_paths(name,profile))
+        text=run(['systemctl','show',name,'-p','ActiveState','-p','SubState','-p','MainPID','-p','ExecMainStartTimestampMonotonic','-p','FragmentPath','-p','DropInPaths','-p','EnvironmentFiles','-p','ExecStart'])
+        props=dict(line.split('=',1) for line in text.splitlines() if '=' in line)
+        require(props.get('FragmentPath'),'BASELINE_UNIT_UNRESOLVED')
+        services[name]={k:props.get(k,'') for k in ['ActiveState','SubState','MainPID','ExecMainStartTimestampMonotonic']}
+        services[name]['definitionSha256']=sha(text.encode())
+        paths=[props['FragmentPath'],*props.get('DropInPaths','').split()]
+        env=props.get('EnvironmentFiles','');paths+=re.findall(r'(/[^\s;]+)\s+\(ignore_errors=(?:yes|no)\)',env)
+        require(not env or re.fullmatch(r'(?:\s*/[^\s;]+\s+\(ignore_errors=(?:yes|no)\)\s*)+',env),'BASELINE_ENVIRONMENT_PATH_UNRESOLVED')
+        # systemctl renders LoadCredential as [unprintable] even when empty. Inspect only directives
+        # in the hashed unit/drop-ins internally; never emit inline values or credential bodies.
+        credential_sources=[]
+        for unitfile in [props['FragmentPath'],*props.get('DropInPaths','').split()]:
+            for line in Path(unitfile).read_text().splitlines():
+                if re.match(r'^\s*LoadCredential(?:Encrypted)?\s*=',line):
+                    value=line.split('=',1)[1].strip()
+                    if not value:continue
+                    match=re.fullmatch(r'[A-Za-z0-9_.-]+:(/[^\s%]+)',value)
+                    require(match is not None,'BASELINE_CREDENTIAL_SOURCE_UNRESOLVED');credential_sources.append(match.group(1))
+        paths+=credential_sources
+        services[name]['runtimeCredentialDigest']=tree_digest(Path('/run/credentials')/name)
+        pid=int(props.get('MainPID','0'))
+        if pid:
+            exe=Path('/proc/'+str(pid)+'/exe').resolve(strict=True);paths.append(str(exe))
+            cmd=Path('/proc/'+str(pid)+'/cmdline').read_bytes();services[name]['commandSha256']=sha(cmd)
+            for arg in cmd.split(b'\0'):
+                value=arg.decode(errors='strict')
+                if value.startswith('-') and '=/' in value:value=value.split('=',1)[1]
+                p=Path(value)
+                if p.is_absolute() and p.is_file():paths.append(str(p))
+        for namepath in paths:
+            p=Path(namepath);require(p.is_absolute(),'BASELINE_SERVICE_FILE_UNRESOLVED');files[str(p)]=tree_digest(p)
+    require(services['qemu-guest-agent.service']['ActiveState']=='active','BASELINE_QGA_NOT_ACTIVE')
+    roots=[Path(p) for p in ['/etc/ssh','/etc/sudoers','/etc/sudoers.d','/etc/systemd/system','/run/systemd/system','/etc/systemd/network','/etc/network','/etc/netplan','/etc/nftables.conf','/etc/qemu','/etc/qemu-ga','/etc/resolv.conf','/etc/hosts','/etc/hostname','/etc/machine-id']]
+    roots += [p for parent in ['/opt','/srv','/usr/local/bin','/var/lib'] for p in Path(parent).iterdir()
+      if p.name.startswith(('rc02','node-v26'))]
+    for a in pwd.getpwall():
+        if a.pw_name in CAMPAIGN_ACCOUNTS:continue
+        if a.pw_uid==0 or 1000<=a.pw_uid<65534:
+            roots += [Path(a.pw_dir)/r for r in ['.ssh','.config/opencode','.local/share/opencode','.codex','.config/codex','.aws','.azure','.kube','.config/gh','.npmrc','.git-credentials']]
+    trees={str(p):tree_digest(p) for p in sorted(set(roots)|{Path(p) for p in service_configs})}
+    identity={}
+    for file in ['/etc/passwd','/etc/group','/etc/shadow','/etc/gshadow']:
+        body=Path(file).read_bytes();filtered=b'\n'.join(row for row in body.splitlines() if row.split(b':',1)[0].decode() not in CAMPAIGN_ACCOUNTS)
+        identity[file]=sha(filtered)
+    network={key:stable_network(json.loads(run(args))) for key,args in {
+        'addresses':['ip','-j','address'],'routes4':['ip','-j','route'],'routes6':['ip','-j','-6','route']}.items()}
+    return {'services':services,'serviceFileHashes':files,'trees':trees,'identityFileHashes':identity,'network':network,
+      'scope':'Running services plus SSH/QGA; exact existing config/runtime/known credential roots. Not exhaustive secret absence or KVM certification.'}
+def check_baseline(old,new):
+    for key in ['hostname','bootId','units','protectedHashes','executorProtection']:
+        require(old.get(key)==new.get(key),'PROTECTED_BASELINE_DRIFT:'+key)
+def resource_gate(role,s):
+    require(s['memAvailableKiB']>=(3407872 if role=='executor' else 524288) and s['diskFreeBytes']>=8*1024**3,'RESOURCE_GATE')
+    require(all('avg10=0.00' in row for row in Path('/proc/pressure/memory').read_text().splitlines()),'GUEST_MEMORY_PRESSURE')
 def run(args,check=True):
     p=subprocess.run(args,capture_output=True,text=True,timeout=30,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LANG':'C'})
     if check:require(p.returncode==0,'FIXED_COMMAND_FAILED')
@@ -66,6 +199,7 @@ def snapshot(role):
             from capsule import portable
             portable(item['path']);p=staging/item['path'];require(file_sha(p)==item['sha256'],'PRESERVED_STAGING_FILE_SHA');hashes[str(p)]=item['sha256']
     return {'hostname':socket.gethostname(),'bootId':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+      'executorProtection':executor_baseline() if role=='executor' else None,
       'memAvailableKiB':mem['MemAvailable'],'units':units,'protectedHashes':hashes,'diskFreeBytes':os.statvfs('/opt').f_bavail*os.statvfs('/opt').f_frsize}
 def package(pin):
     safe(INPUT);file=INPUT/'DEPLOYMENT-PACKAGE.json';require(sha(file.read_bytes())==pin,'HUMAN_APPROVED_PACKAGE_SHA_REQUIRED')
@@ -87,6 +221,14 @@ def execute(mode,role,pin,secretInput=None):
     r=ROLES[role];require(os.geteuid()==0 and socket.gethostname()==r['hostname'],'ROOT_TARGET_IDENTITY')
     m=package(pin);receipt=INPUT/(role+'-PRE.json');created=INPUT/(role+'-CREATED.json')
     if mode=='pre':
+        raise ValueError('USE_READONLY_PRE_NO_GUEST_PACKAGE_OR_WRITES')
+    require(receipt.exists(),'PRE_REQUIRED');pre=json.loads(receipt.read_text());require(pre['packageSha256']==pin,'PRE_PACKAGE_BINDING')
+    if mode=='exec':
+        require(not created.exists(),'EXEC_REPLAY_REJECTED');current=snapshot(role)
+        check_baseline(pre['snapshot'],current);resource_gate(role,current)
+        # Durable claim first. A failed install is never automatically replayed or deleted.
+        write(created,canonical({'packageSha256':pin,'role':role,'targets':{k:str(r[k]) for k in ['root','state','secrets']}}))
+        require(isinstance(secretInput,dict),'PRIVATE_PROVISION_INPUT_REQUIRED')
         require(not r['root'].exists() and not r['state'].exists() and not r['secrets'].exists() and not Path('/etc/systemd/system',r['unit']).exists(),'NEW_TARGETS_ONLY')
         try:pwd.getpwnam(r['account']);raise ValueError('ACCOUNT_EXISTS')
         except KeyError:pass
@@ -97,15 +239,6 @@ def execute(mode,role,pin,secretInput=None):
             require(not run(['systemctl','list-units','ai-linux-qualification-*.service','--state=running','--no-legend','--no-pager']).strip(),'EXECUTOR_BUSY')
             require(not Path('/var/lib/ai-linux-qualification-broker').exists() and not Path('/etc/systemd/system/ai-linux-qualification-executor@.service').exists(),'NEW_BROKER_TARGETS_ONLY')
             require(not run(['getent','group','ai-qualification-evidence'],False).strip(),'EVIDENCE_GROUP_EXISTS')
-        write(receipt,canonical({'packageSha256':pin,'snapshot':s}));return {'phase':'PRE','result':'PASS','role':role}
-    require(receipt.exists(),'PRE_REQUIRED');pre=json.loads(receipt.read_text());require(pre['packageSha256']==pin,'PRE_PACKAGE_BINDING')
-    if mode=='exec':
-        require(not created.exists(),'EXEC_REPLAY_REJECTED');current=snapshot(role)
-        require(current['bootId']==pre['snapshot']['bootId'] and current['protectedHashes']==pre['snapshot']['protectedHashes'] and current['units']==pre['snapshot']['units'],'PRE_DRIFT')
-        require(current['memAvailableKiB']>=(3407872 if role=='executor' else 524288) and current['diskFreeBytes']>=8*1024**3,'RESOURCE_GATE')
-        # Durable claim first. A failed install is never automatically replayed or deleted.
-        write(created,canonical({'packageSha256':pin,'role':role,'targets':{k:str(r[k]) for k in ['root','state','secrets']}}))
-        require(isinstance(secretInput,dict),'PRIVATE_PROVISION_INPUT_REQUIRED')
         run(['useradd','--system','--user-group','--no-create-home','--home-dir','/nonexistent','--shell','/usr/sbin/nologin',r['account']]);a=pwd.getpwnam(r['account'])
         evidence_gid=a.pw_gid
         if role=='executor':
@@ -135,7 +268,7 @@ def execute(mode,role,pin,secretInput=None):
         return {'phase':'EXEC','result':'INSTALLED_NOT_STARTED','role':role}
     require(created.exists() and json.loads(created.read_text())['packageSha256']==pin,'CREATED_CUSTODY')
     if mode=='post':
-        s=snapshot(role);require(s['bootId']==pre['snapshot']['bootId'] and s['protectedHashes']==pre['snapshot']['protectedHashes'] and s['units']==pre['snapshot']['units'],'PROTECTED_SERVICE_DRIFT')
+        s=snapshot(role);check_baseline(pre['snapshot'],s);resource_gate(role,s)
         if role=='executor':require(sha(canonical(inventory(r['root']/'runtime')).encode())==m['sourcePins']['runtimeCapsuleSha256'],'DEPLOYED_CAPSULE_SHA')
         require(sha(canonical(inventory(r['root']/'host-runtime')).encode())==m['hostRuntimeInventorySha256'],'DEPLOYED_HOST_RUNTIME_SHA')
         manifest=json.loads((r['root']/'source/SOURCE-MANIFEST.json').read_text());actual=inventory(r['root']/'source');actual=[x for x in actual if x['path']!='SOURCE-MANIFEST.json']
@@ -156,9 +289,30 @@ def execute(mode,role,pin,secretInput=None):
                 if cgroup.exists():require(all(not f.read_text().strip() for f in cgroup.rglob('cgroup.procs')),'ROLLBACK_CGROUP_NOT_EMPTY')
             else:
                 require(not list(r['state'].glob('linux-qualification-*')) and not run(['systemctl','list-units','ai-linux-qualification-executor@*.service','--state=running','--no-legend','--no-pager']).strip(),'ROLLBACK_EXECUTION_RECORD_MISSING')
-        s=snapshot(role);require(s['bootId']==pre['snapshot']['bootId'] and s['protectedHashes']==pre['snapshot']['protectedHashes'] and s['units']==pre['snapshot']['units'],'ROLLBACK_PROTECTED_DRIFT')
+        s=snapshot(role);check_baseline(pre['snapshot'],s)
         return {'phase':'ROLLBACK','result':'NEW_UNITS_STOPPED_EVIDENCE_RETAINED','role':role}
     raise ValueError('FIXED_MODE_ONLY')
+def management_preconditions(role):
+    r=ROLES[role]
+    require(not run(['getent','group',r['account']],False).strip(),'ACCOUNT_GROUP_EXISTS')
+    caps=dict(line.split(':',1) for line in Path('/proc/self/status').read_text().splitlines() if ':' in line)
+    effective=int(caps['CapEff'].strip(),16);required=sum(1<<bit for bit in [0,1,3,4,6,7])
+    require(effective&required==required,'QGA_PROVISION_CAPABILITIES_REQUIRED')
+    for parent in [Path('/opt'),Path('/var/lib'),Path('/etc/systemd/system'),Path('/etc')]:
+        safe(parent);require(not os.statvfs(parent).f_flag&os.ST_RDONLY,'PROVISION_FILESYSTEM_READONLY')
+    if role=='executor':
+        require(Path('/sys/fs/cgroup/cgroup.controllers').exists(),'CGROUP_V2_REQUIRED');safe(Path('/usr/bin/bwrap'))
+        require(Path('/usr/bin/bwrap').is_file() and Path('/usr/bin/openssl').is_file(),'HOST_TOOLS_REQUIRED')
+        require(not Path('/var/lib/ai-linux-qualification-broker').exists() and not Path('/etc/systemd/system/ai-linux-qualification-executor@.service').exists(),'NEW_BROKER_TARGETS_ONLY')
+        require(not run(['getent','group','ai-qualification-evidence'],False).strip(),'EVIDENCE_GROUP_EXISTS')
+def readonly_pre(role,pin):
+    r=ROLES[role];require(os.geteuid()==0 and socket.gethostname()==r['hostname'],'ROOT_TARGET_IDENTITY')
+    for p in [r['root'],r['state'],r['secrets'],INPUT,Path('/etc/systemd/system',r['unit'])]:require(not p.exists() and not p.is_symlink(),'NEW_TARGETS_ONLY')
+    try:pwd.getpwnam(r['account']);raise ValueError('ACCOUNT_EXISTS')
+    except KeyError:pass
+    management_preconditions(role)
+    s=snapshot(role);resource_gate(role,s)
+    return {'phase':'PRE','result':'PASS','role':role,'packageSha256':pin,'snapshot':s}
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('mode',choices=['pre','exec','post','rollback']);p.add_argument('role',choices=list(ROLES));p.add_argument('approvedPackageSha256');a=p.parse_args()
     try:
