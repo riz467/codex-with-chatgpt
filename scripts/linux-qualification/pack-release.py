@@ -46,8 +46,9 @@ def pack(repo,capsule,out):
     shutil.copytree(image/'runtime/node_modules',build/'node_modules',dirs_exist_ok=True)
     config=subprocess.check_output(['git','show',commit+':tsconfig.json'],cwd=repo);(build/'tsconfig.json').write_bytes(config)
     require(manifest['dependencies']['lockfileSha256']==sha((src/'pnpm-lock.yaml').read_bytes()),'CAPSULE_SOURCE_LOCK_MISMATCH')
-    subprocess.run(['node',str(build/'node_modules/typescript/bin/tsc'),'-p',str(build/'tsconfig.json')],cwd=build,check=True,timeout=180)
-    subprocess.run(['node',str(build/'scripts/copy-runtime.mjs')],cwd=build,check=True,timeout=30)
+    node_cwd=str(build).removeprefix('\\\\?\\') if os.name=='nt' else str(build)
+    subprocess.run(['node','node_modules/typescript/bin/tsc','-p','tsconfig.json'],cwd=node_cwd,check=True,timeout=180)
+    subprocess.run(['node','scripts/copy-runtime.mjs'],cwd=node_cwd,check=True,timeout=30)
     for p in (build/'dist').rglob('*'):
         require(not p.is_symlink(),'DIST_ALIAS')
         if p.is_file():put(src,'dist/'+p.relative_to(build/'dist').as_posix(),p.read_bytes())
