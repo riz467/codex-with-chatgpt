@@ -8,6 +8,9 @@ key=$(realpath -e "$1"); fingerprint=$2; approval=$3
 [[ $approval =~ ^[A-Za-z0-9._:-]{1,128}$ ]] || exit 12
 [[ $(wc -l < "$key") == 1 && $(head -c 12 "$key") == 'ssh-ed25519 ' ]] || exit 13
 [[ $(ssh-keygen -lf "$key" -E sha256 | awk '{print $2}') == "$fingerprint" ]] || exit 14
+[[ -r /home/workspace/.ssh/authorized_keys ]] || exit 14
+workspace_keys=$(ssh-keygen -lf /home/workspace/.ssh/authorized_keys -E sha256)
+! awk '{print $2}' <<<"$workspace_keys" | grep -Fx -- "$fingerprint" >/dev/null || exit 14
 ! getent passwd human-admin >/dev/null || exit 15
 [[ ! -e /etc/sudoers.d/90-vm116-human-admin && ! -e /etc/ssh/sshd_config.d/00-vm116-human-admin.conf ]] || exit 16
 /usr/sbin/sshd -t
