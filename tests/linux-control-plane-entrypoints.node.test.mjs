@@ -53,7 +53,7 @@ test('rejects unknown role and inherited object role', () => {
 });
 test('units have no root, auth path, external egress or writable source', () => {
   for (const role of ['gateway', 'dashboard']) {
-    const text = readFileSync(new URL(`../scripts/systemd/ai-linux-${role}-staging.service`, import.meta.url), 'utf8');
+    const text = readFileSync(new URL(`../scripts/systemd/ai-linux-${role}-staging.service`, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
     assert.ok(text.split('\n').includes(`ExecStart=${node} ${roles[role].launcher}`));
     for (const line of ['User=ai-control-staging', 'NoNewPrivileges=yes', 'ProtectSystem=strict', 'ProtectHome=yes',
       'CapabilityBoundingSet=', 'KillMode=control-group', 'IPAddressDeny=any', 'IPAddressAllow=localhost',

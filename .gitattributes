@@ -1,0 +1,4 @@
+scripts/vm116/*.sh text eol=lf
+scripts/vm116/*.py text eol=lf
+scripts/vm116/*.template text eol=lf
+scripts/systemd/*.service text eol=lf

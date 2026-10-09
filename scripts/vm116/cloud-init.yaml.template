@@ -1,0 +1,26 @@
+#cloud-config
+# TEMPLATE ONLY: replace key with approved Human PUBLIC key; never put private keys/tokens here.
+# Use only after VM116 replacement approval and verified Bridge/Tunnel recovery conditions.
+hostname: ai-control-116
+manage_etc_hosts: true
+disable_root: true
+ssh_pwauth: false
+users:
+  - name: human-admin
+    shell: /bin/bash
+    lock_passwd: true
+    sudo: ['ALL=(ALL:ALL) NOPASSWD:ALL']
+    ssh_authorized_keys:
+      - REPLACE_WITH_APPROVED_HUMAN_ED25519_PUBLIC_KEY
+write_files:
+  - path: /etc/ssh/sshd_config.d/00-vm116-human-admin.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      PubkeyAuthentication yes
+      AllowUsers human-admin
+# Network stays PVE cloud-init ipconfig0=192.168.0.45/24,gw=192.168.0.1;
+# nameserver=192.168.0.32 192.168.0.44. No firewall or Tunnel creation here.
+# No packages/runcmd: OS image/toolchain pins must be verified before approved installation.
