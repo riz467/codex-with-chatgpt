@@ -1,5 +1,17 @@
 # VM116 Linux staging Campaign — 2026-10-09
 
+## Win11限定の後続開発
+
+- `handoff/linux-staging-opt-node-20261009`は指定基準commitからのhealth専用修正を継承。
+- 両Linux serviceのNode固定pathを`/opt/node-v24.16.0/bin/node`へ統一。
+  policy・unit・回帰testで一致を検査し、旧`/usr/bin/node`は拒否する。
+- 型検査/build PASS、関連Vitest **83 PASS / 1 Linux-only skip**、
+  Node launcher/policy regression **16 PASS / 0 skip**。
+- 独立review: code blockerなし。指摘されたNode pathとunit資源の記載を修正。
+- この後続作業はWin11内のみ。SSH、秘密鍵要求、Linux service変更、VM/CT操作、
+  Production Activationは実施しない。下記PRE記録は前回作業の履歴。
+- 前回runtime archiveは旧Node pathのため、後続commitの配備成果物として使用しない。
+
 ## 状態
 
 - **実装・Win11検証: PASS。VM116実機稼働: 未実証。本番稼働: 未実施。**
@@ -23,11 +35,12 @@ Windowsのfactory、CLI、launcher、稼働dist、サービス設定は変更し
   query、末尾slash、大文字、encoded path、absolute-formも拒否。
 - healthは`dispatch=CLOSED`、`authority=NONE`。実際にもMCP、承認、Campaign、
   AuthStore、Git、Executor、Review Authority、Finalizerの初期化・経路は存在しない。
-- 両launcherは環境をallowlistへ置換し、非root、Linux、`/usr/bin/node`、
+- 両launcherは環境をallowlistへ置換し、非root、Linux、`/opt/node-v24.16.0/bin/node`、
   `v24.16.0`、固定pathと引数を検査してからfactoryをimport。
 - 固定rootのsymlink禁止は維持。配備でroot symlinkを利用しない。
 - 既存systemd unitのloopback限定、source read-only、capabilityなし、
-  `MemoryMax=384M`、`TasksMax=48`、`CPUQuota=50%`は変更なし。
+  資源上限は変更なし。Gatewayは`MemoryMax=512M` / `TasksMax=64`、
+  Dashboardは`MemoryMax=384M` / `TasksMax=48`、両方`CPUQuota=50%`。
 - 型検査・build: PASS。関連Vitest: **83 PASS / 1 Linux-only skip**。
 - Node launcher/policy regression: **15 PASS / 0 skip**（Vitestとは別に実行）。
 - 独立review: literal URL照合とbootstrap import回帰を修正後、
@@ -68,7 +81,8 @@ VM116でbuild・フル回帰・候補test・13-suiteを代替実行しない。
 
 - 対象: 固定rootへの検証済みruntime、専用非root user/state、
   `ai-linux-gateway-staging.service` / `ai-linux-dashboard-staging.service`の新規配置・起動。
-- 影響: localhost 48767/48768、unit上限各384MiB・50% CPU。
+- 影響: localhost 48767/48768、Gateway上限512MiB・64 tasks、
+  Dashboard上限384MiB・48 tasks、両方50% CPU。
   既存Bridge/Tunnel、Windows、Trust Plane、外部公開、Production Dispatchを変更しない。
 - 合格: 両起動・health・health以外拒否・権威/書込み不能・再起動復帰・
   Bridge/Tunnel継続・メモリ/OOM/競合なし・実機log/SHA保存の8条件。

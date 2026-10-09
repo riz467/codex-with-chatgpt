@@ -4,7 +4,7 @@ import { lstatSync, realpathSync } from 'node:fs';
 
 export const root = '/srv/ai-orchestration/codex-with-chatgpt';
 export const home = '/var/lib/ai-control-staging';
-export const node = '/usr/bin/node';
+export const node = '/opt/node-v24.16.0/bin/node';
 export const roles = Object.freeze({
   gateway: Object.freeze({ launcher: `${root}/scripts/run-linux-gateway.mjs`, entry: `${root}/dist/bridge/control-plane-staging.js`, port: 48767 }),
   dashboard: Object.freeze({ launcher: `${root}/scripts/run-linux-dashboard.mjs`, entry: `${root}/dist/bridge/control-plane-staging.js`, port: 48768 }),

@@ -3,11 +3,13 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { launchPlan, roles, root, home } from '../scripts/linux-control-plane-policy.mjs';
 
-const identity = role => ({ platform: 'linux', uid: 1001, execPath: '/usr/bin/node', launcher: roles[role].launcher,
-  argv: ['/usr/bin/node', roles[role].launcher], version: 'v24.16.0' });
+const node = '/opt/node-v24.16.0/bin/node';
+const identity = role => ({ platform: 'linux', uid: 1001, execPath: node, launcher: roles[role].launcher,
+  argv: [node, roles[role].launcher], version: 'v24.16.0' });
 
 test('fixed Gateway loads only health staging without auth, tunnel or execution worker', () => {
   const plan = launchPlan('gateway', identity('gateway'));
+  assert.equal(plan.command, node);
   assert.equal(plan.entry, `${root}/dist/bridge/control-plane-staging.js`);
   assert.deepEqual(plan.args, []);
   assert.equal(plan.env.HOME, home); assert.equal(plan.dispatch, 'CLOSED'); assert.equal(plan.authority, 'NONE');
@@ -15,6 +17,7 @@ test('fixed Gateway loads only health staging without auth, tunnel or execution 
 });
 test('fixed Dashboard loads only health staging on a separate port', () => {
   const plan = launchPlan('dashboard', identity('dashboard'));
+  assert.equal(plan.command, node);
   assert.equal(plan.port, 48768); assert.deepEqual(plan.args, []);
   assert.equal(plan.entry, `${root}/dist/bridge/control-plane-staging.js`);
 });
@@ -37,10 +40,13 @@ test('Linux launchers never import the production factories', () => {
 for (const [name, change] of [
   ['Windows', { platform: 'win32' }], ['root', { uid: 0 }], ['unknown uid', { uid: undefined }],
   ['wrong Node', { execPath: '/tmp/node' }], ['version drift', { version: 'v24.17.0' }],
+  ['legacy Node path', { execPath: '/usr/bin/node' }],
   ['foreign launcher', { launcher: '/tmp/launcher.mjs' }],
-  ['argument override', { argv: ['/usr/bin/node', roles.gateway.launcher, '--start'] }],
+  ['argument override', { argv: [node, roles.gateway.launcher, '--start'] }],
 ]) test(`rejects ${name} before runtime loading`, () => {
-  assert.throws(() => launchPlan('gateway', { ...identity('gateway'), ...change }), /IDENTITY_REJECTED/);
+  for (const role of ['gateway', 'dashboard']) {
+    assert.throws(() => launchPlan(role, { ...identity(role), ...change }), /IDENTITY_REJECTED/);
+  }
 });
 test('rejects unknown role and inherited object role', () => {
   for (const role of ['executor', 'toString', '__proto__']) assert.throws(() => launchPlan(role, identity('gateway')));
@@ -48,6 +54,7 @@ test('rejects unknown role and inherited object role', () => {
 test('units have no root, auth path, external egress or writable source', () => {
   for (const role of ['gateway', 'dashboard']) {
     const text = readFileSync(new URL(`../scripts/systemd/ai-linux-${role}-staging.service`, import.meta.url), 'utf8');
+    assert.ok(text.split('\n').includes(`ExecStart=${node} ${roles[role].launcher}`));
     for (const line of ['User=ai-control-staging', 'NoNewPrivileges=yes', 'ProtectSystem=strict', 'ProtectHome=yes',
       'CapabilityBoundingSet=', 'KillMode=control-group', 'IPAddressDeny=any', 'IPAddressAllow=localhost',
       'ReadWritePaths=/var/lib/ai-control-staging']) assert.ok(text.split('\n').includes(line));
