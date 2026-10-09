@@ -7,14 +7,21 @@ import json
 import shlex
 import subprocess
 import sys
-import argparse
 from pathlib import Path
 SSH=['ssh','-F','C:/work/.ssh/config','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','IdentitiesOnly=yes','pve5']
-def readonly_transport(sources,pin):
+FRAME_LOADER='import sys; n=int(sys.stdin.buffer.readline(32)); assert 0<n<=1048576; c=sys.stdin.buffer.read(n); assert len(c)==n; exec(compile(c,"<approved-host-input>","exec"))'
+def frame_source(code,payload):
+    code=code.encode();require_size=0<len(code)<=1048576 and len(payload)<=32*1024**2
+    if not require_size:raise ValueError('PUBLIC_FRAME_BOUND')
+    return str(len(code)).encode()+b'\n'+code+payload
+def host_modules(sources):
     code='import sys,types,json; '
     for name,file in [('capsule','capsule.py'),('campaign_keys','provision-keys.py'),('pve_operation','pve-operation.py')]:
         code+='m=types.ModuleType('+repr(name)+'); m.__file__='+repr('/nonexistent/'+file)+'; sys.modules['+repr(name)+']=m; exec(compile('+repr(sources[file])+',m.__file__,"exec"),m.__dict__); '
-    code+='print(json.dumps(sys.modules["pve_operation"].observe('+repr({name:sources[name+'.py'] for name in ['capsule','deploy']})+','+repr(pin)+',True)))'
+    return code+'pve=sys.modules["pve_operation"]; '
+def readonly_transport(sources,pin):
+    code=host_modules(sources)+'assert not pve.ROOT.exists() and not pve.ROOT.is_symlink(), "FRESH_HOST_CAMPAIGN_REQUIRED"; '
+    code+='print(json.dumps(pve.observe('+repr({name:sources[name+'.py'] for name in ['capsule','deploy']})+','+repr(pin)+',True)))'
     # Code is streamed, no remote file, argv source/secrets, pycache, mkdir or upload.
     r=subprocess.run([*SSH,'python3 -I -B -'],input=code.encode(),capture_output=True,timeout=750)
     if r.returncode:
@@ -49,15 +56,28 @@ def run(root,pin,approval,pre_only=False):
     with pre_file.open('xb') as f:f.write(data)
     if pre_only:print(json.dumps({'result':'ALL_TARGET_READONLY_PRE_PASS','evidence':str(pre_file)}));return
     again=readonly_transport(sources,pin)
+    if evidence.get('oldHostCampaign')!=again.get('oldHostCampaign'):raise ValueError('OLD_HOST_CAMPAIGN_DRIFT')
     for role in ['executor','controller']:
-        for key in ['hostname','bootId','units','protectedHashes','executorProtection']:
+        for key in ['hostname','bootId','units','protectedHashes','executorProtection','oldCampaignInputs']:
             if evidence['targets'][role]['snapshot'].get(key)!=again['targets'][role]['snapshot'].get(key):raise ValueError('PRE_DRIFT_BEFORE_TRANSFER')
     ssh=SSH
-    remote='/var/tmp/ai-linux-qualification-release'
-    prepare='import os,socket; from pathlib import Path; assert os.geteuid()==0 and socket.gethostname()=="pve5"; Path('+repr(remote)+').mkdir(mode=0o700)'
-    subprocess.run([*ssh,'python3 -I -B -c '+shlex.quote(prepare)],check=True,timeout=30)
+    remote='/var/tmp/ai-linux-qualification-custody-v2-release'
+    prepare=host_modules(sources)+'assert pve.os.geteuid()==0 and pve.socket.gethostname()=="pve5"; print(json.dumps(pve.prepare_host_inputs('+repr({name:sources[name+'.py'] for name in ['capsule','deploy']})+','+repr(m['files'])+')))'
+    r=subprocess.run([*ssh,'python3 -I -B -'],input=prepare.encode(),capture_output=True,timeout=600)
+    (root/'HOST-REUSE-TRANSPORT.json').write_bytes(r.stdout)
+    if r.returncode:raise ValueError('HOST_PUBLIC_REUSE_STOPPED_NO_RETRY')
     for name in ['DEPLOYMENT-PACKAGE.json',*m['files'],'PRE-COMPLETED.json']:
-        subprocess.run(['scp','-F','C:/work/.ssh/config','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','IdentitiesOnly=yes',str(root/name),'pve5:'+remote+'/'+name],check=True,timeout=300)
+        if name in ['capsule.tar','host-runtime.tar']:continue
+        p=root/name;size=p.stat().st_size;digest=hashlib.sha256(p.read_bytes()).hexdigest()
+        if name=='PRE-COMPLETED.json' and digest!=pre_sha:raise ValueError('PRE_CUSTODY_CHANGED')
+        if name=='DEPLOYMENT-PACKAGE.json' and digest!=pin or name in m['files'] and digest!=m['files'][name]:raise ValueError('TRANSFER_INPUT_CHANGED')
+        code=host_modules(sources)+'assert pve.os.geteuid()==0 and pve.socket.gethostname()=="pve5"; print(json.dumps(pve.receive_host_input('+repr(name)+',sys.stdin.buffer,'+repr(size)+','+repr(digest)+')))'
+        # Public small inputs only (large archives already copied on host); bounded framing
+        # keeps source out of Windows command lines and leaves file bytes on the same stdin.
+        if size>32*1024**2:raise ValueError('SMALL_INPUT_TRANSFER_BOUND')
+        payload=p.read_bytes();framed=frame_source(code,payload)
+        r=subprocess.run([ssh[0],'-C',*ssh[1:],'python3 -I -B -c '+shlex.quote(FRAME_LOADER)],input=framed,capture_output=True,timeout=1200)
+        if r.returncode:raise ValueError('HOST_PUBLIC_UPLOAD_STOPPED_NO_RETRY')
     code='import hashlib,runpy,sys; from pathlib import Path; root=Path('+repr(remote)+'); p=root/"pve-operation.py"; '
     for name in ['pve-operation.py','capsule.py','provision-keys.py']:
         code+='assert hashlib.sha256((root/'+repr(name)+').read_bytes()).hexdigest()=='+repr(m['files'][name])+'; '

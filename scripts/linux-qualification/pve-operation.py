@@ -19,8 +19,72 @@ else:
     spec=importlib.util.spec_from_file_location('campaign_keys',Path(__file__).parent/'provision-keys.py')
     keys=importlib.util.module_from_spec(spec);spec.loader.exec_module(keys)
 
-ROOT=Path('/var/tmp/ai-linux-qualification-release')
-GUEST='/var/lib/ai-linux-qualification-approved-input'
+ROOT=Path('/var/tmp/ai-linux-qualification-custody-v2-release')
+OLD_ROOT=Path('/var/tmp/ai-linux-qualification-release')
+OLD_PACKAGE_SHA='35a3cb96e791f0e42d8e658dc54c4a676f6464b1e7ea22fa37ca16eff7c9068d'
+OLD_CLAIM_SHA='565f03dec95a83e7bf06270155f126e572759f11b68e81c474e586d13d5c44ba'
+OLD_PRE_SHA='bf0ea09ca232acaba960e04bdfbd4854d26253b5f25f41c8e65ec7095f3820bc'
+GUEST='/var/lib/ai-linux-qualification-custody-v2-input'
+HOST_PUBLIC_NAMES=frozenset(['DEPLOYMENT-PACKAGE.json','PRE-COMPLETED.json','capsule.tar','host-runtime.tar','raw-source.tar','source.tar','deploy.py','capsule.py','broker.service','controller.service','executor@.service','provision-keys.py','pve-operation.py','run-approved.py'])
+def trusted_host_parents(path):
+    import stat
+    require(path in [ROOT,OLD_ROOT],'FIXED_HOST_DIRECTORY')
+    for ancestor in path.parents:
+        s=ancestor.lstat();require(stat.S_ISDIR(s.st_mode) and s.st_uid==0 and not ancestor.is_symlink(),'HOST_ANCESTOR_CUSTODY')
+        require(not s.st_mode&0o022 or str(ancestor)=='/var/tmp' and bool(s.st_mode&stat.S_ISVTX),'HOST_ANCESTOR_WRITABLE')
+def trusted_host_directory(path):
+    import stat
+    trusted_host_parents(path)
+    s=path.lstat();require(stat.S_ISDIR(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o700 and not path.is_symlink(),'HOST_INPUT_CUSTODY')
+def host_file_identity(path):
+    import stat
+    trusted_host_directory(ROOT);s=path.lstat()
+    require(stat.S_ISREG(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o600 and s.st_nlink==1,'HOST_FILE_CUSTODY')
+    return s.st_dev,s.st_ino
+def donor_file(name,digest):
+    import stat
+    require(name in ['capsule.tar','host-runtime.tar'],'FIXED_PUBLIC_REUSE_NAME');trusted_host_directory(OLD_ROOT)
+    fd=os.open(OLD_ROOT/name,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        s=os.fstat(fd);require(stat.S_ISREG(s.st_mode) and s.st_uid==0 and not s.st_mode&0o022 and s.st_nlink==1,'DONOR_CUSTODY')
+        with os.fdopen(os.dup(fd),'rb') as stream:require(hashlib.file_digest(stream,'sha256').hexdigest()==digest,'DONOR_SHA')
+        os.lseek(fd,0,os.SEEK_SET);return fd
+    except Exception:os.close(fd);raise
+def receive_host_input(name,stream,size,digest):
+    import stat
+    require(name in HOST_PUBLIC_NAMES,'FIXED_HOST_INPUT_NAME');trusted_host_directory(ROOT)
+    fd=os.open(ROOT/name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);count=0;h=hashlib.sha256()
+    try:
+        s=os.fstat(fd);identity=(s.st_dev,s.st_ino)
+        require(stat.S_ISREG(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o600 and s.st_nlink==1 and s.st_size==0 and host_file_identity(ROOT/name)==identity,'HOST_CREATE_CUSTODY')
+        with os.fdopen(os.dup(fd),'wb') as out:
+            for chunk in iter(lambda:stream.read(1024*1024),b''):
+                count+=len(chunk);require(count<=size,'HOST_TRANSFER_SIZE');out.write(chunk);h.update(chunk)
+            out.flush();os.fsync(fd)
+        require(count==size and h.hexdigest()==digest,'HOST_TRANSFER_SHA')
+        s=os.fstat(fd);require(stat.S_ISREG(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o600 and s.st_nlink==1 and s.st_size==size and (s.st_dev,s.st_ino)==identity and host_file_identity(ROOT/name)==identity,'HOST_FINAL_FD_CUSTODY')
+    finally:os.close(fd)
+    require(host_file_identity(ROOT/name)==identity and (ROOT/name).stat().st_size==size and file_sha(ROOT/name)==digest,'HOST_FINAL_SHA_OR_CUSTODY')
+    require(host_file_identity(ROOT/name)==identity,'HOST_POST_HASH_IDENTITY')
+    directory=os.open(ROOT,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:os.fsync(directory)
+    finally:os.close(directory)
+    return {'name':name,'bytes':count,'sha256':digest}
+def prepare_host_inputs(sources,files):
+    # Only after BOTH PRE pass; fresh root is an execution fence, never resume old inputs.
+    before=old_host_custody(sources);trusted_host_parents(ROOT);ROOT.mkdir(mode=0o700);trusted_host_directory(ROOT);reused=[]
+    for name in ['capsule.tar','host-runtime.tar']:
+        fd=donor_file(name,files[name])
+        with os.fdopen(fd,'rb') as stream:reused.append(receive_host_input(name,stream,os.fstat(stream.fileno()).st_size,files[name]))
+    require(old_host_custody(sources)==before,'OLD_CAMPAIGN_REUSE_DRIFT')
+    return {'reused':reused,'oldCampaignUnchanged':True}
+def old_host_custody(sources):
+    import stat
+    trusted_host_directory(OLD_ROOT)
+    for name,digest in [('DEPLOYMENT-PACKAGE.json',OLD_PACKAGE_SHA),('APPROVED-EXECUTION-CLAIM.json',OLD_CLAIM_SHA),('PRE-COMPLETED.json',OLD_PRE_SHA)]:
+        p=OLD_ROOT/name;s=p.lstat();require(stat.S_ISREG(s.st_mode) and s.st_uid==0 and not s.st_mode&0o022 and s.st_nlink==1 and file_sha(p)==digest,'OLD_CAMPAIGN_CUSTODY')
+    namespace={};exec(guest_modules(sources)+'import deploy; from pathlib import Path; result=deploy.tree_digest(Path('+repr(str(OLD_ROOT))+'),file_limit=1024**3)',namespace)
+    return namespace['result']
 TARGETS=[(117,'executor','rc02-executor-117'),(116,'controller','ai-control-116')]
 def guest_modules(sources):
     # In-memory trusted adapter only; python -I -B, no guest upload/import cache or directory creation.
@@ -43,15 +107,19 @@ def observe(sources,pin,initial=True):
         except Exception:receipts[role]={'result':'UNKNOWN_OR_BLOCKED'};errors.append(role+'_OBSERVATION_UNCONFIRMED')
         finally:
             if q:q.close()
-    result={'packageSha256':pin,'pveResources':resources,'targets':receipts,'errors':errors}
+    retention=None
+    try:retention=old_host_custody(sources)
+    except Exception:errors.append('OLD_CAMPAIGN_CUSTODY_UNCONFIRMED')
+    result={'packageSha256':pin,'pveResources':resources,'targets':receipts,'oldHostCampaign':retention,'errors':errors}
     if errors:
         error=ValueError('ALL_TARGET_OBSERVATION_BLOCKED');error.evidence=result;raise error
     return result
 def check_observation(old,new):
     require(old['packageSha256']==new['packageSha256'],'PRE_PACKAGE_BINDING')
+    require(old.get('oldHostCampaign')==new.get('oldHostCampaign'),'OLD_HOST_CAMPAIGN_DRIFT')
     for _,role,_ in TARGETS:
         a=old['targets'][role]['snapshot'];b=new['targets'][role]['snapshot']
-        for key in ['hostname','bootId','units','protectedHashes','executorProtection']:
+        for key in ['hostname','bootId','units','protectedHashes','executorProtection','oldCampaignInputs']:
             require(a.get(key)==b.get(key),'ALL_TARGET_BASELINE_DRIFT:'+role+':'+key)
 def two_phase(pre,verify,execute,post,rollback):
     """Pure control flow used by the live composition and failure-injection regressions."""
@@ -120,14 +188,25 @@ class Qga:
                 data=base64.b64decode(r.get('out-data',''));require(len(data)<=4*1024*1024,'GUEST_RECEIPT_LIMIT');return json.loads(data)
             time.sleep(.5)
         raise ValueError('GUEST_OUTCOME_UNKNOWN_NO_REPLAY')
-    def upload(self,path,file):
-        handle=self.call('guest-file-open',{'path':path,'mode':'wb'})
+    def upload(self,name,file,sources,digest):
+        import re
+        require(name in {'DEPLOYMENT-PACKAGE.json','capsule.tar','host-runtime.tar','raw-source.tar','source.tar','deploy.py','capsule.py','broker.service','controller.service','executor@.service','provision-keys.py','pve-operation.py','run-approved.py'},'FIXED_UPLOAD_NAME')
+        require(re.fullmatch('[a-f0-9]{64}',digest) is not None and file_sha(file)==digest,'UPLOAD_SOURCE_SHA')
+        size=file.stat().st_size;prefix=guest_modules(sources)+'import deploy; '
+        identity=self.python(prefix+'print(json.dumps(deploy.prepare_upload('+repr(name)+')))')
+        self.execution_unknown=True;self.last_exec_pid=None
+        handle=self.call('guest-file-open',{'path':GUEST+'/'+name,'mode':'r+b'})
         try:
+            self.python(prefix+'print(json.dumps(deploy.check_upload('+repr(name)+','+repr(identity)+',0)))')
+            self.execution_unknown=True;self.last_exec_pid=None
             with file.open('rb') as stream:
                 for chunk in iter(lambda:stream.read(256*1024),b''):
                     r=self.call('guest-file-write',{'handle':handle,'buf-b64':base64.b64encode(chunk).decode()});require(r['count']==len(chunk),'QGA_SHORT_WRITE')
             self.call('guest-file-flush',{'handle':handle})
-        finally:self.call('guest-file-close',{'handle':handle})
+        finally:
+            self.execution_unknown=True;self.last_exec_pid=None
+            self.call('guest-file-close',{'handle':handle})
+        self.python(prefix+'print(json.dumps(deploy.check_upload('+repr(name)+','+repr(identity)+','+repr(size)+','+repr(digest)+')))')
     def close(self):self.reader.close();self.sock.close()
 def resource_pre():
     require(os.geteuid()==0 and socket.gethostname()=='pve5','PVE_IDENTITY')
@@ -145,7 +224,8 @@ def main(pin,approval,baseline_sha):
     m=json.loads((ROOT/'DEPLOYMENT-PACKAGE.json').read_text());require(sha((ROOT/'DEPLOYMENT-PACKAGE.json').read_bytes())==pin,'APPROVED_PACKAGE_SHA')
     require(m['targetVmids']==[116,117] and m['productionDispatch']=='CLOSED' and m['authority']=='NONE','FIXED_SCOPE')
     for name,digest in m['files'].items():
-        require('/' not in name and '\\' not in name and name not in ['.','..'],'PUBLIC_PATH');require(file_sha(ROOT/name)==digest,'PUBLIC_FILE_SHA')
+        require('/' not in name and '\\' not in name and name not in ['.','..'],'PUBLIC_PATH');host_file_identity(ROOT/name);require(file_sha(ROOT/name)==digest,'PUBLIC_FILE_SHA')
+    host_file_identity(ROOT/'DEPLOYMENT-PACKAGE.json');host_file_identity(ROOT/'PRE-COMPLETED.json')
     require(file_sha(ROOT/'PRE-COMPLETED.json')==baseline_sha,'PRE_RECEIPT_CUSTODY')
     approved_pre=json.loads((ROOT/'PRE-COMPLETED.json').read_text())
     sources={name:(ROOT/(name+'.py')).read_text() for name in ['capsule','deploy']}
@@ -180,13 +260,13 @@ def main(pin,approval,baseline_sha):
         q=Qga(vmid)
         try:
             receipts[role+'-prepare']=q.python('import os,socket,json; from pathlib import Path; assert os.geteuid()==0 and socket.gethostname()=='+repr(hostname)+'; p=Path('+repr(GUEST)+'); p.mkdir(mode=0o700); print(json.dumps({"prepared":True}))')
-            for name in ['DEPLOYMENT-PACKAGE.json',*m['files']]:q.upload(GUEST+'/'+name,ROOT/name)
+            for name in ['DEPLOYMENT-PACKAGE.json',*m['files']]:q.upload(name,ROOT/name,sources,pin if name=='DEPLOYMENT-PACKAGE.json' else m['files'][name])
             # Persist the genuine earlier no-write PRE only now, after both target passes.
             q.python(guest_modules(sources)+'import deploy; deploy.write(deploy.INPUT/'+repr(role+'-PRE.json')+','+repr(canonical(evidence['targets'][role]))+'); print(json.dumps({"preEvidencePersistedInExec":True}))')
         except Exception:record_unknown(q,vmid,role);raise
         finally:q.close()
         verify(evidence);installed.append((vmid,role))
-        receipts[role+'-exec']=operation(vmid,role,'exec',keys.role_input(custody,role));receipts[role+'-post']=operation(vmid,role,'post')
+        receipts[role+'-exec']=operation(vmid,role,'exec',keys.role_input(custody,role));verify(evidence);receipts[role+'-post']=operation(vmid,role,'post')
     def rollback(target):
         vmid,role,_=target
         if vmid in unknown:

@@ -17,7 +17,40 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from capsule import canonical, inventory, require, sha, file_sha, verify_archive
 
-INPUT=Path('/var/lib/ai-linux-qualification-approved-input')
+INPUT=Path('/var/lib/ai-linux-qualification-custody-v2-input')
+OLD_INPUT=Path('/var/lib/ai-linux-qualification-approved-input')
+PUBLIC_NAMES=frozenset(['DEPLOYMENT-PACKAGE.json','capsule.tar','host-runtime.tar','raw-source.tar','source.tar','deploy.py','capsule.py','broker.service','controller.service','executor@.service','provision-keys.py','pve-operation.py','run-approved.py'])
+def input_directory():
+    safe(INPUT);s=INPUT.lstat()
+    require(stat.S_ISDIR(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o700,'INPUT_DIRECTORY_CUSTODY')
+    return s
+def upload_identity(name):
+    require(name in PUBLIC_NAMES,'FIXED_UPLOAD_NAME');input_directory();p=INPUT/name;s=p.lstat()
+    require(stat.S_ISREG(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o600 and s.st_nlink==1,'UPLOAD_FILE_CUSTODY')
+    return {'device':s.st_dev,'inode':s.st_ino}
+def prepare_upload(name):
+    require(name in PUBLIC_NAMES,'FIXED_UPLOAD_NAME');input_directory()
+    fd=os.open(INPUT/name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    try:
+        s=os.fstat(fd);require(stat.S_ISREG(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o600 and s.st_nlink==1 and s.st_size==0,'UPLOAD_CREATE_CUSTODY')
+        identity={'device':s.st_dev,'inode':s.st_ino}
+        os.fsync(fd)
+    finally:os.close(fd)
+    directory=os.open(INPUT,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:os.fsync(directory)
+    finally:os.close(directory)
+    require(upload_identity(name)==identity,'UPLOAD_CREATE_INODE_CHANGED');return identity
+def check_upload(name,identity,size,digest=None):
+    require(upload_identity(name)==identity,'UPLOAD_INODE_CHANGED')
+    fd=os.open(INPUT/name,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        s=os.fstat(fd);require({'device':s.st_dev,'inode':s.st_ino}==identity and s.st_nlink==1 and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o600 and s.st_size==size,'UPLOAD_FD_CUSTODY_OR_SIZE')
+        if digest is not None:
+            os.fsync(fd)
+            with os.fdopen(os.dup(fd),'rb') as f:require(hashlib.file_digest(f,'sha256').hexdigest()==digest,'UPLOAD_FINAL_SHA')
+    finally:os.close(fd)
+    require(upload_identity(name)==identity,'UPLOAD_POST_CUSTODY')
+    return {'result':'UPLOAD_VERIFIED' if digest is not None else 'UPLOAD_CUSTODY_PASS','bytes':size}
 ROLES={
  'executor':{'hostname':'rc02-executor-117','account':'ai-qualification-executor','root':Path('/opt/ai-linux-qualification'),
    'state':Path('/var/lib/ai-linux-qualification-executor'),'secrets':Path('/etc/ai-linux-qualification-broker'),
@@ -29,13 +62,13 @@ KEEP=['ai-linux-gateway-staging.service','ai-linux-dashboard-staging.service','a
 CAMPAIGN_UNITS={'ai-linux-qualification-broker.service','ai-linux-qualification-controller.service'}
 CAMPAIGN_ACCOUNTS={'ai-qualification-executor','ai-qualification-controller','ai-qualification-evidence'}
 def campaign_unit(name):return name in CAMPAIGN_UNITS or name.startswith('ai-linux-qualification-executor@')
-def tree_digest(root):
+def tree_digest(root,file_limit=256*1024**2):
     """Bounded existing-state digest. Return metadata/hash only; never secret bodies or symlink target bytes."""
     rows=[];total=0;active=set()
     def visit(p):
         nonlocal total
         s=p.lstat();require(len(rows)<100000,'BASELINE_FILE_COUNT')
-        row={'path':str(p),'uid':s.st_uid,'gid':s.st_gid,'mode':stat.S_IMODE(s.st_mode)}
+        row={'path':str(p),'uid':s.st_uid,'gid':s.st_gid,'mode':stat.S_IMODE(s.st_mode),'device':s.st_dev,'inode':s.st_ino,'links':s.st_nlink}
         if p.is_symlink():
             row['linkSha256']=sha(os.readlink(p).encode())
             require(p.exists(),'BASELINE_DANGLING_LINK')
@@ -43,7 +76,7 @@ def tree_digest(root):
             require(not str(target).startswith(('/proc/','/sys/','/dev/')),'BASELINE_UNSAFE_LINK_TARGET')
             row['targetMetadata']={'uid':t.st_uid,'gid':t.st_gid,'mode':stat.S_IMODE(t.st_mode)}
             if p.is_file():
-                require(t.st_size<=256*1024**2,'BASELINE_LINK_FILE_SIZE');total+=t.st_size;require(total<=4*1024**3,'BASELINE_TREE_SIZE');row['targetSha256']=file_sha(p)
+                require(t.st_size<=file_limit,'BASELINE_LINK_FILE_SIZE');total+=t.st_size;require(total<=4*1024**3,'BASELINE_TREE_SIZE');row['targetSha256']=file_sha(p)
             elif p.is_dir():
                 rows.append(row);visit(target);return
             else:raise ValueError('BASELINE_SPECIAL_LINK_TARGET')
@@ -56,7 +89,7 @@ def tree_digest(root):
             active.remove(real)
             return
         elif p.is_file():
-            require(s.st_size<=256*1024**2,'BASELINE_FILE_SIZE');total+=s.st_size;require(total<=4*1024**3,'BASELINE_TREE_SIZE')
+            require(s.st_size<=file_limit,'BASELINE_FILE_SIZE');total+=s.st_size;require(total<=4*1024**3,'BASELINE_TREE_SIZE')
             row.update(kind='file',bytes=s.st_size,sha256=file_sha(p))
         else:raise ValueError('BASELINE_SPECIAL_FILE')
         rows.append(row)
@@ -152,7 +185,7 @@ def executor_baseline():
     return {'services':services,'serviceFileHashes':files,'trees':trees,'identityFileHashes':identity,'network':network,
       'scope':'Running services plus SSH/QGA; exact existing config/runtime/known credential roots. Not exhaustive secret absence or KVM certification.'}
 def check_baseline(old,new):
-    for key in ['hostname','bootId','units','protectedHashes','executorProtection']:
+    for key in ['hostname','bootId','units','protectedHashes','executorProtection','oldCampaignInputs']:
         require(old.get(key)==new.get(key),'PROTECTED_BASELINE_DRIFT:'+key)
 def resource_gate(role,s):
     require(s['memAvailableKiB']>=(3407872 if role=='executor' else 524288) and s['diskFreeBytes']>=8*1024**3,'RESOURCE_GATE')
@@ -199,8 +232,25 @@ def snapshot(role):
             from capsule import portable
             portable(item['path']);p=staging/item['path'];require(file_sha(p)==item['sha256'],'PRESERVED_STAGING_FILE_SHA');hashes[str(p)]=item['sha256']
     return {'hostname':socket.gethostname(),'bootId':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+      'oldCampaignInputs':old_guest_custody(role),
       'executorProtection':executor_baseline() if role=='executor' else None,
       'memAvailableKiB':mem['MemAvailable'],'units':units,'protectedHashes':hashes,'diskFreeBytes':os.statvfs('/opt').f_bavail*os.statvfs('/opt').f_frsize}
+def old_guest_custody(role):
+    if role=='controller':
+        require(not OLD_INPUT.exists() and not OLD_INPUT.is_symlink(),'OLD_CONTROLLER_INPUT_UNEXPECTED')
+        return {'present':False}
+    safe(OLD_INPUT);s=OLD_INPUT.lstat()
+    require(stat.S_ISDIR(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o700,'OLD_EXECUTOR_INPUT_CUSTODY')
+    require({p.name for p in OLD_INPUT.iterdir()}==PUBLIC_NAMES|{'executor-PRE.json'},'OLD_INPUT_INVENTORY')
+    require(file_sha(OLD_INPUT/'DEPLOYMENT-PACKAGE.json')=='35a3cb96e791f0e42d8e658dc54c4a676f6464b1e7ea22fa37ca16eff7c9068d','OLD_INPUT_PACKAGE_SHA')
+    require(file_sha(OLD_INPUT/'executor-PRE.json')=='1011773724108ad94dc99939f0afc457fa6ddf471c857ac5e74adc8da9c6491d','OLD_INPUT_PRE_SHA')
+    manifest=json.loads((OLD_INPUT/'DEPLOYMENT-PACKAGE.json').read_text())
+    for name in PUBLIC_NAMES|{'executor-PRE.json'}:
+        p=OLD_INPUT/name;s=p.lstat();expected_mode=0o600 if name=='executor-PRE.json' else 0o666
+        # Known old0666 inputs are sealed by the root0700 directory, not repaired or reused.
+        require(stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_nlink==1 and stat.S_IMODE(s.st_mode)==expected_mode,'OLD_INPUT_RETAINED_METADATA')
+        if name in manifest['files']:require(file_sha(p)==manifest['files'][name],'OLD_INPUT_RETAINED_SHA')
+    return tree_digest(OLD_INPUT,file_limit=1024**3) # Known pinned843MB public archive, not service-config bound.
 def package(pin):
     safe(INPUT);file=INPUT/'DEPLOYMENT-PACKAGE.json';require(sha(file.read_bytes())==pin,'HUMAN_APPROVED_PACKAGE_SHA_REQUIRED')
     m=json.loads(file.read_text());require(m['schema']==1 and m['targetVmids']==[116,117] and m['authority']=='NONE' and m['productionDispatch']=='CLOSED','PACKAGE_SCOPE')
