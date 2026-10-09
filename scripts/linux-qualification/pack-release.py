@@ -19,7 +19,7 @@ def pack(repo,capsule,out):
     require(sha(canonical(inventory(image)).encode())==manifest['inventorySha256'],'PUBLIC_CAPSULE_INVENTORY')
     shutil.copyfile(capsule/'capsule.tar',out/'capsule.tar');verify_archive(out/'capsule.tar',sha((out/'capsule.tar').read_bytes()))
     host=out/'host-runtime';host.mkdir();queue=[image/'usr/bin/node'];seen=set()
-    libraries={p.name:p for p in image.rglob('*') if p.is_file() and '/lib/' in p.as_posix()}
+    libraries={p.name:p for p in image.rglob('*') if p.is_file() and any(part in p.parts for part in ['lib','lib64'])}
     while queue:
         p=queue.pop();rel=p.relative_to(image).as_posix()
         if rel in seen:continue
