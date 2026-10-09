@@ -1,0 +1,30 @@
+[Unit]
+Description=Fixed isolated offline qualification job %i
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Slice=system.slice
+User=ai-qualification-executor
+Group=ai-qualification-executor
+SupplementaryGroups=ai-qualification-evidence
+ExecStart=/opt/ai-linux-qualification/host-runtime/usr/bin/node /opt/ai-linux-qualification/source/dist/linux-qualification/cli.js executor
+StandardInput=file:/var/lib/ai-linux-qualification-broker/requests/%i.json
+StandardOutput=null
+StandardError=null
+Restart=no
+TimeoutStartSec=900
+TimeoutStopSec=10
+KillMode=control-group
+SendSIGKILL=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/ai-linux-qualification-executor
+MemoryMax=3221225472
+MemorySwapMax=0
+CPUQuota=100%
+TasksMax=128

@@ -1,0 +1,28 @@
+[Unit]
+Description=One-shot fixed Linux offline qualification control run (Production CLOSED)
+After=network.target
+
+[Service]
+Type=oneshot
+User=ai-qualification-controller
+Group=ai-qualification-controller
+ExecStart=/opt/ai-linux-qualification-controller/host-runtime/usr/bin/node /opt/ai-linux-qualification-controller/source/dist/linux-qualification/cli.js run
+Restart=no
+TimeoutStartSec=960
+TimeoutStopSec=15
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/ai-linux-qualification-controller
+InaccessiblePaths=-/etc/ssh -/etc/cloudflared -/var/lib/cloudflared -/var/lib/ai-control-staging
+RestrictAddressFamilies=AF_INET
+IPAddressDeny=any
+IPAddressAllow=192.168.0.54/32
+MemoryMax=256M
+TasksMax=32
+
+# Not enabled; one approved campaign only. Restart run collects existing intent, never redispatches it.

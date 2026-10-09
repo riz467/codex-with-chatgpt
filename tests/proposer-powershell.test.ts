@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 import { deployment } from "../src/config/deployment.js";
 
 it("checks the real portable PowerShell schema, identity, OAuth, session and zero-tool contracts offline", () => {
-  const result = spawnSync(deployment.pwsh, ["-NoProfile", "-NonInteractive", "-File",
+  // Local regression harness only; the qualification capsule receives no caller environment override.
+  const result = spawnSync(process.env.C2C_TEST_PWSH ?? deployment.pwsh, ["-NoProfile", "-NonInteractive", "-File",
     fileURLToPath(new URL("./fixtures/proposer-contract.ps1", import.meta.url))], {
     encoding: "utf8", timeout: 20000, windowsHide: true, shell: false,
     env: { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH, TEMP: process.env.TEMP, TMP: process.env.TMP,

@@ -1,0 +1,28 @@
+[Unit]
+Description=Temporary fixed Linux offline qualification broker (authority NONE)
+After=network.target
+
+[Service]
+Type=exec
+User=root
+Group=ai-qualification-evidence
+ExecStart=/opt/ai-linux-qualification/host-runtime/usr/bin/node /opt/ai-linux-qualification/source/dist/linux-qualification/broker-server.js
+Restart=no
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/ai-linux-qualification-broker
+InaccessiblePaths=-/etc/ssh -/etc/sudoers -/etc/cloudflared -/var/lib/cloudflared
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressDeny=any
+IPAddressAllow=192.168.0.45/32
+MemoryMax=384M
+TasksMax=32
+RuntimeMaxSec=1800
+TimeoutStopSec=15
+KillMode=control-group
+
+# Not enabled. Separately authorized, temporary single-campaign start only.

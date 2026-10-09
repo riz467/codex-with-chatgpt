@@ -6,6 +6,10 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
+export const linuxFixtureTests = Object.freeze(["linux-portability", "linux-process-lifecycle", "owned-process", "bounded-process-lock",
+  "bounded-worker-termination", "proposer-powershell", "bounded-task", "bounded-campaign", "bounded-reference-evidence",
+  "semantic-session-transport", "review-workspace-info", "mcp-integration", "opencode-binary"].map(name => `tests/${name}.test.ts`));
+
 export function validFixtureReport(report, root, tests) {
   if (report?.success !== true || !Number.isSafeInteger(report.numTotalTests) || report.numTotalTests < 1 ||
       report.numPassedTests !== report.numTotalTests || !Array.isArray(report.testResults)) return false;
@@ -28,10 +32,8 @@ function main() {
     XDG_CACHE_HOME: path.join(output, "cache"), XDG_STATE_HOME: path.join(output, "state"),
     C2C_STATE_DIR: path.join(output, "c2c"), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", CI: "1" };
   for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "C2C_STATE_DIR"]) fs.mkdirSync(env[key]);
-  const tests = ["linux-portability", "linux-process-lifecycle", "owned-process", "bounded-process-lock",
-    "bounded-worker-termination", "proposer-powershell", "bounded-task", "bounded-campaign", "bounded-reference-evidence",
-    "semantic-session-transport", "review-workspace-info", "mcp-integration", "opencode-binary"].map(name => `tests/${name}.test.ts`);
-  const result = spawnSync(process.execPath, [path.join(root, "node_modules/vitest/vitest.mjs"), "run", "--maxWorkers=2",
+  const tests = [...linuxFixtureTests];
+  const result = spawnSync(process.execPath, [path.join(root, "node_modules/vitest/vitest.mjs"), "run", "--maxWorkers=2", "--no-cache", "--configLoader", "runner",
     "--reporter=json", `--outputFile=${path.join(output, "vitest.json")}`, ...tests],
   { cwd: root, env, encoding: "utf8", timeout: 900000, maxBuffer: 8 * 1024 * 1024, shell: false });
   fs.writeFileSync(path.join(output, "stdout.log"), result.stdout ?? "");

@@ -62,7 +62,7 @@ export function sandboxCapability() {
 // Host-authored, harmless fixture only. It never imports candidate modules, scripts, package
 // metadata, Git config, or startup files. Future mutation/FAST profiles require a new host-owned
 // implementation and authorization connection; neither RESERVE nor a recovered receipt is accepted.
-const fixture = String.raw`
+export const sandboxIsolationFixture = String.raw`
 const fs = require('node:fs'), net = require('node:net'), os = require('node:os');
 const input = JSON.parse(process.argv[1]);
 function assert(v, label) { if (!v) throw new Error(label); }
@@ -120,7 +120,7 @@ export function runSandboxFixture(input: unknown) {
     "--cap-drop", "ALL", "--clearenv", "--ro-bind", runtime, "/", "--bind", request.candidate.root, "/candidate",
     "--proc", "/proc", "--dev", "/dev", "--chdir", "/candidate",
     ...Object.entries(sandboxWorkerEnvironment).flatMap(([key, value]) => ["--setenv", key, value]),
-    "--", "/usr/bin/node", "--no-addons", "--no-warnings", "-e", fixture,
+    "--", "/usr/bin/node", "--no-addons", "--no-warnings", "-e", sandboxIsolationFixture,
     JSON.stringify({ canonical: identity.canonicalRoot, home: hostHome(), hostPid: process.pid, namespaces })];
   const result = spawnSync(backend, args, { shell: false, env: { LANG: "C" }, cwd: "/",
     stdio: ["ignore", "pipe", "pipe"], timeout: 10_000, killSignal: "SIGKILL", maxBuffer: 64 * 1024 });
