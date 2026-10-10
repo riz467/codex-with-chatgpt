@@ -84,7 +84,7 @@ data, provider/model, one-turn budget/timeouts and no-replay handling separately
 
 ## Resource decision, based on read-only observation
 
-2026-10-10 UTC / 2026-10-11 JST, three samples over about10seconds:
+2026-10-10 14:58 UTC / 23:58 JST, three samples over about10seconds:
 
 | Target | logical CPU / configured RAM | busy CPU | MemAvailable | swap used | root FS free |
 |---|---|---:|---:|---:|---:|
