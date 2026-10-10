@@ -7,6 +7,7 @@ import { canonicalJson } from "../task-contract/contract.js";
 import { hashRecord, parseBinding } from "../execution-orchestrator/development/contract.js";
 import { DevelopmentStore, type StoreAnchor } from "../execution-orchestrator/development/store.js";
 import { proposalSchema, receiptSchema, requestSchema, type Role } from "./fixture.js";
+import { inspectLinuxCustodyMetadata } from "./custody.js";
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 export class OutcomeUnknown extends Error { constructor() { super("FIXTURE_OUTCOME_UNKNOWN_NO_REPLAY"); } }
@@ -40,7 +41,7 @@ export function assertNonprivilegedLinux() {
 }
 export function providerReadiness() {
   return { provider: "NOT_RUN", openCode: "NOT_RUN", reason: "EXISTING_HOST_OAUTH_CUSTODY_ADAPTER_CLOSED",
-    credentialImported: false, productionDispatch: "CLOSED", authority: "NONE" } as const;
+    credentialImported: false, custody: inspectLinuxCustodyMetadata(), productionDispatch: "CLOSED", authority: "NONE" } as const;
 }
 
 export async function spawnFixtureRole(role: Role, input: unknown, cwd: string) {
