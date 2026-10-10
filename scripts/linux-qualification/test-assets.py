@@ -64,10 +64,10 @@ class Assets(unittest.TestCase):
         data=bytearray(64);data[:6]=b'\x7fELF\x02\x01';data[18:20]=(183).to_bytes(2,'little')
         with self.assertRaises(ValueError):capsule.elf_dependencies(data)
     def test_unapproved_deployment_identity(self):
-        with patch.object(deploy.os,'geteuid',return_value=1,create=True):
+        with patch.object(deploy,'require_external_fence'),patch.object(deploy.os,'geteuid',return_value=1,create=True):
             with self.assertRaises(ValueError):deploy.execute('exec','executor','0'*64)
     def test_exec_requires_pre_before_any_command(self):
-        with patch.object(deploy,'INPUT',self.root),patch.object(deploy.os,'geteuid',return_value=0,create=True),patch.object(deploy.socket,'gethostname',return_value='rc02-executor-117'),patch.object(deploy,'package',return_value={}),patch.object(deploy,'run') as command:
+        with patch.object(deploy,'require_external_fence'),patch.object(deploy,'INPUT',self.root),patch.object(deploy.os,'geteuid',return_value=0,create=True),patch.object(deploy.socket,'gethostname',return_value='rc02-executor-117'),patch.object(deploy,'package',return_value={}),patch.object(deploy,'run') as command:
             with self.assertRaises(ValueError):deploy.execute('exec','executor','0'*64)
             command.assert_not_called()
     def test_forbidden_qga_vmid_no_socket(self):
@@ -145,13 +145,13 @@ class Assets(unittest.TestCase):
             self.assertEqual(deploy.readonly_pre(role,'a'*64)['snapshot'],s);write.assert_not_called()
     def test_transport_pre_failure_no_remote_mkdir_scp_keys(self):
         pin=self.valid_bundle()
-        with patch.object(transport,'readonly_transport',side_effect=ValueError('PRE_FAILED')),patch.object(transport.subprocess,'run') as command:
+        with patch.object(transport,'require_external_fence'),patch.object(transport,'readonly_transport',side_effect=ValueError('PRE_FAILED')),patch.object(transport.subprocess,'run') as command:
             with self.assertRaisesRegex(ValueError,'PRE_FAILED'):transport.run(self.root,pin,'test-only-reference')
             command.assert_not_called();self.assertFalse((self.root/'PRE-COMPLETED.json').exists())
     def test_transport_existing_claim_fences_replay(self):
         pin=self.valid_bundle()
         (self.root/'PRE-COMPLETED.json').write_text('prior claim')
-        with patch.object(transport,'readonly_transport',return_value={}),patch.object(transport.subprocess,'run') as command:
+        with patch.object(transport,'require_external_fence'),patch.object(transport,'readonly_transport',return_value={}),patch.object(transport.subprocess,'run') as command:
             with self.assertRaises(FileExistsError):transport.run(self.root,pin,'test-only-reference')
             command.assert_not_called()
     def test_network_ttl_normalized_but_real_route_change_retained(self):
@@ -179,7 +179,8 @@ class Assets(unittest.TestCase):
         events=[]
         def verify(e):
             if events:raise ValueError('BROKER_START_CHANGED_VM117')
-        with self.assertRaises(ValueError):pve.start_fixed_units({},verify,lambda vmid,unit:events.append(unit))
+        with patch.object(pve,'require_external_fence'):
+            with self.assertRaises(ValueError):pve.start_fixed_units({},verify,lambda vmid,unit:events.append(unit))
         self.assertEqual(events,['ai-linux-qualification-broker.service'])
     def test_stale_sync_nonce_rejected(self):
         fake=types.SimpleNamespace(settimeout=lambda t:None,connect=lambda p:None,makefile=lambda mode:types.SimpleNamespace(),sendall=lambda b:None)

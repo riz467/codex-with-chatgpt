@@ -64,7 +64,8 @@ def pack(repo,capsule,out):
       'sourceInventorySha256':sha(canonical(rows).encode()),'files':hashes,'authority':'NONE','productionDispatch':'CLOSED',
       'buildProvenance':{'kind':'ISOLATED_COMMITTED_SOURCE_COMPILE','commit':commit,'lockfileSha256':sha((src/'pnpm-lock.yaml').read_bytes()),
         'compiledFilesSha256':{p.relative_to(build/'dist').as_posix():sha(p.read_bytes()) for p in (build/'dist').rglob('*') if p.is_file()}},
-      'linux13Suite':'NOT_RUN','namespaceLiveProof':'NOT_RUN','providerQualification':'NOT_RUN','semanticReview':'NOT_RUN',
+       'linux13Suite':'NOT_RUN','namespaceLiveProof':'NOT_RUN','providerQualification':'NOT_RUN','semanticReview':'NOT_RUN',
+       'liveReadiness':'LIVE_BLOCKED_EXTERNAL_FENCING_UNIMPLEMENTED',
       'credentialScope':'Fresh per-campaign broker/client/TLS keys outside workload image; not Human signing authority'}
     (out/'DEPLOYMENT-PACKAGE.json').write_text(canonical(release)+'\n');print(json.dumps({'sourceCommit':commit,'packageSha256':sha((out/'DEPLOYMENT-PACKAGE.json').read_bytes()),'files':len(hashes)}))
 if __name__=='__main__':

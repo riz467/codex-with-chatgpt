@@ -121,7 +121,7 @@ class Upload(unittest.TestCase):
         self.assertEqual((self.input/'capsule.tar').read_bytes(),b'pub')
     def test_old_claim_not_deleted_by_host_prepare_existing_target(self):
         old=self.root/'old-claim';old.write_bytes(b'original')
-        with patch.object(pve,'ROOT',self.input),patch.object(pve,'trusted_host_parents'),patch.object(pve,'old_host_custody',return_value={'sha':'old'}),patch.object(pve,'donor_file') as donor:
+        with patch.object(pve,'require_external_fence'),patch.object(pve,'ROOT',self.input),patch.object(pve,'trusted_host_parents'),patch.object(pve,'old_host_custody',return_value={'sha':'old'}),patch.object(pve,'donor_file') as donor:
             with self.assertRaises(FileExistsError):pve.prepare_host_inputs({},{});donor.assert_not_called()
         self.assertEqual(old.read_bytes(),b'original')
     def test_host_success_and_fd_permissions_checked(self):
@@ -173,7 +173,8 @@ class Upload(unittest.TestCase):
             elif 'input' in kw:
                 frame=kw['input'];header,tail=frame.split(b'\n',1);n=int(header);self.assertIn(b'receive_host_input',tail[:n]);self.assertLessEqual(n,1048576)
             return types.SimpleNamespace(returncode=0,stdout=b'{"result":"PASS"}')
-        with patch.object(t,'readonly_transport',return_value=evidence),patch.object(t,'process',side_effect=lambda journal,step,args,timeout,**kw:command(args,**kw)):t.run(bundle,hashlib.sha256(data).hexdigest(),'test-only-human-record')
+        # Mock fence only for transport serialization regression; production has no bypass.
+        with patch.object(t,'require_external_fence'),patch.object(t,'readonly_transport',return_value=evidence),patch.object(t,'process',side_effect=lambda journal,step,args,timeout,**kw:command(args,**kw)):t.run(bundle,hashlib.sha256(data).hexdigest(),'test-only-human-record')
         self.assertEqual(len(calls),15) # prepare +13 small files + final invocation
     def test_actual_loader_complete_truncated_oversize_frames(self):
         import subprocess

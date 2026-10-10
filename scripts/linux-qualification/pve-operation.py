@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from capsule import canonical,require,sha,file_sha
-from evidence import Journal,EvidenceFailure,OperationFailure,failure
+from evidence import Journal,EvidenceFailure,OperationFailure,failure,require_external_fence
 ACTIVE_JOURNAL=None
 def tracked(step,action):return ACTIVE_JOURNAL.run(step,action) if ACTIVE_JOURNAL else action()
 import importlib.util
@@ -22,16 +22,19 @@ else:
     spec=importlib.util.spec_from_file_location('campaign_keys',Path(__file__).parent/'provision-keys.py')
     keys=importlib.util.module_from_spec(spec);spec.loader.exec_module(keys)
 
-ROOT=Path('/var/tmp/ai-linux-qualification-custody-v2-release')
+ROOT=Path('/var/tmp/ai-linux-qualification-retest-20261010-release')
+V2_ROOT=Path('/var/tmp/ai-linux-qualification-custody-v2-release')
 OLD_ROOT=Path('/var/tmp/ai-linux-qualification-release')
 OLD_PACKAGE_SHA='35a3cb96e791f0e42d8e658dc54c4a676f6464b1e7ea22fa37ca16eff7c9068d'
 OLD_CLAIM_SHA='565f03dec95a83e7bf06270155f126e572759f11b68e81c474e586d13d5c44ba'
 OLD_PRE_SHA='bf0ea09ca232acaba960e04bdfbd4854d26253b5f25f41c8e65ec7095f3820bc'
-GUEST='/var/lib/ai-linux-qualification-custody-v2-input'
+GUEST='/var/lib/ai-linux-qualification-retest-20261010-input'
 HOST_PUBLIC_NAMES=frozenset(['DEPLOYMENT-PACKAGE.json','PRE-COMPLETED.json','capsule.tar','host-runtime.tar','raw-source.tar','source.tar','deploy.py','capsule.py','evidence.py','broker.service','controller.service','executor@.service','provision-keys.py','pve-operation.py','run-approved.py'])
+def fresh_host_path():
+    require(all(ROOT!=p and ROOT not in p.parents and p not in ROOT.parents for p in [OLD_ROOT,V2_ROOT]),'FRESH_HOST_PATH_COLLISION')
 def trusted_host_parents(path):
     import stat
-    require(path in [ROOT,OLD_ROOT],'FIXED_HOST_DIRECTORY')
+    require(path in [ROOT,OLD_ROOT,V2_ROOT],'FIXED_HOST_DIRECTORY')
     for ancestor in path.parents:
         s=ancestor.lstat();require(stat.S_ISDIR(s.st_mode) and s.st_uid==0 and not ancestor.is_symlink(),'HOST_ANCESTOR_CUSTODY')
         require(not s.st_mode&0o022 or str(ancestor)=='/var/tmp' and bool(s.st_mode&stat.S_ISVTX),'HOST_ANCESTOR_WRITABLE')
@@ -55,6 +58,7 @@ def donor_file(name,digest):
     except Exception:os.close(fd);raise
 def receive_host_input(name,stream,size,digest):
     import stat
+    fresh_host_path()
     require(name in HOST_PUBLIC_NAMES,'FIXED_HOST_INPUT_NAME');trusted_host_directory(ROOT)
     fd=os.open(ROOT/name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);count=0;h=hashlib.sha256()
     try:
@@ -74,7 +78,9 @@ def receive_host_input(name,stream,size,digest):
     finally:os.close(directory)
     return {'name':name,'bytes':count,'sha256':digest}
 def prepare_host_inputs(sources,files):
-    # Only after BOTH PRE pass; fresh root is an execution fence, never resume old inputs.
+    tracked('external-fence',require_external_fence)
+    fresh_host_path()
+    # Only after BOTH PRE and external fencing; fresh root fences same-region replay only.
     before=old_host_custody(sources);trusted_host_parents(ROOT);ROOT.mkdir(mode=0o700);trusted_host_directory(ROOT);reused=[]
     for name in ['capsule.tar','host-runtime.tar']:
         fd=donor_file(name,files[name])
@@ -87,7 +93,12 @@ def old_host_custody(sources):
     for name,digest in [('DEPLOYMENT-PACKAGE.json',OLD_PACKAGE_SHA),('APPROVED-EXECUTION-CLAIM.json',OLD_CLAIM_SHA),('PRE-COMPLETED.json',OLD_PRE_SHA)]:
         p=OLD_ROOT/name;s=p.lstat();require(stat.S_ISREG(s.st_mode) and s.st_uid==0 and not s.st_mode&0o022 and s.st_nlink==1 and file_sha(p)==digest,'OLD_CAMPAIGN_CUSTODY')
     namespace={};exec(guest_modules(sources)+'import deploy; from pathlib import Path; result=deploy.tree_digest(Path('+repr(str(OLD_ROOT))+'),file_limit=1024**3)',namespace)
-    return namespace['result']
+    original=namespace['result']
+    trusted_host_directory(V2_ROOT)
+    for name,digest in [('DEPLOYMENT-PACKAGE.json','e14d769a068725eb6d108f625d69915bc4aa12dbcd4940487e3e9aa771639a05'),('APPROVED-EXECUTION-CLAIM.json','505f18071ad3568c124b833acd6a84761429364c069ac9413a86cb1f88342b32')]:
+        p=V2_ROOT/name;s=p.lstat();require(stat.S_ISREG(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o600 and s.st_nlink==1 and file_sha(p)==digest,'V2_CAMPAIGN_CUSTODY')
+    namespace={};exec(guest_modules(sources)+'import deploy; from pathlib import Path; result=deploy.tree_digest(Path('+repr(str(V2_ROOT))+'),file_limit=1024**3)',namespace)
+    return {'release':original,'custodyV2':namespace['result']}
 TARGETS=[(117,'executor','rc02-executor-117'),(116,'controller','ai-control-116')]
 def guest_modules(sources):
     # In-memory trusted adapter only; python -I -B, no guest upload/import cache or directory creation.
@@ -156,6 +167,7 @@ def two_phase(pre,verify,execute,post,rollback,journal=None):
         return outcome
     return {'result':'PASS'}
 def start_fixed_units(evidence,verify,start):
+    tracked('external-fence',require_external_fence)
     for vmid,unit in [(117,'ai-linux-qualification-broker.service'),(116,'ai-linux-qualification-controller.service')]:
         verify(evidence);start(vmid,unit)
 def settle_original(q,pid):
@@ -203,17 +215,20 @@ class Qga:
                 fields={'guestPid':proc['pid'],'exited':True,'exitCode':r.get('exitcode'),'signal':r.get('signal'),'settled':True,'stdoutSha256':sha(base64.b64decode(r.get('out-data',''))),'stderrSha256':sha(base64.b64decode(r.get('err-data','')))}
                 if ACTIVE_JOURNAL:ACTIVE_JOURNAL.emit('qga.process','STATUS',**fields)
                 if r.get('exitcode')!=0 or r.get('signal'):
+                    self.execution_unknown=True;self.unsettled_child=True # Invalid/incomplete failure receipts never settle children.
                     try:
                         guest=json.loads(base64.b64decode(r.get('out-data','')))
-                        allowed={'private-input','identity','package','pre-binding','replay-gate','snapshot','baseline','resource','install-claim','account','directories','runtime','private-config','units','daemon-reload','post','rollback','entry'}
+                        allowed={'external-fence','private-input','identity','package','pre-binding','replay-gate','snapshot','baseline','resource','install-claim','account','directories','runtime','private-config','units','daemon-reload','post','rollback','entry'}
                         if not isinstance(guest,dict) or not isinstance(guest.get('failure'),dict):raise ValueError('GUEST_FAILURE_SCHEMA')
-                        if ACTIVE_JOURNAL and guest.get('result')=='BLOCKED' and guest.get('failedStep') in allowed:
-                            ACTIVE_JOURNAL.emit('guest.'+guest['failedStep'],'FAIL',**__import__('evidence').clean(guest['failure']))
+                        if guest.get('result')!='BLOCKED' or guest.get('failedStep') not in allowed or guest['failure'].get('classification') not in (__import__('evidence').CLASSES-{'SUCCESS'}):raise ValueError('GUEST_FAILURE_SCHEMA')
+                        sanitized=__import__('evidence').clean(guest['failure'])
+                        if 'settled' in sanitized and not isinstance(sanitized['settled'],bool):raise ValueError('GUEST_SETTLEMENT_SCHEMA')
+                        if ACTIVE_JOURNAL:ACTIVE_JOURNAL.emit('guest.'+guest['failedStep'],'FAIL',**sanitized)
                         if guest['failure'].get('classification')=='EVIDENCE_FAILURE':
                             self.execution_unknown=True;self.unsettled_child=True
                             raise EvidenceFailure('GUEST_EVIDENCE_FAILURE')
-                        if guest.get('failure',{}).get('settled') is False:
-                            self.execution_unknown=True;self.unsettled_child=True
+                        if sanitized.get('settled') is True and sanitized['classification'] not in ['TIMEOUT','UNKNOWN','DISCONNECTED']:
+                            self.execution_unknown=False;self.unsettled_child=False
                     except (ValueError,KeyError,TypeError):
                         self.execution_unknown=True;self.unsettled_child=True
                     raise OperationFailure('SIGNAL' if r.get('signal') else 'NONZERO_EXIT',**fields)
@@ -253,6 +268,7 @@ def resource_pre():
     return {'memAvailableKiB':mem['MemAvailable'],'guestReservationsBytes':sum(int(r.get('maxmem',0)) for r in guests)}
 def main(pin,approval,baseline_sha):
     global ACTIVE_JOURNAL
+    tracked('external-fence',require_external_fence) # Before host/QGA access, claim, keys or writes.
     require(approval.strip(),'ACTUAL_HUMAN_APPROVAL_REFERENCE_REQUIRED');pre=resource_pre();require(ROOT.is_dir() and not ROOT.is_symlink(),'FIXED_INPUT_ROOT')
     m=json.loads((ROOT/'DEPLOYMENT-PACKAGE.json').read_text());require(sha((ROOT/'DEPLOYMENT-PACKAGE.json').read_bytes())==pin,'APPROVED_PACKAGE_SHA')
     require(m['targetVmids']==[116,117] and m['productionDispatch']=='CLOSED' and m['authority']=='NONE','FIXED_SCOPE')
@@ -342,4 +358,5 @@ def main(pin,approval,baseline_sha):
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('approvedPackageSha256');p.add_argument('--human-approval-reference',required=True);p.add_argument('--pre-receipt-sha256',required=True);a=p.parse_args()
     try:sys.exit(main(a.approvedPackageSha256,a.human_approval_reference,a.pre_receipt_sha256))
-    except Exception:print('{"result":"PVE_FIXED_OPERATION_BLOCKED_NO_REPLAY"}');sys.exit(2)
+    except Exception as error:
+        print(json.dumps({'result':'PVE_FIXED_OPERATION_BLOCKED_NO_REPLAY','failedStep':'external-fence' if getattr(error,'external_fence_unverified',False) else 'entry','failure':failure(error)}));sys.exit(2)

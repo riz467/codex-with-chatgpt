@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from capsule import canonical, inventory, require, sha, file_sha, verify_archive
-from evidence import Journal,EvidenceFailure,failure,process
+from evidence import Journal,EvidenceFailure,failure,process,require_external_fence
 EVENTS=None
 CURRENT_STEP=None
 def stage(step):
@@ -26,10 +26,12 @@ def stage(step):
         EVENTS.emit(step,'BEGIN')
     CURRENT_STEP=step
 
-INPUT=Path('/var/lib/ai-linux-qualification-custody-v2-input')
+INPUT=Path('/var/lib/ai-linux-qualification-retest-20261010-input')
+V2_INPUT=Path('/var/lib/ai-linux-qualification-custody-v2-input')
 OLD_INPUT=Path('/var/lib/ai-linux-qualification-approved-input')
 PUBLIC_NAMES=frozenset(['DEPLOYMENT-PACKAGE.json','capsule.tar','host-runtime.tar','raw-source.tar','source.tar','deploy.py','capsule.py','evidence.py','broker.service','controller.service','executor@.service','provision-keys.py','pve-operation.py','run-approved.py'])
 def input_directory():
+    require(all(INPUT!=p and INPUT not in p.parents and p not in INPUT.parents for p in [OLD_INPUT,V2_INPUT]),'FRESH_INPUT_PATH_COLLISION')
     safe(INPUT);s=INPUT.lstat()
     require(stat.S_ISDIR(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o700,'INPUT_DIRECTORY_CUSTODY')
     return s
@@ -243,7 +245,7 @@ def snapshot(role):
             from capsule import portable
             portable(item['path']);p=staging/item['path'];require(file_sha(p)==item['sha256'],'PRESERVED_STAGING_FILE_SHA');hashes[str(p)]=item['sha256']
     return {'hostname':socket.gethostname(),'bootId':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
-      'oldCampaignInputs':old_guest_custody(role),
+      'oldCampaignInputs':{'release':old_guest_custody(role),'custodyV2':v2_guest_custody(role)},
       'executorProtection':executor_baseline() if role=='executor' else None,
       'memAvailableKiB':mem['MemAvailable'],'units':units,'protectedHashes':hashes,'diskFreeBytes':os.statvfs('/opt').f_bavail*os.statvfs('/opt').f_frsize}
 def old_guest_custody(role):
@@ -262,6 +264,21 @@ def old_guest_custody(role):
         require(stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_nlink==1 and stat.S_IMODE(s.st_mode)==expected_mode,'OLD_INPUT_RETAINED_METADATA')
         if name in manifest['files']:require(file_sha(p)==manifest['files'][name],'OLD_INPUT_RETAINED_SHA')
     return tree_digest(OLD_INPUT,file_limit=1024**3) # Known pinned843MB public archive, not service-config bound.
+def v2_guest_custody(role):
+    if role=='controller':
+        require(not V2_INPUT.exists() and not V2_INPUT.is_symlink(),'V2_CONTROLLER_INPUT_UNEXPECTED')
+        return {'present':False}
+    safe(V2_INPUT);s=V2_INPUT.lstat()
+    require(stat.S_ISDIR(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o700,'V2_INPUT_CUSTODY')
+    names=(PUBLIC_NAMES-{'evidence.py'})|{'executor-PRE.json'}
+    require({p.name for p in V2_INPUT.iterdir()}==names,'V2_INPUT_INVENTORY')
+    require(file_sha(V2_INPUT/'DEPLOYMENT-PACKAGE.json')=='e14d769a068725eb6d108f625d69915bc4aa12dbcd4940487e3e9aa771639a05','V2_INPUT_PACKAGE_SHA')
+    manifest=json.loads((V2_INPUT/'DEPLOYMENT-PACKAGE.json').read_text())
+    for name in names:
+        p=V2_INPUT/name;s=p.lstat()
+        require(stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_nlink==1 and stat.S_IMODE(s.st_mode)==0o600,'V2_INPUT_RETAINED_METADATA')
+        if name in manifest['files']:require(file_sha(p)==manifest['files'][name],'V2_INPUT_RETAINED_SHA')
+    return tree_digest(V2_INPUT,file_limit=1024**3)
 def package(pin):
     safe(INPUT);file=INPUT/'DEPLOYMENT-PACKAGE.json';require(sha(file.read_bytes())==pin,'HUMAN_APPROVED_PACKAGE_SHA_REQUIRED')
     m=json.loads(file.read_text());require(m['schema']==1 and m['targetVmids']==[116,117] and m['authority']=='NONE' and m['productionDispatch']=='CLOSED','PACKAGE_SCOPE')
@@ -279,6 +296,8 @@ def extract(archive,target,digest):
             else:
                 p.parent.mkdir(mode=0o755,parents=True,exist_ok=True);write(p,t.extractfile(member).read(),mode=member.mode)
 def execute(mode,role,pin,secretInput=None):
+    if mode=='exec':
+        stage('external-fence');require_external_fence()
     stage('identity')
     r=ROLES[role];require(os.geteuid()==0 and socket.gethostname()==r['hostname'],'ROOT_TARGET_IDENTITY')
     stage('package');m=package(pin);receipt=INPUT/(role+'-PRE.json');created=INPUT/(role+'-CREATED.json')
@@ -382,6 +401,8 @@ def readonly_pre(role,pin):
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('mode',choices=['pre','exec','post','rollback']);p.add_argument('role',choices=list(ROLES));p.add_argument('approvedPackageSha256');a=p.parse_args()
     try:
+        if a.mode=='exec':
+            CURRENT_STEP='external-fence';require_external_fence() # Before journal creation or private stdin reads.
         EVENTS=Journal(INPUT/(a.role+'-'+a.mode+'-events'))
         stage('private-input')
         secret=None

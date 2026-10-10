@@ -55,7 +55,7 @@ class Obs(unittest.TestCase):
     def test_guest_known_exit_signal_and_sanitized_failure(self):
         for response,expected in [({'exitcode':2},'NONZERO_EXIT'),({'signal':9},'SIGNAL')]:
             q=pve.Qga.__new__(pve.Qga);q.vmid=117
-            body={'result':'BLOCKED','failedStep':'package','failure':{'classification':'PERMISSION','errorClass':'PermissionError'}}
+            body={'result':'BLOCKED','failedStep':'package','failure':{'classification':'PERMISSION','errorClass':'PermissionError','settled':True}}
             q.call=lambda cmd,arg:{'pid':22} if cmd=='guest-exec' else {'exited':True,'out-data':base64.b64encode(json.dumps(body).encode()).decode(),**response}
             with patch.object(pve,'ACTIVE_JOURNAL',self.j):
                 with self.assertRaises(OperationFailure) as caught:q.python('never executed')

@@ -7,6 +7,15 @@ class OperationFailure(RuntimeError):
     def __init__(self,classification,**fields):
         self.classification=classification;self.fields=fields
         super().__init__('OBSERVED_OPERATION_FAILURE')
+def require_external_fence():
+    """No trusted external fence verifier exists for the historical root/QGA execution.
+
+    Deliberately no boolean, file, Human-reference or new-lock bypass. Enabling live
+    execution requires a separately reviewed implementation backed by technical fencing.
+    """
+    error=OperationFailure('UNKNOWN',settled=False)
+    error.external_fence_unverified=True
+    raise error
 CLASSES={'SUCCESS','NONZERO_EXIT','SIGNAL','TIMEOUT','DISCONNECTED','UNKNOWN','PERMISSION','VALIDATION','IO','INTERNAL','EVIDENCE_FAILURE'}
 KEYS={'pid','parentPid','guestPid','vmid','exitCode','signal','errno','timeoutSeconds','stdoutBytes','stderrBytes','stdoutSha256','stderrSha256','exited','settled','requestId','classification','errorClass'}
 def clean(fields):

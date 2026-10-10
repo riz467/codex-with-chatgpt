@@ -1,5 +1,9 @@
 # Offline observability correction — no live authorization
 
+This document records the observability-only release. The subsequent fresh-input correction
+and deliberately blocked external-fencing gate are specified in linux-qualification-retest-boundary.md.
+Statements below about unchanged input roots describe that earlier release, not the new retest inputs.
+
 Historical Custody v2 installation outcome and original process settlement remain UNKNOWN.
 This correction is not a cause-specific fix or evidence of successful qualification.
 Production Dispatch stays CLOSED; authority NONE; Linux13, isolation and autonomous E2E stay NOT_RUN.

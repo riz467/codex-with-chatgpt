@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from evidence import Journal,process,OperationFailure,clean,EvidenceFailure
+from evidence import Journal,process,OperationFailure,clean,EvidenceFailure,require_external_fence
 EVENTS=None
 def command(step,args,**kwargs):
     if not EVENTS:return subprocess.run(args,**kwargs)
@@ -23,7 +23,13 @@ def command(step,args,**kwargs):
                 body=json.loads(completed.stdout);flow=body.get('controlFlow',{}) if isinstance(body,dict) else {}
                 if body.get('result') not in ['STOPPED_EXECUTION_OUTCOME_UNKNOWN_NO_REPLAY','PVE_FIXED_OPERATION_BLOCKED_NO_REPLAY']:raise ValueError('SCHEMA')
                 summary={'result':body['result']}
-                if isinstance(flow,dict):
+                if body['result']=='PVE_FIXED_OPERATION_BLOCKED_NO_REPLAY':
+                    if body.get('failedStep') not in ['external-fence','entry'] or not isinstance(body.get('failure'),dict):raise ValueError('BLOCKED_FAILURE_SCHEMA')
+                    fields=clean(body['failure'])
+                    if fields.get('classification') in [None,'SUCCESS']:raise ValueError('BLOCKED_FAILURE_CLASS_REQUIRED')
+                    if body['failedStep']=='external-fence' and (fields.get('classification')!='UNKNOWN' or fields.get('settled') is not False):raise ValueError('EXTERNAL_FENCE_FAILURE_SCHEMA')
+                    summary.update(failedStep=body['failedStep'],failure=fields)
+                if body['result']=='STOPPED_EXECUTION_OUTCOME_UNKNOWN_NO_REPLAY' and isinstance(flow,dict):
                     if isinstance(flow.get('failure'),dict):summary['failure']=clean(flow['failure'])
                     first=flow.get('firstFailure')
                     if isinstance(first,dict) and isinstance(first.get('step'),str) and __import__('re').fullmatch('[a-z][a-z0-9_.-]{0,95}',first['step']):
@@ -83,6 +89,7 @@ def _run(root,pin,approval,pre_only=False):
             if hashlib.sha256(content).hexdigest()!=digest:raise ValueError('ADAPTER_SOURCE_CHANGED')
             verified[name]=content
     sources={name:verified[name].decode('utf-8') for name in ['evidence.py','capsule.py','deploy.py','provision-keys.py','pve-operation.py']}
+    if not pre_only:EVENTS.run('external-fence',require_external_fence) # No transport or mutating preparation without technical fencing.
     evidence=readonly_transport(sources,pin) # BOTH VM PRE passes BEFORE host or guest changes.
     data=json.dumps(evidence,sort_keys=True,separators=(',',':')).encode();pre_sha=hashlib.sha256(data).hexdigest()
     pre_file=root/('READONLY-PRE-CANDIDATE.json' if pre_only else 'PRE-COMPLETED.json')
@@ -95,7 +102,7 @@ def _run(root,pin,approval,pre_only=False):
         for key in ['hostname','bootId','units','protectedHashes','executorProtection','oldCampaignInputs']:
             if evidence['targets'][role]['snapshot'].get(key)!=again['targets'][role]['snapshot'].get(key):raise ValueError('PRE_DRIFT_BEFORE_TRANSFER')
     ssh=SSH
-    remote='/var/tmp/ai-linux-qualification-custody-v2-release'
+    remote='/var/tmp/ai-linux-qualification-retest-20261010-release'
     prepare=host_modules(sources)+'assert pve.os.geteuid()==0 and pve.socket.gethostname()=="pve5"; print(json.dumps(pve.prepare_host_inputs('+repr({name:sources[name+'.py'] for name in ['evidence','capsule','deploy']})+','+repr(m['files'])+')))'
     r=command('transport.host-reuse',[*ssh,'python3 -I -B -'],input=prepare.encode(),capture_output=True,timeout=600)
     (root/'HOST-REUSE-TRANSPORT.json').write_bytes(r.stdout)
