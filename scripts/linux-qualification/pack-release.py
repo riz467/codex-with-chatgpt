@@ -55,7 +55,7 @@ def pack(repo,capsule,out):
     archive_tree(src,out/'raw-source.tar');rawSha=sha((out/'raw-source.tar').read_bytes());rows=inventory(src)
     (src/'SOURCE-MANIFEST.json').write_text(canonical({'sourceCommit':commit,'sourceArchiveSha256':rawSha,'files':rows})+'\n')
     archive_tree(src,out/'source.tar')
-    assets=['deploy.py','capsule.py','broker.service','controller.service','executor@.service','provision-keys.py','pve-operation.py','run-approved.py']
+    assets=['deploy.py','capsule.py','evidence.py','broker.service','controller.service','executor@.service','provision-keys.py','pve-operation.py','run-approved.py']
     for name in assets:shutil.copyfile(repo/'scripts/linux-qualification'/name,out/name)
     pins={'sourceCommit':commit,'sourceArchiveSha256':rawSha,'runtimeCapsuleSha256':manifest['inventorySha256']}
     names=['capsule.tar','host-runtime.tar','raw-source.tar','source.tar',*assets]

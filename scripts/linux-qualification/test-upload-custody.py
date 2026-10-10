@@ -91,19 +91,19 @@ class Upload(unittest.TestCase):
             return {}
         q.python=python;q.call=call;q.events=events;return q
     def test_qga_order_rplus_flush_close_before_final_sha(self):
-        f=self.root/'local';f.write_bytes(b'public');q=self.qga();q.upload('capsule.tar',f,{'capsule':'','deploy':''},hashlib.sha256(b'public').hexdigest())
+        f=self.root/'local';f.write_bytes(b'public');q=self.qga();q.upload('capsule.tar',f,{'evidence':'','capsule':'','deploy':''},hashlib.sha256(b'public').hexdigest())
         self.assertEqual(q.events,['prepare','guest-file-open','check-before','guest-file-write','guest-file-flush','guest-file-close','check-final'])
     def test_qga_short_timeout_flush_close_and_final_failure_never_retry(self):
         f=self.root/'local';f.write_bytes(b'public')
         for failure in ['short','guest-file-open','guest-file-write','guest-file-flush','guest-file-close','final']:
             q=self.qga(failure)
-            with self.assertRaises((ValueError,TimeoutError)):q.upload('capsule.tar',f,{'capsule':'','deploy':''},hashlib.sha256(b'public').hexdigest())
+            with self.assertRaises((ValueError,TimeoutError)):q.upload('capsule.tar',f,{'evidence':'','capsule':'','deploy':''},hashlib.sha256(b'public').hexdigest())
             self.assertEqual(q.events.count('prepare'),1);self.assertLessEqual(q.events.count('guest-file-write'),1)
             if failure not in ['final']:self.assertTrue(q.execution_unknown)
     def test_qga_bad_source_or_name_no_calls(self):
         f=self.root/'local';f.write_bytes(b'public');q=self.qga()
         for name,digest in [('capsule.tar','0'*64),('../escape',hashlib.sha256(b'public').hexdigest())]:
-            with self.assertRaises(ValueError):q.upload(name,f,{'capsule':'','deploy':''},digest)
+            with self.assertRaises(ValueError):q.upload(name,f,{'evidence':'','capsule':'','deploy':''},digest)
         self.assertEqual(q.events,[])
     def test_old_guest_input_drift_fences(self):
         with self.assertRaisesRegex(ValueError,'PROTECTED_BASELINE_DRIFT'):deploy.check_baseline({'oldCampaignInputs':{'sha256':'old'}},{'oldCampaignInputs':{'sha256':'new'}})
@@ -141,7 +141,7 @@ class Upload(unittest.TestCase):
             if 'check_upload' in code:raise ValueError('UPLOAD_CUSTODY')
             return value
         q.python=fail_check
-        with self.assertRaises(TimeoutError):q.upload('capsule.tar',f,{'capsule':'','deploy':''},hashlib.sha256(b'public').hexdigest())
+        with self.assertRaises(TimeoutError):q.upload('capsule.tar',f,{'evidence':'','capsule':'','deploy':''},hashlib.sha256(b'public').hexdigest())
         self.assertTrue(q.execution_unknown);self.assertNotIn('guest-file-write',q.events)
     def test_missing_known_old_guest_inputs_fail_closed(self):
         with patch.object(deploy,'OLD_INPUT',self.root/'absent'),patch.object(deploy,'safe'):
@@ -173,8 +173,8 @@ class Upload(unittest.TestCase):
             elif 'input' in kw:
                 frame=kw['input'];header,tail=frame.split(b'\n',1);n=int(header);self.assertIn(b'receive_host_input',tail[:n]);self.assertLessEqual(n,1048576)
             return types.SimpleNamespace(returncode=0,stdout=b'{"result":"PASS"}')
-        with patch.object(t,'readonly_transport',return_value=evidence),patch.object(t.subprocess,'run',side_effect=command):t.run(bundle,hashlib.sha256(data).hexdigest(),'test-only-human-record')
-        self.assertEqual(len(calls),14) # prepare +12 small files + final invocation
+        with patch.object(t,'readonly_transport',return_value=evidence),patch.object(t,'process',side_effect=lambda journal,step,args,timeout,**kw:command(args,**kw)):t.run(bundle,hashlib.sha256(data).hexdigest(),'test-only-human-record')
+        self.assertEqual(len(calls),15) # prepare +13 small files + final invocation
     def test_actual_loader_complete_truncated_oversize_frames(self):
         import subprocess
         s=importlib.util.spec_from_file_location('t',Path(__file__).parent/'run-approved.py');t=importlib.util.module_from_spec(s);s.loader.exec_module(t)

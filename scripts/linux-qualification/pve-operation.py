@@ -13,6 +13,9 @@ import time
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from capsule import canonical,require,sha,file_sha
+from evidence import Journal,EvidenceFailure,OperationFailure,failure
+ACTIVE_JOURNAL=None
+def tracked(step,action):return ACTIVE_JOURNAL.run(step,action) if ACTIVE_JOURNAL else action()
 import importlib.util
 if 'campaign_keys' in sys.modules:keys=sys.modules['campaign_keys']
 else:
@@ -25,7 +28,7 @@ OLD_PACKAGE_SHA='35a3cb96e791f0e42d8e658dc54c4a676f6464b1e7ea22fa37ca16eff7c9068
 OLD_CLAIM_SHA='565f03dec95a83e7bf06270155f126e572759f11b68e81c474e586d13d5c44ba'
 OLD_PRE_SHA='bf0ea09ca232acaba960e04bdfbd4854d26253b5f25f41c8e65ec7095f3820bc'
 GUEST='/var/lib/ai-linux-qualification-custody-v2-input'
-HOST_PUBLIC_NAMES=frozenset(['DEPLOYMENT-PACKAGE.json','PRE-COMPLETED.json','capsule.tar','host-runtime.tar','raw-source.tar','source.tar','deploy.py','capsule.py','broker.service','controller.service','executor@.service','provision-keys.py','pve-operation.py','run-approved.py'])
+HOST_PUBLIC_NAMES=frozenset(['DEPLOYMENT-PACKAGE.json','PRE-COMPLETED.json','capsule.tar','host-runtime.tar','raw-source.tar','source.tar','deploy.py','capsule.py','evidence.py','broker.service','controller.service','executor@.service','provision-keys.py','pve-operation.py','run-approved.py'])
 def trusted_host_parents(path):
     import stat
     require(path in [ROOT,OLD_ROOT],'FIXED_HOST_DIRECTORY')
@@ -89,13 +92,14 @@ TARGETS=[(117,'executor','rc02-executor-117'),(116,'controller','ai-control-116'
 def guest_modules(sources):
     # In-memory trusted adapter only; python -I -B, no guest upload/import cache or directory creation.
     code='import sys,types,json; '
-    for name in ['capsule','deploy']:
+    for name in ['evidence','capsule','deploy']:
         code+='m=types.ModuleType('+repr(name)+'); m.__file__='+repr('/nonexistent/qualification-'+name+'.py')+'; sys.modules['+repr(name)+']=m; exec(compile('+repr(sources[name])+',m.__file__,"exec"),m.__dict__); '
     return code
 def observe(sources,pin,initial=True):
     require(os.geteuid()==0 and socket.gethostname()=='pve5','PVE_IDENTITY')
     errors=[];receipts={};resources={}
     try:resources=resource_pre()
+    except EvidenceFailure:raise
     except Exception:errors.append('PVE_RESOURCES_UNCONFIRMED')
     for vmid,role,_ in TARGETS:
         q=None
@@ -104,11 +108,13 @@ def observe(sources,pin,initial=True):
             code=guest_modules(sources)
             expression='deploy.readonly_pre('+repr(role)+','+repr(pin)+')' if initial else '{"snapshot":deploy.snapshot('+repr(role)+')}'
             receipts[role]=q.python(code+'import deploy; r='+expression+'; deploy.resource_gate('+repr(role)+',r["snapshot"]); print(json.dumps(r))',300)
+        except EvidenceFailure:raise
         except Exception:receipts[role]={'result':'UNKNOWN_OR_BLOCKED'};errors.append(role+'_OBSERVATION_UNCONFIRMED')
         finally:
             if q:q.close()
     retention=None
     try:retention=old_host_custody(sources)
+    except EvidenceFailure:raise
     except Exception:errors.append('OLD_CAMPAIGN_CUSTODY_UNCONFIRMED')
     result={'packageSha256':pin,'pveResources':resources,'targets':receipts,'oldHostCampaign':retention,'errors':errors}
     if errors:
@@ -121,24 +127,33 @@ def check_observation(old,new):
         a=old['targets'][role]['snapshot'];b=new['targets'][role]['snapshot']
         for key in ['hostname','bootId','units','protectedHashes','executorProtection','oldCampaignInputs']:
             require(a.get(key)==b.get(key),'ALL_TARGET_BASELINE_DRIFT:'+role+':'+key)
-def two_phase(pre,verify,execute,post,rollback):
+def two_phase(pre,verify,execute,post,rollback,journal=None):
     """Pure control flow used by the live composition and failure-injection regressions."""
-    evidence=pre() # BOTH targets must pass. No execute/cleanup if this fails.
-    verify(evidence);attempted=[]
+    run=journal.run if journal else lambda step,fn:fn()
+    evidence=run('all.pre',pre) # BOTH targets must pass. No execute/cleanup if this fails.
+    run('all.verify',lambda:verify(evidence));attempted=[]
     try:
         for target in TARGETS:
-            verify(evidence) # Both baselines immediately before EVERY target EXEC.
-            attempted.append(target);execute(target,evidence)
-        verify(evidence);post(evidence);verify(evidence)
-    except Exception:
+            run('all.pre-exec-verify',lambda:verify(evidence))
+            attempted.append(target);run('install.'+target[1],lambda:execute(target,evidence))
+        run('all.pre-post-verify',lambda:verify(evidence));run('all.post',lambda:post(evidence));run('all.final-verify',lambda:verify(evidence))
+    except EvidenceFailure:raise # Evidence failure fences further actions; never silently continue.
+    except Exception as error:
         outcomes=[]
         for target in reversed(attempted):
-            try:outcomes.append(rollback(target))
-            except Exception:outcomes.append({'result':'UNKNOWN_HUMAN_INSPECTION_REQUIRED'})
+            try:outcomes.append(run('rollback.'+target[1],lambda:rollback(target)))
+            except EvidenceFailure:raise
+            except Exception as rollback_error:
+                outcome={'result':'UNKNOWN_HUMAN_INSPECTION_REQUIRED'}
+                if journal:outcome['failure']=failure(rollback_error)
+                outcomes.append(outcome)
         # Failure is still failure, even if unit cleanup succeeded. Always attempt both-target POST.
-        try:verify(evidence);protection='BOTH_TARGETS_UNCHANGED'
+        try:run('all.failure-post',lambda:verify(evidence));protection='BOTH_TARGETS_UNCHANGED'
+        except EvidenceFailure:raise
         except Exception:protection='UNKNOWN_OR_DRIFT_HUMAN_INSPECTION_REQUIRED'
-        return {'result':'STOPPED_NO_REPLAY','rollback':outcomes,'finalProtection':protection}
+        outcome={'result':'STOPPED_NO_REPLAY','rollback':outcomes,'finalProtection':protection}
+        if journal:outcome.update(firstFailure=journal.first_failure,failure=failure(error))
+        return outcome
     return {'result':'PASS'}
 def start_fixed_units(evidence,verify,start):
     for vmid,unit in [(117,'ai-linux-qualification-broker.service'),(116,'ai-linux-qualification-controller.service')]:
@@ -146,8 +161,13 @@ def start_fixed_units(evidence,verify,start):
 def settle_original(q,pid):
     require(pid is not None,'ORIGINAL_GUEST_EXEC_PID_UNKNOWN')
     require(q.call('guest-exec-status',{'pid':pid}).get('exited') is True,'ORIGINAL_GUEST_EXEC_STILL_UNKNOWN')
+def ensure_child_settled(record):
+    require(not record.get('unsettledChild'),'UNSETTLED_CHILD_REQUIRES_HUMAN_INSPECTION')
 class Qga:
     def __init__(self,vmid):
+        self.vmid=vmid
+        tracked('qga.connect',lambda:self.connect(vmid))
+    def connect(self,vmid):
         require(vmid in [116,117],'FIXED_VMID');self.sock=socket.socket(socket.AF_UNIX);self.sock.settimeout(30)
         self.sock.connect('/var/run/qemu-server/'+str(vmid)+'.qga');self.reader=self.sock.makefile('rb');self.counter=0
         self.syncing=True
@@ -174,23 +194,35 @@ class Qga:
         proc=self.call('guest-exec',{'path':'/usr/bin/python3','arg':['-I','-B','-'],
           'input-data':base64.b64encode(code.encode()).decode(),'capture-output':True})
         self.last_exec_pid=proc['pid']
+        if ACTIVE_JOURNAL:ACTIVE_JOURNAL.emit('qga.process','STATUS',guestPid=self.last_exec_pid,vmid=getattr(self,'vmid',None),settled=False)
         until=time.monotonic()+timeout
         while time.monotonic()<until:
             r=self.call('guest-exec-status',{'pid':proc['pid']})
             if r.get('exited'):
                 self.execution_unknown=False
-                if r.get('exitcode')!=0:
-                    # Only adapter-defined uppercase diagnostic, never traceback, credential data or command args.
-                    import re
-                    error=base64.b64decode(r.get('err-data','')).decode(errors='replace')
-                    match=re.search(r'ValueError: ([A-Z_]+)(?:\n|$)',error)
-                    raise ValueError(match.group(1) if match else 'GUEST_FIXED_OPERATION_FAILED')
+                fields={'guestPid':proc['pid'],'exited':True,'exitCode':r.get('exitcode'),'signal':r.get('signal'),'settled':True,'stdoutSha256':sha(base64.b64decode(r.get('out-data',''))),'stderrSha256':sha(base64.b64decode(r.get('err-data','')))}
+                if ACTIVE_JOURNAL:ACTIVE_JOURNAL.emit('qga.process','STATUS',**fields)
+                if r.get('exitcode')!=0 or r.get('signal'):
+                    try:
+                        guest=json.loads(base64.b64decode(r.get('out-data','')))
+                        allowed={'private-input','identity','package','pre-binding','replay-gate','snapshot','baseline','resource','install-claim','account','directories','runtime','private-config','units','daemon-reload','post','rollback','entry'}
+                        if not isinstance(guest,dict) or not isinstance(guest.get('failure'),dict):raise ValueError('GUEST_FAILURE_SCHEMA')
+                        if ACTIVE_JOURNAL and guest.get('result')=='BLOCKED' and guest.get('failedStep') in allowed:
+                            ACTIVE_JOURNAL.emit('guest.'+guest['failedStep'],'FAIL',**__import__('evidence').clean(guest['failure']))
+                        if guest['failure'].get('classification')=='EVIDENCE_FAILURE':
+                            self.execution_unknown=True;self.unsettled_child=True
+                            raise EvidenceFailure('GUEST_EVIDENCE_FAILURE')
+                        if guest.get('failure',{}).get('settled') is False:
+                            self.execution_unknown=True;self.unsettled_child=True
+                    except (ValueError,KeyError,TypeError):
+                        self.execution_unknown=True;self.unsettled_child=True
+                    raise OperationFailure('SIGNAL' if r.get('signal') else 'NONZERO_EXIT',**fields)
                 data=base64.b64decode(r.get('out-data',''));require(len(data)<=4*1024*1024,'GUEST_RECEIPT_LIMIT');return json.loads(data)
             time.sleep(.5)
-        raise ValueError('GUEST_OUTCOME_UNKNOWN_NO_REPLAY')
+        raise OperationFailure('TIMEOUT',guestPid=proc['pid'],timeoutSeconds=timeout,settled=False)
     def upload(self,name,file,sources,digest):
         import re
-        require(name in {'DEPLOYMENT-PACKAGE.json','capsule.tar','host-runtime.tar','raw-source.tar','source.tar','deploy.py','capsule.py','broker.service','controller.service','executor@.service','provision-keys.py','pve-operation.py','run-approved.py'},'FIXED_UPLOAD_NAME')
+        require(name in {'DEPLOYMENT-PACKAGE.json','capsule.tar','host-runtime.tar','raw-source.tar','source.tar','deploy.py','capsule.py','evidence.py','broker.service','controller.service','executor@.service','provision-keys.py','pve-operation.py','run-approved.py'},'FIXED_UPLOAD_NAME')
         require(re.fullmatch('[a-f0-9]{64}',digest) is not None and file_sha(file)==digest,'UPLOAD_SOURCE_SHA')
         size=file.stat().st_size;prefix=guest_modules(sources)+'import deploy; '
         identity=self.python(prefix+'print(json.dumps(deploy.prepare_upload('+repr(name)+')))')
@@ -220,6 +252,7 @@ def resource_pre():
         r=[x for x in guests if x.get('vmid')==vmid and x.get('type')=='qemu'];require(len(r)==1 and r[0]['name']==name and r[0]['status']=='running','LIVE_VM_IDENTITY')
     return {'memAvailableKiB':mem['MemAvailable'],'guestReservationsBytes':sum(int(r.get('maxmem',0)) for r in guests)}
 def main(pin,approval,baseline_sha):
+    global ACTIVE_JOURNAL
     require(approval.strip(),'ACTUAL_HUMAN_APPROVAL_REFERENCE_REQUIRED');pre=resource_pre();require(ROOT.is_dir() and not ROOT.is_symlink(),'FIXED_INPUT_ROOT')
     m=json.loads((ROOT/'DEPLOYMENT-PACKAGE.json').read_text());require(sha((ROOT/'DEPLOYMENT-PACKAGE.json').read_bytes())==pin,'APPROVED_PACKAGE_SHA')
     require(m['targetVmids']==[116,117] and m['productionDispatch']=='CLOSED' and m['authority']=='NONE','FIXED_SCOPE')
@@ -228,8 +261,9 @@ def main(pin,approval,baseline_sha):
     host_file_identity(ROOT/'DEPLOYMENT-PACKAGE.json');host_file_identity(ROOT/'PRE-COMPLETED.json')
     require(file_sha(ROOT/'PRE-COMPLETED.json')==baseline_sha,'PRE_RECEIPT_CUSTODY')
     approved_pre=json.loads((ROOT/'PRE-COMPLETED.json').read_text())
-    sources={name:(ROOT/(name+'.py')).read_text() for name in ['capsule','deploy']}
+    sources={name:(ROOT/(name+'.py')).read_text() for name in ['evidence','capsule','deploy']}
     check_observation(approved_pre,observe(sources,pin,True)) # All PRE and both baselines BEFORE claim/key/guest writes.
+    ACTIVE_JOURNAL=Journal(ROOT/'operation-events')
     claim=ROOT/'APPROVED-EXECUTION-CLAIM.json';fd=os.open(claim,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
     try:os.write(fd,canonical({'packageSha256':pin,'approvalReference':approval,'pvePre':pre}).encode());os.fsync(fd)
     finally:os.close(fd)
@@ -237,39 +271,42 @@ def main(pin,approval,baseline_sha):
     receipts={'all-target-readonly-pre':approved_pre};installed=[];custody=None;unknown={}
     def record_unknown(q,vmid,role):
         if getattr(q,'execution_unknown',True):
-            unknown[vmid]=getattr(q,'last_exec_pid',None);receipts[role+'-unknownGuestExec']={'pid':unknown[vmid],'settled':False}
+            unknown[vmid]=getattr(q,'last_exec_pid',None);receipts[role+'-unknownGuestExec']={'pid':unknown[vmid],'settled':False,'unsettledChild':True}
     def verify(evidence):
         try:
-            current=observe(sources,pin,False);receipts['latestBothTargetProtection']=current;check_observation(evidence,current)
+            current=observe(sources,pin,False);receipts.setdefault('protectionObservations',[]).append(current);receipts['latestBothTargetProtection']=current;check_observation(evidence,current)
         except Exception as error:
-            if hasattr(error,'evidence'):receipts['latestBothTargetProtection']=error.evidence
+            if hasattr(error,'evidence'):
+                receipts.setdefault('protectionObservations',[]).append(error.evidence);receipts['latestBothTargetProtection']=error.evidence
             raise
     def operation(vmid,role,mode,secret=None):
         q=Qga(vmid)
         try:
             code='import sys,runpy,io,json,hashlib; from pathlib import Path; p=Path('+repr(GUEST+'/deploy.py')+'); assert hashlib.sha256(p.read_bytes()).hexdigest()=='+repr(m['files']['deploy.py'])+'; assert hashlib.sha256(Path('+repr(GUEST+'/capsule.py')+').read_bytes()).hexdigest()=='+repr(m['files']['capsule.py'])+'; sys.argv=[str(p),'+repr(mode)+','+repr(role)+','+repr(pin)+']; '
             if secret is not None:code+='sys.stdin=io.TextIOWrapper(io.BytesIO('+repr(json.dumps(secret).encode())+')); '
-            return q.python(code+'runpy.run_path(str(p),run_name="__main__")',300)
+            return tracked(role+'.'+mode,lambda:q.python(code+'runpy.run_path(str(p),run_name="__main__")',300))
         except Exception:record_unknown(q,vmid,role);raise
         finally:q.close()
     def install(target,evidence):
         nonlocal custody
         vmid,role,hostname=target
         # This is EXEC, not PRE. Key generation, mkdir and transfer begin only after ALL PRE pass.
-        if custody is None:custody=keys.provision(ROOT/'private-campaign-keys')
+        if custody is None:custody=tracked('keys.generate',lambda:keys.provision(ROOT/'private-campaign-keys'))
         q=Qga(vmid)
         try:
             receipts[role+'-prepare']=q.python('import os,socket,json; from pathlib import Path; assert os.geteuid()==0 and socket.gethostname()=='+repr(hostname)+'; p=Path('+repr(GUEST)+'); p.mkdir(mode=0o700); print(json.dumps({"prepared":True}))')
-            for name in ['DEPLOYMENT-PACKAGE.json',*m['files']]:q.upload(name,ROOT/name,sources,pin if name=='DEPLOYMENT-PACKAGE.json' else m['files'][name])
+            for name in ['DEPLOYMENT-PACKAGE.json',*m['files']]:tracked('upload.'+role+'.'+name.replace('@','template').lower(),lambda:q.upload(name,ROOT/name,sources,pin if name=='DEPLOYMENT-PACKAGE.json' else m['files'][name]))
             # Persist the genuine earlier no-write PRE only now, after both target passes.
             q.python(guest_modules(sources)+'import deploy; deploy.write(deploy.INPUT/'+repr(role+'-PRE.json')+','+repr(canonical(evidence['targets'][role]))+'); print(json.dumps({"preEvidencePersistedInExec":True}))')
         except Exception:record_unknown(q,vmid,role);raise
         finally:q.close()
         verify(evidence);installed.append((vmid,role))
-        receipts[role+'-exec']=operation(vmid,role,'exec',keys.role_input(custody,role));verify(evidence);receipts[role+'-post']=operation(vmid,role,'post')
+        secret=tracked('keys.role-input.'+role,lambda:keys.role_input(custody,role))
+        receipts[role+'-exec']=operation(vmid,role,'exec',secret);verify(evidence);receipts[role+'-post']=operation(vmid,role,'post')
     def rollback(target):
         vmid,role,_=target
         if vmid in unknown:
+            ensure_child_settled(receipts[role+'-unknownGuestExec'])
             q=Qga(vmid)
             try:settle_original(q,unknown[vmid]);receipts[role+'-unknownGuestExec']['settled']=True
             finally:q.close()
@@ -297,7 +334,7 @@ def main(pin,approval,baseline_sha):
         try:
             receipts['linux-control-report']=q.python('import json,subprocess,re; from pathlib import Path; root=Path("/var/lib/ai-linux-qualification-controller"); rows=list(root.glob("linux-qualification-*/task.json")); assert len(rows)==1; l=json.loads(rows[0].read_text()); task=l["taskId"]; assert re.fullmatch("linux-qualification-[a-f0-9]{32}",task); r=subprocess.run(["/usr/sbin/runuser","-u","ai-qualification-controller","--","/opt/ai-linux-qualification-controller/host-runtime/usr/bin/node","/opt/ai-linux-qualification-controller/source/dist/linux-qualification/cli.js","report",task],capture_output=True,text=True,timeout=15); assert r.returncode==0; report=json.loads(r.stdout); assert report["result"]=="FIXED_13_SUITE_QUALIFICATION_PASS" and report["authority"]=="NONE" and report["productionDispatch"]=="CLOSED"; print(json.dumps(report))')
         finally:q.close()
-    outcome=two_phase(lambda:approved_pre,verify,install,post,rollback)
+    outcome=two_phase(lambda:approved_pre,verify,install,post,rollback,ACTIVE_JOURNAL)
     receipts['result']='FIXED_13_SUITE_QUALIFICATION_COMPLETED_NOT_PROVIDER_E2E' if outcome['result']=='PASS' else 'STOPPED_EXECUTION_OUTCOME_UNKNOWN_NO_REPLAY'
     receipts['controlFlow']=outcome
     (ROOT/'EXECUTION-RECEIPT.json').write_text(json.dumps(receipts,indent=2)+'\n');print(json.dumps(receipts))

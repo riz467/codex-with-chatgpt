@@ -16,10 +16,19 @@ import re
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from capsule import canonical, inventory, require, sha, file_sha, verify_archive
+from evidence import Journal,EvidenceFailure,failure,process
+EVENTS=None
+CURRENT_STEP=None
+def stage(step):
+    global CURRENT_STEP
+    if EVENTS:
+        if CURRENT_STEP:EVENTS.emit(CURRENT_STEP,'SUCCESS')
+        EVENTS.emit(step,'BEGIN')
+    CURRENT_STEP=step
 
 INPUT=Path('/var/lib/ai-linux-qualification-custody-v2-input')
 OLD_INPUT=Path('/var/lib/ai-linux-qualification-approved-input')
-PUBLIC_NAMES=frozenset(['DEPLOYMENT-PACKAGE.json','capsule.tar','host-runtime.tar','raw-source.tar','source.tar','deploy.py','capsule.py','broker.service','controller.service','executor@.service','provision-keys.py','pve-operation.py','run-approved.py'])
+PUBLIC_NAMES=frozenset(['DEPLOYMENT-PACKAGE.json','capsule.tar','host-runtime.tar','raw-source.tar','source.tar','deploy.py','capsule.py','evidence.py','broker.service','controller.service','executor@.service','provision-keys.py','pve-operation.py','run-approved.py'])
 def input_directory():
     safe(INPUT);s=INPUT.lstat()
     require(stat.S_ISDIR(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o700,'INPUT_DIRECTORY_CUSTODY')
@@ -191,6 +200,8 @@ def resource_gate(role,s):
     require(s['memAvailableKiB']>=(3407872 if role=='executor' else 524288) and s['diskFreeBytes']>=8*1024**3,'RESOURCE_GATE')
     require(all('avg10=0.00' in row for row in Path('/proc/pressure/memory').read_text().splitlines()),'GUEST_MEMORY_PRESSURE')
 def run(args,check=True):
+    if EVENTS and check:
+        return process(EVENTS,'child.'+(CURRENT_STEP or 'entry'),args,30,text=True,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LANG':'C'}).stdout
     p=subprocess.run(args,capture_output=True,text=True,timeout=30,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LANG':'C'})
     if check:require(p.returncode==0,'FIXED_COMMAND_FAILED')
     return p.stdout
@@ -241,11 +252,11 @@ def old_guest_custody(role):
         return {'present':False}
     safe(OLD_INPUT);s=OLD_INPUT.lstat()
     require(stat.S_ISDIR(s.st_mode) and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o700,'OLD_EXECUTOR_INPUT_CUSTODY')
-    require({p.name for p in OLD_INPUT.iterdir()}==PUBLIC_NAMES|{'executor-PRE.json'},'OLD_INPUT_INVENTORY')
+    require({p.name for p in OLD_INPUT.iterdir()}==(PUBLIC_NAMES-{'evidence.py'})|{'executor-PRE.json'},'OLD_INPUT_INVENTORY')
     require(file_sha(OLD_INPUT/'DEPLOYMENT-PACKAGE.json')=='35a3cb96e791f0e42d8e658dc54c4a676f6464b1e7ea22fa37ca16eff7c9068d','OLD_INPUT_PACKAGE_SHA')
     require(file_sha(OLD_INPUT/'executor-PRE.json')=='1011773724108ad94dc99939f0afc457fa6ddf471c857ac5e74adc8da9c6491d','OLD_INPUT_PRE_SHA')
     manifest=json.loads((OLD_INPUT/'DEPLOYMENT-PACKAGE.json').read_text())
-    for name in PUBLIC_NAMES|{'executor-PRE.json'}:
+    for name in (PUBLIC_NAMES-{'evidence.py'})|{'executor-PRE.json'}:
         p=OLD_INPUT/name;s=p.lstat();expected_mode=0o600 if name=='executor-PRE.json' else 0o666
         # Known old0666 inputs are sealed by the root0700 directory, not repaired or reused.
         require(stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_nlink==1 and stat.S_IMODE(s.st_mode)==expected_mode,'OLD_INPUT_RETAINED_METADATA')
@@ -268,16 +279,17 @@ def extract(archive,target,digest):
             else:
                 p.parent.mkdir(mode=0o755,parents=True,exist_ok=True);write(p,t.extractfile(member).read(),mode=member.mode)
 def execute(mode,role,pin,secretInput=None):
+    stage('identity')
     r=ROLES[role];require(os.geteuid()==0 and socket.gethostname()==r['hostname'],'ROOT_TARGET_IDENTITY')
-    m=package(pin);receipt=INPUT/(role+'-PRE.json');created=INPUT/(role+'-CREATED.json')
+    stage('package');m=package(pin);receipt=INPUT/(role+'-PRE.json');created=INPUT/(role+'-CREATED.json')
     if mode=='pre':
         raise ValueError('USE_READONLY_PRE_NO_GUEST_PACKAGE_OR_WRITES')
-    require(receipt.exists(),'PRE_REQUIRED');pre=json.loads(receipt.read_text());require(pre['packageSha256']==pin,'PRE_PACKAGE_BINDING')
+    stage('pre-binding');require(receipt.exists(),'PRE_REQUIRED');pre=json.loads(receipt.read_text());require(pre['packageSha256']==pin,'PRE_PACKAGE_BINDING')
     if mode=='exec':
-        require(not created.exists(),'EXEC_REPLAY_REJECTED');current=snapshot(role)
-        check_baseline(pre['snapshot'],current);resource_gate(role,current)
+        stage('replay-gate');require(not created.exists(),'EXEC_REPLAY_REJECTED');stage('snapshot');current=snapshot(role)
+        stage('baseline');check_baseline(pre['snapshot'],current);stage('resource');resource_gate(role,current)
         # Durable claim first. A failed install is never automatically replayed or deleted.
-        write(created,canonical({'packageSha256':pin,'role':role,'targets':{k:str(r[k]) for k in ['root','state','secrets']}}))
+        stage('install-claim');write(created,canonical({'packageSha256':pin,'role':role,'targets':{k:str(r[k]) for k in ['root','state','secrets']}}))
         require(isinstance(secretInput,dict),'PRIVATE_PROVISION_INPUT_REQUIRED')
         require(not r['root'].exists() and not r['state'].exists() and not r['secrets'].exists() and not Path('/etc/systemd/system',r['unit']).exists(),'NEW_TARGETS_ONLY')
         try:pwd.getpwnam(r['account']);raise ValueError('ACCOUNT_EXISTS')
@@ -289,14 +301,15 @@ def execute(mode,role,pin,secretInput=None):
             require(not run(['systemctl','list-units','ai-linux-qualification-*.service','--state=running','--no-legend','--no-pager']).strip(),'EXECUTOR_BUSY')
             require(not Path('/var/lib/ai-linux-qualification-broker').exists() and not Path('/etc/systemd/system/ai-linux-qualification-executor@.service').exists(),'NEW_BROKER_TARGETS_ONLY')
             require(not run(['getent','group','ai-qualification-evidence'],False).strip(),'EVIDENCE_GROUP_EXISTS')
-        run(['useradd','--system','--user-group','--no-create-home','--home-dir','/nonexistent','--shell','/usr/sbin/nologin',r['account']]);a=pwd.getpwnam(r['account'])
+        stage('account');run(['useradd','--system','--user-group','--no-create-home','--home-dir','/nonexistent','--shell','/usr/sbin/nologin',r['account']]);a=pwd.getpwnam(r['account'])
         evidence_gid=a.pw_gid
         if role=='executor':
             import grp
             run(['groupadd','--system','ai-qualification-evidence']);evidence_gid=grp.getgrnam('ai-qualification-evidence').gr_gid
-        r['state'].mkdir(mode=0o700);os.chown(r['state'],a.pw_uid,evidence_gid);os.chmod(r['state'],0o2750 if role=='executor' else 0o700)
+        stage('directories');r['state'].mkdir(mode=0o700);os.chown(r['state'],a.pw_uid,evidence_gid);os.chmod(r['state'],0o2750 if role=='executor' else 0o700)
         r['secrets'].mkdir(mode=0o700 if role=='executor' else 0o750);os.chown(r['secrets'],0,0 if role=='executor' else a.pw_gid)
         r['root'].mkdir(mode=0o755)
+        stage('runtime');
         if role=='executor':extract(INPUT/'capsule.tar',r['root']/'runtime',m['files']['capsule.tar'])
         extract(INPUT/'host-runtime.tar',r['root']/'host-runtime',m['files']['host-runtime.tar'])
         extract(INPUT/'source.tar',r['root']/'source',m['files']['source.tar'])
@@ -305,19 +318,21 @@ def execute(mode,role,pin,secretInput=None):
         import shutil
         shutil.copytree(r['root']/'host-runtime/runtime/node_modules',r['root']/'node_modules',copy_function=shutil.copyfile)
         write(r['root']/'source-pins.json',canonical(m['sourcePins']),mode=0o644)
-        keys=['client-public.pem','broker-private.pem','broker-public.pem','tls-private.pem','tls-cert.pem'] if role=='executor' else ['client-private.pem','broker-public.pem','tls-cert.pem','tls-cert.sha256']
+        stage('private-config');keys=['client-public.pem','broker-private.pem','broker-public.pem','tls-private.pem','tls-cert.pem'] if role=='executor' else ['client-private.pem','broker-public.pem','tls-cert.pem','tls-cert.sha256']
         require(set(secretInput)==set(keys),'PRIVATE_PROVISION_SCOPE')
         for name in keys:
             require(isinstance(secretInput[name],str) and len(secretInput[name])<=16384,'PRIVATE_INPUT_LIMIT');write(r['secrets']/name,secretInput[name],gid=0 if role=='executor' else a.pw_gid,mode=0o600 if role=='executor' else 0o640)
+        stage('units');
         if role=='executor':
             Path('/var/lib/ai-linux-qualification-broker').mkdir(mode=0o700)
             write(Path('/etc/systemd/system/ai-linux-qualification-executor@.service'),(INPUT/'executor@.service').read_bytes(),mode=0o644)
         unit=(INPUT/r['unitFile']).read_bytes();write(Path('/etc/systemd/system')/r['unit'],unit,mode=0o644)
-        run(['systemctl','daemon-reload'])
+        stage('daemon-reload');run(['systemctl','daemon-reload'])
         # No enable/onboot: temporary campaign units; controller starts only after executor installation POST.
         return {'phase':'EXEC','result':'INSTALLED_NOT_STARTED','role':role}
     require(created.exists() and json.loads(created.read_text())['packageSha256']==pin,'CREATED_CUSTODY')
     if mode=='post':
+        stage('post')
         s=snapshot(role);check_baseline(pre['snapshot'],s);resource_gate(role,s)
         if role=='executor':require(sha(canonical(inventory(r['root']/'runtime')).encode())==m['sourcePins']['runtimeCapsuleSha256'],'DEPLOYED_CAPSULE_SHA')
         require(sha(canonical(inventory(r['root']/'host-runtime')).encode())==m['hostRuntimeInventorySha256'],'DEPLOYED_HOST_RUNTIME_SHA')
@@ -327,6 +342,7 @@ def execute(mode,role,pin,secretInput=None):
         write(INPUT/(role+'-POST.json'),canonical({'phase':'POST','result':'PASS','snapshot':s,'linux13Suite':'NOT_RUN'}))
         return {'phase':'POST','result':'PASS','role':role,'linux13Suite':'NOT_RUN'}
     if mode=='rollback':
+        stage('rollback')
         # Keep account, source, evidence and private credentials inaccessible; never broad-delete or alter existing VM.
         run(['systemctl','stop',r['unit']]);require('ActiveState=inactive' in run(['systemctl','show',r['unit'],'-p','ActiveState']),'ROLLBACK_UNIT_NOT_STOPPED')
         if role=='executor':
@@ -366,9 +382,17 @@ def readonly_pre(role,pin):
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('mode',choices=['pre','exec','post','rollback']);p.add_argument('role',choices=list(ROLES));p.add_argument('approvedPackageSha256');a=p.parse_args()
     try:
+        EVENTS=Journal(INPUT/(a.role+'-'+a.mode+'-events'))
+        stage('private-input')
         secret=None
         if a.mode=='exec':
             data=sys.stdin.buffer.read(65537);require(len(data)<=65536,'PRIVATE_INPUT_LIMIT');secret=json.loads(data)
-        print(json.dumps(execute(a.mode,a.role,a.approvedPackageSha256,secret)))
-    except Exception:
-        print(json.dumps({'result':'BLOCKED','phase':a.mode,'role':a.role,'automaticReplay':False}));sys.exit(2)
+        result=execute(a.mode,a.role,a.approvedPackageSha256,secret)
+        if EVENTS and CURRENT_STEP:EVENTS.emit(CURRENT_STEP,'SUCCESS')
+        print(json.dumps(result))
+    except Exception as error:
+        fields=failure(error)
+        if EVENTS and not EVENTS.broken:
+            try:EVENTS.emit(CURRENT_STEP or 'entry','FAIL',**fields)
+            except EvidenceFailure:fields=failure(EvidenceFailure())
+        print(json.dumps({'result':'BLOCKED','phase':a.mode,'role':a.role,'automaticReplay':False,'failedStep':CURRENT_STEP or 'entry','failure':fields,'pid':os.getpid(),'parentPid':os.getppid()}));sys.exit(2)

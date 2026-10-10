@@ -23,7 +23,7 @@ class Assets(unittest.TestCase):
     def setUp(self):self.tmp=tempfile.TemporaryDirectory(prefix='qualification-assets-');self.root=Path(self.tmp.name)
     def tearDown(self):self.tmp.cleanup()
     def valid_bundle(self):
-        names=['capsule.tar','host-runtime.tar','raw-source.tar','source.tar','deploy.py','capsule.py','broker.service','controller.service','executor@.service','provision-keys.py','pve-operation.py','run-approved.py']
+        names=['capsule.tar','host-runtime.tar','raw-source.tar','source.tar','deploy.py','capsule.py','evidence.py','broker.service','controller.service','executor@.service','provision-keys.py','pve-operation.py','run-approved.py']
         for name in names:(self.root/name).write_bytes(b'fixed public bytes')
         m={'schema':1,'targetVmids':[116,117],'authority':'NONE','productionDispatch':'CLOSED','files':{name:capsule.file_sha(self.root/name) for name in names}}
         (self.root/'DEPLOYMENT-PACKAGE.json').write_text(json.dumps(m));return capsule.file_sha(self.root/'DEPLOYMENT-PACKAGE.json')
@@ -235,6 +235,6 @@ class Assets(unittest.TestCase):
                 return {'snapshot':{}}
             def close(self):pass
         with patch.object(pve.os,'geteuid',return_value=0,create=True),patch.object(pve.socket,'gethostname',return_value='pve5'),patch.object(pve,'resource_pre',side_effect=ValueError('HEADROOM')),patch.object(pve,'Qga',FakeQga):
-            with self.assertRaisesRegex(ValueError,'ALL_TARGET_OBSERVATION_BLOCKED') as caught:pve.observe({'capsule':'','deploy':''},'a'*64,False)
+            with self.assertRaisesRegex(ValueError,'ALL_TARGET_OBSERVATION_BLOCKED') as caught:pve.observe({'evidence':'','capsule':'','deploy':''},'a'*64,False)
             self.assertEqual(events,[117,116]);self.assertIn('controller',caught.exception.evidence['targets'])
 if __name__=='__main__':unittest.main(verbosity=2)
