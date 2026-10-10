@@ -55,6 +55,10 @@ import { acquireProposalOAuthCredential, assertCurrentOAuthCredential, assertOAu
 import { MAX_PROPOSAL_BYTES, parseProposal } from "./proposal.js";
 import { HOST_REVIEW_INSTRUCTION, inspectReviewContext, assertReviewDispatchCurrent, type ReviewContext } from "./review-context.js";
 import { parseFindings } from "./review-evidence.js";
+import { assertNativeHostTurnCapability, type NativeHostTurnCapability } from "../../linux-development/native-credential.js";
+import { prepareFixedNativeData, parseFixedNativeResponse } from "../../linux-development/native-fixed-data.js";
+import { assertAuthenticatedNativeWorkerTurn } from "../../linux-development/native-receipt.js";
+import type { NativeWorkerInput } from "../../linux-development/native-worker.js";
 
 const configContent = JSON.stringify({ default_agent: AGENT,
   agents: { [AGENT]: { system: HOST_INSTRUCTION, permissions: [DENY], steps: 1 } }, snapshots: false });
@@ -188,9 +192,69 @@ export async function dispatchAdvisoryReview(handle: ReviewContext) {
   }
 }
 
+/** Trusted in-process worker seam only. Existing public production dispatch and
+ * OAuth acquisition remain unconditionally closed. Both opaque handles must be
+ * acquired inside the private admitted worker; serialized objects are rejected.
+ * Proposer input must contain genuine request/candidate handles; reviewer input
+ * must be a genuine ReviewContext. hostExpected is independently host-sourced.
+ * This does not certify authentication, kernel containment or native E2E. */
+export async function runNativeHostTurn(role: "proposer" | "reviewer", hostFixedInput: unknown,
+  credential: HostOAuthHandle, capability: NativeHostTurnCapability, hostExpected?: unknown) {
+  let accepted = false;
+  try {
+    if (role !== "proposer" && role !== "reviewer") throw new Error("Invalid native role");
+    assertNativeHostTurnCapability(capability, role, true);
+    assertCurrentOAuthCredential(credential);
+    const review = role === "reviewer";
+    const prompt = review ? inspectReviewContext(hostFixedInput as ReviewContext) : prepareProposalInput(hostFixedInput, hostExpected);
+    const recheck = () => {
+      assertNativeHostTurnCapability(capability, role);
+      if (review) assertReviewDispatchCurrent(hostFixedInput as ReviewContext);
+    };
+    recheck();
+    assertOAuthSecretsAbsent(credential, canonicalJson(prompt));
+    inspectInstalledPackages();
+    const terminal = assertProposalTerminal(await runEmbedded(prompt, credential, () => { accepted = true; }, review, recheck));
+    recheck();
+    assertOAuthSecretsAbsent(credential, terminal.assistants[0].text);
+    const evidence = { nativeSessionId: terminal.nativeSessionId, nativeUserMessageId: terminal.submittedUserId,
+      nativeAssistantMessageId: terminal.assistants[0].id, completed: terminal.assistants[0].completed,
+      terminal: "SUCCEEDED_IDLE" as const, providerTurns: 1 as const };
+    if (review) {
+      const context = inspectReviewContext(hostFixedInput as ReviewContext);
+      return freeze({ result: "REVIEW_RECEIVED" as const,
+        findings: parseFindings(terminal.assistants[0].text, context.binding, context.digest), evidence });
+    }
+    return freeze({ result: "PROPOSAL_RECEIVED" as const,
+      proposal: parseProposal(terminal.assistants[0].text, prompt.binding, hostExpected), evidence });
+  } catch {
+    return freeze({ result: accepted ? "DISPATCH_OUTCOME_UNKNOWN" as const : "FAILED_BEFORE_DISPATCH" as const,
+      code: "NATIVE_HOST_TURN_BLOCKED" as const });
+  }
+}
+
+/** Fixed DATA-only native path reuses the same pinned one-turn embedded core.
+ * No synthetic FAST evidence or serialized ReviewContext is constructed. */
+export async function runNativeFixedDataTurn(input: NativeWorkerInput, credential: HostOAuthHandle, capability: NativeHostTurnCapability) {
+  let accepted = false;
+  try {
+    const prompt = prepareFixedNativeData(input), role = prompt.input.role;
+    assertNativeHostTurnCapability(capability, role, true);
+    const recheck = () => { assertNativeHostTurnCapability(capability, role); assertAuthenticatedNativeWorkerTurn(role, prompt.inputDigest); };
+    recheck(); assertCurrentOAuthCredential(credential); assertOAuthSecretsAbsent(credential, canonicalJson(prompt));
+    inspectInstalledPackages();
+    const terminal = assertProposalTerminal(await runEmbedded(prompt, credential, () => { accepted = true; }, role === "reviewer", recheck, true));
+    recheck(); assertOAuthSecretsAbsent(credential, terminal.assistants[0].text);
+    const data = parseFixedNativeResponse(prompt.input, terminal.assistants[0].text);
+    return freeze({ result: "NATIVE_FIXED_DATA_RECEIVED" as const, sessionId: terminal.nativeSessionId,
+      proposal: "proposal" in data ? data.proposal : null, review: "review" in data ? data.review : null,
+      providerTurns: 1 as const, terminal: "SUCCEEDED_IDLE" as const });
+  } catch { return freeze({ result: accepted ? "DISPATCH_OUTCOME_UNKNOWN" as const : "FAILED_BEFORE_DISPATCH" as const, code: "NATIVE_FIXED_DATA_BLOCKED" as const }); }
+}
+
 async function runEmbedded(prompt: { user: string; system: string }, credential: HostOAuthHandle, markAccepted: () => void,
-  review = false, assertAdmission?: () => void) {
-  const system = review ? HOST_REVIEW_INSTRUCTION : HOST_INSTRUCTION;
+  review = false, assertAdmission?: () => void, fixedData = false) {
+  const system = fixedData ? prompt.system : review ? HOST_REVIEW_INSTRUCTION : HOST_INSTRUCTION;
   const configContent = JSON.stringify({ default_agent: AGENT,
     agents: { [AGENT]: { system, permissions: [DENY], steps: 1 } }, snapshots: false });
   const root = mkdtempSync(join(tmpdir(), "dl2-d1-")), project = join(root, "project");
@@ -392,7 +456,10 @@ async function runEmbedded(prompt: { user: string; system: string }, credential:
           const inventory = yield* plugins.list();
           if (inventory.some(p => p.source?.type !== "builtin" || p.state.status !== "active")) return yield* die();
           const selection = yield* ctx.select(session.id), snapshot = yield* tools.snapshot(agent.permissions);
-          (review ? assertReviewCoreBoundary : assertProposalCoreBoundary)(JSON.parse(JSON.stringify({ version: packages[0].version, config: configContent, project: false, global: false,
+          (fixedData ? (input: unknown) => {
+            const x = parseStrict(boundarySchema.extend({ config: z.literal(configContent) }), input);
+            if (!isDeepStrictEqual([...x.plugins].sort(), [...INTERNAL_PLUGINS].sort())) throw new Error("Core plugin inventory changed");
+          } : review ? assertReviewCoreBoundary : assertProposalCoreBoundary)(JSON.parse(JSON.stringify({ version: packages[0].version, config: configContent, project: false, global: false,
             wellKnown: yield* wellKnown.entries(), externalOperations: yield* cp.operations(), plugins: inventory.map(p => p.id),
             discoveryProject: discovery.project, discoveryGlobal: discovery.global, discoveryEntries: yield* discovery.list(),
             builtIns: yield* noInstructions.load(), skills: yield* skills.list(), skillInstructions: yield* noInstructions.load(),
